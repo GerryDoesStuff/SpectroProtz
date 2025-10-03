@@ -462,6 +462,11 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         subtract_blank = blank_cfg.get("subtract", blank_cfg.get("enabled", True))
         require_blank = blank_cfg.get("require", subtract_blank)
+        validate_flag = blank_cfg.get("validate_metadata")
+        if validate_flag is None:
+            validate_flag = True
+        else:
+            validate_flag = bool(validate_flag)
         fallback_blank = blank_cfg.get("default") or blank_cfg.get("fallback")
 
         processed_samples: list[Spectrum] = []
@@ -477,6 +482,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                         working,
                         blank_spec,
                         blank_cfg,
+                        enforce=validate_flag,
                     )
                     working = pipeline.subtract_blank(working, blank_spec, audit=audit)
                 elif require_blank:
@@ -551,6 +557,8 @@ class UvVisPlugin(SpectroscopyPlugin):
         sample: Spectrum,
         blank: Spectrum,
         blank_cfg: Dict[str, object],
+        *,
+        enforce: bool = True,
     ) -> Dict[str, object]:
         """Validate metadata compatibility between ``sample`` and ``blank``.
 
@@ -580,16 +588,27 @@ class UvVisPlugin(SpectroscopyPlugin):
             else self.DEFAULT_BLANK_TIME_WINDOW_MINUTES
         )
         time_delta_minutes: float | None = None
+        violations: List[Dict[str, object]] = []
         if sample_time and blank_time:
             delta = abs(sample_time - blank_time)
             time_delta_minutes = delta.total_seconds() / 60.0
             if max_minutes is not None and time_delta_minutes > max_minutes:
                 sample_id = self._safe_sample_id(sample, "sample")
                 blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
-                raise ValueError(
-                    "Blank/sample timestamp gap exceeds allowed window: "
-                    f"sample '{sample_id}' vs blank '{blank_id}'"
+                violations.append(
+                    {
+                        "type": "timestamp_gap",
+                        "sample_id": sample_id,
+                        "blank_id": blank_id,
+                        "limit_minutes": max_minutes,
+                        "observed_minutes": time_delta_minutes,
+                    }
                 )
+                if enforce:
+                    raise ValueError(
+                        "Blank/sample timestamp gap exceeds allowed window: "
+                        f"sample '{sample_id}' vs blank '{blank_id}'"
+                    )
 
         tolerance_cfg = blank_cfg.get("pathlength_tolerance_cm")
         tolerance = (
@@ -607,10 +626,22 @@ class UvVisPlugin(SpectroscopyPlugin):
             if tolerance is not None and path_delta > tolerance:
                 sample_id = self._safe_sample_id(sample, "sample")
                 blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
-                raise ValueError(
-                    "Sample and blank pathlengths are incompatible for subtraction: "
-                    f"sample '{sample_id}' vs blank '{blank_id}'"
+                violations.append(
+                    {
+                        "type": "pathlength_mismatch",
+                        "sample_id": sample_id,
+                        "blank_id": blank_id,
+                        "tolerance_cm": tolerance,
+                        "observed_delta_cm": path_delta,
+                        "sample_pathlength_cm": sample_path_val,
+                        "blank_pathlength_cm": blank_path_val,
+                    }
                 )
+                if enforce:
+                    raise ValueError(
+                        "Sample and blank pathlengths are incompatible for subtraction: "
+                        f"sample '{sample_id}' vs blank '{blank_id}'"
+                    )
 
         sample_identifier = self._safe_sample_id(sample, "sample")
         blank_identifier = blank.meta.get("blank_id") or blank.meta.get("sample_id")
@@ -625,6 +656,9 @@ class UvVisPlugin(SpectroscopyPlugin):
             "sample_pathlength_cm": sample_path_val,
             "blank_pathlength_cm": blank_path_val,
             "pathlength_delta_cm": path_delta,
+            "validation_ran": True,
+            "validation_enforced": bool(enforce),
+            "validation_violations": violations,
         }
         return audit
 
