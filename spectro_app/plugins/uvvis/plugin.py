@@ -360,8 +360,40 @@ class UvVisPlugin(SpectroscopyPlugin):
         return final_specs
 
     def analyze(self, specs, recipe):
-        qc = [{"id": i, "flags": []} for i,_ in enumerate(specs)]
-        return specs, qc
+        from spectro_app.engine.qc import compute_uvvis_qc
+
+        qc_rows = []
+        for idx, spec in enumerate(specs):
+            metrics = compute_uvvis_qc(spec, recipe)
+            saturation = metrics["saturation"]
+            join = metrics["join"]
+            noise = metrics["noise"]
+            spikes = metrics["spikes"]
+            smoothing = metrics["smoothing"]
+            row = {
+                "id": idx,
+                "sample_id": spec.meta.get("sample_id") or spec.meta.get("channel") or spec.meta.get("blank_id"),
+                "role": spec.meta.get("role", "sample"),
+                "mode": metrics["mode"],
+                "saturation_flag": saturation.flag,
+                "saturation_min": saturation.minimum,
+                "saturation_max": saturation.maximum,
+                "noise_rsd": noise.rsd,
+                "noise_window": noise.window,
+                "noise_points": noise.used_points,
+                "join_count": join.count,
+                "join_max_offset": join.max_offset,
+                "join_mean_offset": join.mean_offset,
+                "join_max_overlap_error": join.max_overlap_error,
+                "join_indices": join.indices,
+                "spike_count": spikes.count,
+                "spike_threshold": spikes.threshold,
+                "smoothing_guard": smoothing.flag,
+                "flags": metrics["flags"],
+                "summary": metrics["summary"],
+            }
+            qc_rows.append(row)
+        return specs, qc_rows
 
     def export(self, specs, qc, recipe):
         return BatchResult(processed=specs, qc_table=qc, figures={}, audit=["UV-Vis export stub"])
