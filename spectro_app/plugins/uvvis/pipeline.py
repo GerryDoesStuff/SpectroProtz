@@ -88,8 +88,24 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     return Spectrum(wavelength=wl, intensity=inten, meta=dict(spec.meta))
 
 
-def subtract_blank(sample: Spectrum, blank: Spectrum) -> Spectrum:
-    """Subtract a blank from the sample after verifying domain overlap."""
+def subtract_blank(
+    sample: Spectrum,
+    blank: Spectrum,
+    *,
+    audit: Dict[str, object] | None = None,
+) -> Spectrum:
+    """Subtract a blank from the sample after verifying domain overlap.
+
+    Parameters
+    ----------
+    sample:
+        Sample spectrum that will have the blank removed.
+    blank:
+        Blank spectrum that should be subtracted from ``sample``.
+    audit:
+        Optional metadata recorded for quality-control auditing. Any supplied
+        fields will be merged with statistics gathered during subtraction.
+    """
 
     sample_wl = np.asarray(sample.wavelength, dtype=float)
     blank_interp = np.interp(
@@ -108,8 +124,20 @@ def subtract_blank(sample: Spectrum, blank: Spectrum) -> Spectrum:
     corrected[valid] = corrected[valid] - blank_interp[valid]
     corrected[~valid] = np.nan
 
+    overlap_points = int(valid.sum())
+    overlap_fraction = float(overlap_points) / float(sample_wl.size)
+    blank_mean = float(np.nanmean(blank_interp[valid])) if overlap_points else float("nan")
+
     meta = dict(sample.meta)
     meta["blank_subtracted"] = True
+    audit_payload: Dict[str, object] = {
+        "overlap_points": overlap_points,
+        "overlap_fraction": overlap_fraction,
+        "blank_mean_intensity": blank_mean,
+    }
+    if audit:
+        audit_payload.update(audit)
+    meta["blank_audit"] = audit_payload
     return Spectrum(wavelength=sample.wavelength.copy(), intensity=corrected, meta=meta)
 
 
