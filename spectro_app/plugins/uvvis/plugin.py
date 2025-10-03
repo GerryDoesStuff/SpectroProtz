@@ -10,6 +10,7 @@ import pandas as pd
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
+from . import pipeline
 
 class UvVisPlugin(SpectroscopyPlugin):
     id = "uvvis"
@@ -208,8 +209,155 @@ class UvVisPlugin(SpectroscopyPlugin):
         return None
 
     def preprocess(self, specs, recipe):
-        # TODO: implement: to_absorbance, blank mapping, baseline, join fix, despike, SG
-        return specs
+        if not specs:
+            return []
+
+        domain_cfg = recipe.get("domain")
+        blank_cfg = recipe.get("blank", {})
+        baseline_cfg = recipe.get("baseline", {})
+        join_cfg = recipe.get("join", {})
+        despike_cfg = recipe.get("despike", {})
+        smoothing_cfg = recipe.get("smoothing", {})
+        replicate_cfg = recipe.get("replicates", {})
+
+        if domain_cfg and domain_cfg.get("min") is not None and domain_cfg.get("max") is not None:
+            if float(domain_cfg["min"]) >= float(domain_cfg["max"]):
+                raise ValueError("Domain minimum must be smaller than maximum")
+
+        if join_cfg.get("enabled"):
+            window = int(join_cfg.get("window", 10))
+            if window < 1:
+                raise ValueError("Join correction window must be positive")
+            threshold = join_cfg.get("threshold")
+            if threshold is not None and float(threshold) <= 0:
+                raise ValueError("Join detection threshold must be positive")
+
+        if smoothing_cfg.get("enabled"):
+            window = int(smoothing_cfg.get("window", 5))
+            poly = int(smoothing_cfg.get("polyorder", 2))
+            if window % 2 == 0:
+                raise ValueError("Savitzky-Golay window must be odd")
+            if window <= poly:
+                raise ValueError("Savitzky-Golay window must exceed polynomial order")
+
+        average_replicates = bool(replicate_cfg.get("average", True))
+
+        stage_one: list[Spectrum] = []
+        for spec in specs:
+            coerced = pipeline.coerce_domain(spec, domain_cfg)
+            processed = coerced
+            if join_cfg.get("enabled"):
+                joins = pipeline.detect_joins(
+                    processed.wavelength,
+                    processed.intensity,
+                    threshold=join_cfg.get("threshold"),
+                    window=join_cfg.get("window", 10),
+                )
+                if joins:
+                    processed = pipeline.correct_joins(processed, joins, window=join_cfg.get("window", 10))
+            if despike_cfg.get("enabled"):
+                processed = pipeline.despike_spectrum(
+                    processed,
+                    zscore=despike_cfg.get("zscore", 5.0),
+                    window=despike_cfg.get("window", 5),
+                )
+            stage_one.append(processed)
+
+        blanks_stage = [spec for spec in stage_one if spec.meta.get("role") == "blank"]
+        samples_stage = [spec for spec in stage_one if spec.meta.get("role") != "blank"]
+
+        if average_replicates and blanks_stage:
+            blanks_avg, blank_map_by_key = pipeline.average_replicates(blanks_stage, return_mapping=True)
+        else:
+            blanks_avg = blanks_stage
+            blank_map_by_key = {pipeline.replicate_key(b): b for b in blanks_stage}
+
+        blank_lookup: dict[str, Spectrum] = {}
+        for blank_spec in blanks_avg:
+            ident = pipeline.blank_identifier(blank_spec)
+            if ident:
+                blank_lookup[ident] = blank_spec
+
+        subtract_blank = blank_cfg.get("subtract", blank_cfg.get("enabled", True))
+        require_blank = blank_cfg.get("require", subtract_blank)
+        fallback_blank = blank_cfg.get("default") or blank_cfg.get("fallback")
+
+        processed_samples: list[Spectrum] = []
+        for spec in samples_stage:
+            working = spec
+            if subtract_blank:
+                blank_id = spec.meta.get("blank_id") or fallback_blank
+                if blank_id:
+                    blank_spec = blank_lookup.get(str(blank_id))
+                    if blank_spec is None:
+                        raise ValueError(f"No blank spectrum available for blank_id '{blank_id}'")
+                    working = pipeline.subtract_blank(working, blank_spec)
+                elif require_blank:
+                    sample_id = spec.meta.get("sample_id") or spec.meta.get("channel")
+                    raise ValueError(f"Sample '{sample_id}' does not have a blank for subtraction")
+
+            if baseline_cfg.get("method"):
+                method = baseline_cfg.get("method")
+                params = {
+                    "lam": baseline_cfg.get("lam", baseline_cfg.get("lambda", 1e5)),
+                    "p": baseline_cfg.get("p", 0.01),
+                    "niter": baseline_cfg.get("niter", 10),
+                    "iterations": baseline_cfg.get("iterations", 24),
+                }
+                working = pipeline.apply_baseline(working, method, **params)
+
+            if smoothing_cfg.get("enabled"):
+                working = pipeline.smooth_spectrum(
+                    working,
+                    window=int(smoothing_cfg.get("window", 5)),
+                    polyorder=int(smoothing_cfg.get("polyorder", 2)),
+                )
+
+            processed_samples.append(working)
+
+        if average_replicates and processed_samples:
+            processed_samples, sample_map = pipeline.average_replicates(processed_samples, return_mapping=True)
+        else:
+            sample_map = {pipeline.replicate_key(s): s for s in processed_samples}
+
+        blanks_final: list[Spectrum] = []
+        if blanks_avg:
+            blanks_working = list(blanks_avg)
+            if baseline_cfg.get("method"):
+                blanks_working = [
+                    pipeline.apply_baseline(
+                        blank,
+                        baseline_cfg.get("method"),
+                        lam=baseline_cfg.get("lam", baseline_cfg.get("lambda", 1e5)),
+                        p=baseline_cfg.get("p", 0.01),
+                        niter=baseline_cfg.get("niter", 10),
+                        iterations=baseline_cfg.get("iterations", 24),
+                    )
+                    for blank in blanks_working
+                ]
+            if smoothing_cfg.get("enabled"):
+                blanks_working = [
+                    pipeline.smooth_spectrum(
+                        blank,
+                        window=int(smoothing_cfg.get("window", 5)),
+                        polyorder=int(smoothing_cfg.get("polyorder", 2)),
+                    )
+                    for blank in blanks_working
+                ]
+            blanks_final = blanks_working
+            blank_map_by_key = {
+                pipeline.replicate_key(blank): blank for blank in blanks_final
+            }
+
+        order_keys = []
+        for spec in stage_one:
+            key = pipeline.replicate_key(spec)
+            if key not in order_keys:
+                order_keys.append(key)
+
+        processed_map = {**blank_map_by_key, **sample_map}
+        final_specs = [processed_map[key] for key in order_keys if key in processed_map]
+        return final_specs
 
     def analyze(self, specs, recipe):
         qc = [{"id": i, "flags": []} for i,_ in enumerate(specs)]
