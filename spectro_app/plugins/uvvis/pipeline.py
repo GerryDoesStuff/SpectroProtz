@@ -308,42 +308,105 @@ def despike_spectrum(
     *,
     zscore: float = 5.0,
     window: int = 5,
+    join_indices: Sequence[int] | None = None,
 ) -> Spectrum:
-    """Replace spikes using a moving median filter with robust detection."""
+    """Replace spikes using a moving median filter with robust detection.
+
+    When ``join_indices`` are supplied the spectrum is segmented and each
+    portion is processed independently so spikes near detector joins are
+    corrected without smoothing across the discontinuity.
+    """
 
     y = np.asarray(spec.intensity, dtype=float)
     if y.size < 3:
         return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
 
-    window = int(window)
-    if window <= 1:
-        window = 3
-    if window % 2 == 0:
-        window += 1
-    if window > y.size:
-        window = y.size if y.size % 2 else y.size - 1
-    if window < 3:
+    base_window = int(window)
+    if base_window <= 1:
+        base_window = 3
+    if base_window % 2 == 0:
+        base_window += 1
+    if base_window < 3:
         return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
 
-    baseline = medfilt(y, kernel_size=window)
-    residual = y - baseline
-    mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
-    if not np.isfinite(mad) or mad == 0:
-        return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+    n = y.size
 
-    threshold = float(zscore) * 1.4826 * mad
-    mask = np.abs(residual) > threshold
+    def _effective_window(length: int) -> int | None:
+        if length < 3:
+            return None
+        eff = base_window
+        if eff > length:
+            eff = length if length % 2 else length - 1
+        if eff < 3:
+            return None
+        return eff
+
+    joins: list[int] = []
+    if join_indices:
+        joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
+
+    if not joins:
+        window_size = _effective_window(n)
+        if window_size is None:
+            return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+
+        baseline = medfilt(y, kernel_size=window_size)
+        residual = y - baseline
+        mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
+        if not np.isfinite(mad) or mad == 0:
+            return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+
+        threshold = float(zscore) * 1.4826 * mad
+        mask = np.abs(residual) > threshold
+        corrected = y.copy()
+        if np.any(mask):
+            indices = np.arange(n)
+            good = indices[~mask]
+            if good.size >= 2:
+                corrected[mask] = np.interp(indices[mask], good, corrected[~mask])
+            else:
+                corrected[mask] = baseline[mask]
+        meta = dict(spec.meta)
+        if np.any(mask):
+            meta.setdefault("despiked", True)
+        return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
+
+    boundaries = [0, *joins, n]
     corrected = y.copy()
-    if np.any(mask):
-        indices = np.arange(y.size)
-        good = indices[~mask]
-        if good.size >= 2:
-            corrected[mask] = np.interp(indices[mask], good, corrected[~mask])
+    overall_mask = np.zeros(n, dtype=bool)
+
+    for start, stop in zip(boundaries[:-1], boundaries[1:]):
+        segment = y[start:stop]
+        seg_len = segment.size
+        seg_window = _effective_window(seg_len)
+        if seg_window is None:
+            continue
+
+        baseline = medfilt(segment, kernel_size=seg_window)
+        residual = segment - baseline
+        mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
+        if np.isfinite(mad) and mad > 0:
+            threshold = float(zscore) * 1.4826 * mad
+            mask = np.abs(residual) > threshold
         else:
-            corrected[mask] = baseline[mask]
+            nonzero = np.abs(residual) > 1e-12
+            if not np.any(nonzero) or np.count_nonzero(nonzero) >= seg_len:
+                continue
+            mask = nonzero
+        if not np.any(mask):
+            continue
+
+        indices = np.arange(seg_len)
+        good = indices[~mask]
+        target = corrected[start:stop]
+        if good.size >= 2:
+            target[mask] = np.interp(indices[mask], good, target[~mask])
+        else:
+            target[mask] = baseline[mask]
+        overall_mask[start:stop] = mask
 
     meta = dict(spec.meta)
-    if np.any(mask):
+    if np.any(overall_mask):
         meta.setdefault("despiked", True)
     return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
 

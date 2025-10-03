@@ -645,6 +645,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         for spec in specs:
             coerced = pipeline.coerce_domain(spec, domain_cfg)
             processed = coerced
+            joins: list[int] = []
             if join_cfg.get("enabled"):
                 joins = pipeline.detect_joins(
                     processed.wavelength,
@@ -659,6 +660,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     processed,
                     zscore=despike_cfg.get("zscore", 5.0),
                     window=despike_cfg.get("window", 5),
+                    join_indices=joins,
                 )
             stage_one.append(processed)
 

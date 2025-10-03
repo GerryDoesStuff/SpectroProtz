@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Sequence
 
 import numpy as np
 import pytest
@@ -198,6 +198,57 @@ def test_baseline_methods_reduce_background():
         edges_mean = np.mean(corrected.intensity[:20])
         assert abs(edges_mean) < 0.1
         assert corrected.intensity.max() > 0.8
+
+
+def test_despike_respects_join_boundaries():
+    wl = np.linspace(400, 500, 11)
+    baseline = np.concatenate([np.zeros(5), np.ones(6) * 10])
+    spike_idx = 4
+    intensity = baseline.copy()
+    intensity[spike_idx] = 25.0
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    corrected = pipeline.despike_spectrum(spec, window=5, join_indices=[5])
+
+    assert corrected.meta.get("despiked") is True
+    assert corrected.intensity[spike_idx] == pytest.approx(baseline[spike_idx])
+    assert corrected.intensity[spike_idx + 1] == pytest.approx(baseline[spike_idx + 1])
+    assert corrected.intensity[spike_idx + 1] - corrected.intensity[spike_idx] == pytest.approx(
+        baseline[spike_idx + 1] - baseline[spike_idx]
+    )
+
+
+def test_preprocess_threads_join_indices_to_despike(monkeypatch):
+    wl = np.linspace(400, 500, 11)
+    intensity = np.concatenate([np.zeros(5), np.ones(6) * 12])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample"})
+
+    captured: dict[str, object] = {}
+
+    def fake_despike(
+        spectrum: Spectrum,
+        *,
+        zscore: float,
+        window: int,
+        join_indices: Sequence[int] | None = None,
+    ) -> Spectrum:
+        captured["join_indices"] = tuple(join_indices or [])
+        captured["window"] = window
+        captured["zscore"] = zscore
+        return spectrum
+
+    monkeypatch.setattr(pipeline, "despike_spectrum", fake_despike)
+
+    plugin = UvVisPlugin()
+    recipe = {
+        "join": {"enabled": True, "window": 3},
+        "despike": {"enabled": True},
+        "blank": {"subtract": False},
+    }
+    plugin.preprocess([spec], recipe)
+
+    expected_joins = tuple(pipeline.detect_joins(wl, intensity, window=3))
+    assert captured.get("join_indices") == expected_joins
 
 
 def test_join_detection_and_correction():
