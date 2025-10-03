@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -28,8 +29,12 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
         spectra: List[Spectrum] = []
-        for path_str in paths:
-            path = Path(path_str)
+        path_objects = [Path(p) for p in paths]
+        manifest_index, manifest_files = self._parse_manifest(path_objects)
+
+        for path in path_objects:
+            if path.resolve() in manifest_files:
+                continue
             suffix = path.suffix.lower()
             file_records: List[Dict[str, object]]
 
@@ -55,9 +60,219 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta = dict(record.get("meta", {}))
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
+                if manifest_index:
+                    updates = self._lookup_manifest(manifest_index, path, meta)
+                    if updates:
+                        for key, value in updates.items():
+                            if key == "role" and isinstance(value, str):
+                                meta[key] = value.lower()
+                            else:
+                                meta[key] = value
+                        if meta.get("role") == "blank":
+                            if not meta.get("blank_id"):
+                                meta["blank_id"] = meta.get("sample_id") or meta.get("channel")
+                            elif (
+                                meta.get("sample_id")
+                                and meta.get("channel")
+                                and meta.get("blank_id") == meta.get("channel")
+                            ):
+                                meta["blank_id"] = meta.get("sample_id")
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
 
         return spectra
+
+    # ------------------------------------------------------------------
+    # Manifest ingestion helpers
+
+    @dataclass
+    class _ManifestIndex:
+        by_file_channel: Dict[Tuple[Optional[str], str], Dict[str, object]]
+        by_file_sample: Dict[Tuple[Optional[str], str], Dict[str, object]]
+
+        def __bool__(self) -> bool:  # pragma: no cover - trivial
+            return bool(self.by_file_channel or self.by_file_sample)
+
+    def _parse_manifest(
+        self, paths: Iterable[Path]
+    ) -> Tuple["UvVisPlugin._ManifestIndex", Set[Path]]:
+        manifest_files: Set[Path] = set()
+        index = self._ManifestIndex(by_file_channel={}, by_file_sample={})
+
+        for path in paths:
+            try:
+                resolved = path.resolve()
+            except FileNotFoundError:
+                resolved = path
+            if path.suffix.lower() == ".csv" and "manifest" in path.stem.lower():
+                manifest_files.add(resolved)
+
+        if not manifest_files:
+            return index, manifest_files
+
+        for manifest_path in manifest_files:
+            try:
+                df = pd.read_csv(manifest_path, sep=None, engine="python")
+            except Exception:
+                continue
+            if df.empty:
+                continue
+
+            df = df.rename(columns=lambda col: str(col).strip())
+            for raw_row in df.to_dict(orient="records"):
+                normalized: Dict[str, str] = {}
+                for key, value in raw_row.items():
+                    if key is None:
+                        continue
+                    cleaned_value = self._clean_manifest_value(value)
+                    if cleaned_value is None:
+                        continue
+                    normalized[str(key).strip().lower()] = cleaned_value
+                if not normalized:
+                    continue
+
+                file_key = self._first_nonempty(
+                    normalized,
+                    ["file", "filename", "source", "source_file", "path"],
+                )
+                norm_file = self._normalize_manifest_token(file_key) if file_key else None
+
+                channel_key = self._first_nonempty(
+                    normalized,
+                    ["channel", "column", "signal", "trace"],
+                )
+                norm_channel = (
+                    self._normalize_manifest_token(channel_key) if channel_key else None
+                )
+
+                sample_match = self._first_nonempty(
+                    normalized,
+                    ["sample_id", "sample", "id"],
+                )
+                norm_sample = (
+                    self._normalize_manifest_token(sample_match) if sample_match else None
+                )
+
+                assignments = self._extract_manifest_assignments(normalized)
+                if norm_channel:
+                    index.by_file_channel[(norm_file, norm_channel)] = dict(assignments)
+                if norm_sample:
+                    index.by_file_sample[(norm_file, norm_sample)] = dict(assignments)
+
+        return index, manifest_files
+
+    @staticmethod
+    def _clean_manifest_value(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        if pd.isna(value):
+            return None
+        return str(value).strip()
+
+    @staticmethod
+    def _normalize_manifest_token(token: Optional[str]) -> Optional[str]:
+        if token is None:
+            return None
+        lowered = str(token).strip().lower()
+        return lowered or None
+
+    @staticmethod
+    def _first_nonempty(row: Dict[str, str], keys: Iterable[str]) -> Optional[str]:
+        for key in keys:
+            value = row.get(key)
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_manifest_assignments(row: Dict[str, str]) -> Dict[str, object]:
+        alias_map: Dict[str, Tuple[str, ...]] = {
+            "sample_id": ("sample_id", "sample", "name"),
+            "blank_id": ("blank_id", "blank", "reference", "ref"),
+            "role": ("role",),
+            "replicate_id": ("replicate", "replicate_id", "rep"),
+            "group_id": ("group", "group_id", "set", "cohort"),
+            "notes": ("notes", "note", "comment"),
+        }
+        assignments: Dict[str, object] = {}
+        for target, aliases in alias_map.items():
+            for alias in aliases:
+                value = row.get(alias)
+                if value:
+                    if target == "role":
+                        assignments[target] = str(value).strip().lower()
+                    else:
+                        assignments[target] = value
+                    break
+        return assignments
+
+    def _lookup_manifest(
+        self,
+        index: "UvVisPlugin._ManifestIndex",
+        source_path: Path,
+        meta: Dict[str, object],
+    ) -> Dict[str, object]:
+        candidates_channel: List[str] = []
+        candidates_sample: List[str] = []
+        channel = meta.get("channel")
+        if channel:
+            norm = self._normalize_manifest_token(channel)
+            if norm:
+                candidates_channel.append(norm)
+        sample_id = meta.get("sample_id")
+        if sample_id:
+            norm = self._normalize_manifest_token(sample_id)
+            if norm:
+                candidates_sample.append(norm)
+        blank_id = meta.get("blank_id")
+        if blank_id:
+            norm = self._normalize_manifest_token(blank_id)
+            if norm and norm not in candidates_sample:
+                candidates_sample.append(norm)
+
+        if not candidates_channel and not candidates_sample:
+            return {}
+
+        file_candidates: List[Optional[str]] = []
+        try:
+            resolved = source_path.resolve()
+        except FileNotFoundError:
+            resolved = source_path
+        file_candidates.extend(
+            [
+                self._normalize_manifest_token(str(resolved)),
+                self._normalize_manifest_token(resolved.name),
+            ]
+        )
+        file_candidates.append(None)
+
+        for file_key in file_candidates:
+            if file_key is None:
+                continue
+            for channel_key in candidates_channel:
+                match = index.by_file_channel.get((file_key, channel_key))
+                if match:
+                    return match
+        for file_key in file_candidates:
+            if file_key is None:
+                continue
+            for sample_key in candidates_sample:
+                match = index.by_file_sample.get((file_key, sample_key))
+                if match:
+                    return match
+
+        for channel_key in candidates_channel:
+            match = index.by_file_channel.get((None, channel_key))
+            if match:
+                return match
+        for sample_key in candidates_sample:
+            match = index.by_file_sample.get((None, sample_key))
+            if match:
+                return match
+
+        return {}
 
     # ------------------------------------------------------------------
     # Generic CSV/Excel ingestion helpers
