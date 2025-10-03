@@ -137,7 +137,16 @@ def subtract_blank(
     }
     if audit:
         audit_payload.update(audit)
-    meta["blank_audit"] = audit_payload
+
+    existing_audit = meta.get("blank_audit")
+    if isinstance(existing_audit, dict):
+        merged_audit = dict(existing_audit)
+        for key, value in audit_payload.items():
+            merged_audit.setdefault(key, value)
+    else:
+        merged_audit = audit_payload
+
+    meta["blank_audit"] = merged_audit
     return Spectrum(wavelength=sample.wavelength.copy(), intensity=corrected, meta=meta)
 
 
