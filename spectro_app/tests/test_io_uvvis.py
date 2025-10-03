@@ -93,6 +93,45 @@ wavelength,Sample A,Blank Control
     assert blank_spec.meta["blank_id"] == "Blank Control"
 
 
+def test_manifest_metadata_enrichment(tmp_path):
+    generic_csv = """wavelength,Sample A,Sample B,Blank Control
+200,0.100,0.200,0.010
+205,0.105,0.205,0.011
+"""
+    data_path = tmp_path / "generic.csv"
+    data_path.write_text(generic_csv, encoding="utf-8")
+
+    manifest_csv = """file,channel,sample_id,blank_id,replicate,group,role
+generic.csv,Sample A,Treated-A,Blank-01,rep-1,Dose-Low,
+generic.csv,Sample B,Treated-B,Blank-01,rep-2,Dose-Low,
+generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
+"""
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(manifest_csv, encoding="utf-8")
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(data_path), str(manifest_path)])
+
+    assert len(spectra) == 3
+
+    by_id = {spec.meta["sample_id"]: spec for spec in spectra}
+    sample_a = by_id["Treated-A"]
+    sample_b = by_id["Treated-B"]
+    blank_spec = by_id["Blank-01"]
+
+    assert sample_a.meta["blank_id"] == "Blank-01"
+    assert sample_a.meta["replicate_id"] == "rep-1"
+    assert sample_a.meta["group_id"] == "Dose-Low"
+    assert sample_a.meta["role"] == "sample"
+
+    assert sample_b.meta["blank_id"] == "Blank-01"
+    assert sample_b.meta["replicate_id"] == "rep-2"
+    assert sample_b.meta["group_id"] == "Dose-Low"
+
+    assert blank_spec.meta["role"] == "blank"
+    assert blank_spec.meta["blank_id"] == "Blank-01"
+    assert blank_spec.meta["replicate_id"] == "ref-blank"
+    assert blank_spec.meta["group_id"] == "QC"
 def test_manifest_named_csv_when_disabled(tmp_path):
     content = """wavelength,Sample
 200,0.100
