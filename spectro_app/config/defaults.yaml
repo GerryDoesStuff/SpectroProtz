@@ -1,0 +1,25 @@
+app:
+  theme: "system"
+  recent_files: []
+  last_export_dir: ""
+  version: "0.1.0"
+processing:
+  common_grid:
+    enabled: true
+    start: 200
+    stop: 900
+    step: 1
+  smoothing:
+    enabled: false
+    window: 15
+    polyorder: 3
+  baseline:
+    method: "asls"
+    lambda: 1e5
+    p: 0.001
+  join_correction:
+    enabled: true
+    overlap_nm: [340, 360]
+  qc:
+    saturation_abs: 3.0
+    quiet_window_nm: [850, 900]

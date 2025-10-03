@@ -1,0 +1,5 @@
+defaults:
+  smoothing:
+    enabled: false
+    window: 15
+    polyorder: 3
