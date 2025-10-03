@@ -6,7 +6,7 @@ import pytest
 
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.plugins.uvvis import pipeline
-from spectro_app.plugins.uvvis.plugin import UvVisPlugin
+from spectro_app.plugins.uvvis.plugin import UvVisPlugin, disable_blank_requirement
 
 
 def test_coerce_domain_interpolates_and_sorts():
@@ -182,6 +182,77 @@ def test_preprocess_blank_pairing_opt_out_logs_violations():
     assert {v["type"] for v in violations} == {"timestamp_gap", "pathlength_mismatch"}
     assert any(v["observed_minutes"] > 60 for v in violations if v["type"] == "timestamp_gap")
     assert any(v["observed_delta_cm"] > 0.1 for v in violations if v["type"] == "pathlength_mismatch")
+
+
+def test_disable_blank_requirement_allows_missing_blank():
+    wl = np.linspace(400, 410, 3)
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {
+            "sample_id": "S1",
+            "blank_id": "B_missing",
+            "acquired_datetime": datetime(2024, 1, 1, 9, 0).isoformat(),
+        },
+    )
+
+    plugin = UvVisPlugin()
+    base_recipe: Dict[str, object] = {"blank": {"subtract": True}}
+    recipe = disable_blank_requirement(base_recipe)
+
+    processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+
+    assert processed_sample.meta.get("blank_subtracted") is False
+    audit = processed_sample.meta.get("blank_audit")
+    assert audit["blank_id"] == "B_missing"
+    assert audit["validation_ran"] is False
+    violations = audit["validation_violations"]
+    assert any(v.get("type") == "blank_missing" for v in violations)
+
+
+def test_disable_blank_requirement_captures_audit_without_subtraction():
+    wl = np.linspace(400, 410, 3)
+    timestamp = datetime(2024, 1, 1, 9, 0)
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.5,
+        {
+            "blank_id": "B1",
+            "sample_id": "B1",
+            "acquired_datetime": timestamp.isoformat(),
+            "pathlength_cm": 1.0,
+        },
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {
+            "sample_id": "S1",
+            "blank_id": "B1",
+            "acquired_datetime": (timestamp + timedelta(minutes=30)).isoformat(),
+            "pathlength_cm": 1.0,
+        },
+    )
+
+    plugin = UvVisPlugin()
+    base_recipe: Dict[str, object] = {"blank": {"subtract": False, "max_time_delta_minutes": 60}}
+    recipe = disable_blank_requirement(base_recipe)
+
+    processed = plugin.preprocess([blank, sample], recipe)
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+
+    assert processed_sample.meta.get("blank_subtracted") is False
+    audit = processed_sample.meta.get("blank_audit")
+    assert audit["blank_id"] == "B1"
+    assert audit["validation_ran"] is True
+    assert audit["validation_enforced"] is False
+    assert audit["validation_violations"] == []
+    assert audit["timestamp_delta_minutes"] == pytest.approx(30.0)
 
 
 def test_baseline_methods_reduce_background():
