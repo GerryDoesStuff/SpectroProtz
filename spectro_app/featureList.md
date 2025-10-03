@@ -18,7 +18,7 @@ Input & ingestion
 
 Drag-and-drop files/folders; file queue with badges (technique, A/%T, blank/sample).
 
-Manifest CSV for sample↔blank mapping, groupings (dose/site), replicate IDs.
+Manifest CSV for sample↔blank mapping, groupings (dose/site), replicate IDs (optional enrichment; disable via `UvVisPlugin(enable_manifest=False)` when manifests should be ignored).
 
 Tolerant parsers (decimal comma/dot, delimiters, header variants).
 

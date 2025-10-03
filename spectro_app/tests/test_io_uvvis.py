@@ -91,3 +91,22 @@ wavelength,Sample A,Blank Control
 
     assert blank_spec.meta["role"] == "blank"
     assert blank_spec.meta["blank_id"] == "Blank Control"
+
+
+def test_manifest_named_csv_when_disabled(tmp_path):
+    content = """wavelength,Sample
+200,0.100
+205,0.110
+"""
+    path = tmp_path / "sample_manifest.csv"
+    path.write_text(content, encoding="utf-8")
+
+    plugin = UvVisPlugin(enable_manifest=False)
+    spectra = plugin.load([str(path)])
+
+    assert len(spectra) == 1
+    spec = spectra[0]
+    assert np.allclose(spec.wavelength, [200.0, 205.0])
+    assert np.allclose(spec.intensity, [0.1, 0.11])
+    assert spec.meta["instrument"] == "Generic UV-Vis"
+    assert spec.meta["sample_id"] == "Sample"
