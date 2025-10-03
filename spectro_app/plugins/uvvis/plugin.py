@@ -26,13 +26,27 @@ class UvVisPlugin(SpectroscopyPlugin):
     DEFAULT_BLANK_TIME_WINDOW_MINUTES = 240.0
     DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
 
+    def __init__(self, *, enable_manifest: bool = True) -> None:
+        self.enable_manifest = bool(enable_manifest)
+
     def detect(self, paths):
         return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
 
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
         spectra: List[Spectrum] = []
+        manifest_entries: List[Dict[str, object]] = []
+        data_paths: List[Path] = []
+
         for path_str in paths:
             path = Path(path_str)
+            if self.enable_manifest and self._is_manifest_file(path):
+                manifest_entries.extend(self._parse_manifest(path))
+            else:
+                data_paths.append(path)
+
+        manifest_lookup = self._build_manifest_lookup(manifest_entries) if self.enable_manifest else {}
+
+        for path in data_paths:
             suffix = path.suffix.lower()
             file_records: List[Dict[str, object]]
 
@@ -58,9 +72,168 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta = dict(record.get("meta", {}))
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
+                if self.enable_manifest:
+                    manifest_meta = self._lookup_manifest(manifest_lookup, path, meta)
+                    if manifest_meta:
+                        meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
 
         return spectra
+
+    @staticmethod
+    def _is_manifest_file(path: Path) -> bool:
+        name = path.name.lower()
+        if "manifest" not in name:
+            return False
+        return path.suffix.lower() in {".csv", ".txt", ".tsv", ".xls", ".xlsx"}
+
+    @staticmethod
+    def _normalize_manifest_key(key: object) -> str:
+        key_str = str(key).strip().lower()
+        key_str = key_str.replace("-", "_")
+        key_str = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in key_str)
+        while "__" in key_str:
+            key_str = key_str.replace("__", "_")
+        return key_str.strip("_")
+
+    @staticmethod
+    def _normalize_manifest_token(value: object) -> str:
+        text = str(value).strip().replace("\\", "/")
+        return text.lower()
+
+    @staticmethod
+    def _first_manifest_field(entry: Dict[str, object], keys: Iterable[str]) -> object | None:
+        for key in keys:
+            value = entry.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    def _parse_manifest(self, path: Path) -> List[Dict[str, object]]:
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".csv", ".txt", ".tsv"}:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                if not text.strip():
+                    return []
+                locale = sniff_locale(text)
+                df = pd.read_csv(
+                    io.StringIO(text),
+                    sep=locale["delimiter"] if locale.get("delimiter") else None,
+                    decimal=locale.get("decimal", "."),
+                    engine="python",
+                )
+            elif suffix in {".xls", ".xlsx"}:
+                df = pd.read_excel(path)
+            else:
+                return []
+        except Exception:
+            return []
+
+        if df.empty:
+            return []
+
+        df = df.dropna(how="all")
+        df.columns = [self._normalize_manifest_key(col) for col in df.columns]
+
+        entries: List[Dict[str, object]] = []
+        for row in df.to_dict(orient="records"):
+            entry: Dict[str, object] = {}
+            for key, value in row.items():
+                if value is None:
+                    continue
+                if isinstance(value, float) and np.isnan(value):
+                    continue
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        continue
+                entry[key] = value
+            if entry:
+                entries.append(entry)
+        return entries
+
+    def _build_manifest_lookup(self, entries: List[Dict[str, object]]) -> Dict[str, Dict[str, Dict[str, object]]]:
+        lookup: Dict[str, Dict[str, Dict[str, object]]] = {
+            "by_source": {},
+            "by_sample": {},
+            "by_channel": {},
+        }
+        for entry in entries:
+            file_value = self._first_manifest_field(
+                entry,
+                ("file", "filename", "file_name", "source_file", "data_file", "path"),
+            )
+            sample_value = self._first_manifest_field(
+                entry,
+                ("sample_id", "sample", "sample_name"),
+            )
+            channel_value = self._first_manifest_field(
+                entry,
+                ("channel", "channel_id", "channel_name"),
+            )
+
+            if file_value:
+                norm_full = self._normalize_manifest_token(file_value)
+                lookup["by_source"][norm_full] = entry
+                try:
+                    norm_name = self._normalize_manifest_token(Path(str(file_value)).name)
+                    lookup["by_source"].setdefault(norm_name, entry)
+                except Exception:
+                    pass
+            if sample_value:
+                lookup["by_sample"][self._normalize_manifest_token(sample_value)] = entry
+            if channel_value:
+                lookup["by_channel"][self._normalize_manifest_token(channel_value)] = entry
+
+        return lookup
+
+    def _lookup_manifest(
+        self,
+        lookup: Dict[str, Dict[str, Dict[str, object]]],
+        path: Path,
+        meta: Dict[str, object],
+    ) -> Dict[str, object]:
+        if not lookup:
+            return {}
+
+        matches: List[Dict[str, object]] = []
+        seen: set[int] = set()
+
+        def add_entry(entry: Dict[str, object] | None) -> None:
+            if not entry:
+                return
+            entry_id = id(entry)
+            if entry_id in seen:
+                return
+            seen.add(entry_id)
+            matches.append(entry)
+
+        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(str(path))))
+        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(path.name)))
+
+        sample_id = meta.get("sample_id")
+        if sample_id is not None:
+            add_entry(lookup.get("by_sample", {}).get(self._normalize_manifest_token(sample_id)))
+
+        channel = meta.get("channel")
+        if channel is not None:
+            add_entry(lookup.get("by_channel", {}).get(self._normalize_manifest_token(channel)))
+
+        if not matches:
+            return {}
+
+        skip_keys = {"file", "filename", "file_name", "data_file", "source_file", "path"}
+        merged: Dict[str, object] = {}
+        for entry in matches:
+            for key, value in entry.items():
+                if key in skip_keys:
+                    continue
+                merged[key] = value
+        return merged
 
     # ------------------------------------------------------------------
     # Generic CSV/Excel ingestion helpers
