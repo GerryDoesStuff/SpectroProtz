@@ -6,9 +6,15 @@ from typing import Dict, Iterable, List
 
 import numpy as np
 import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks, peak_widths
 
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
+from spectro_app.engine.excel_writer import write_workbook
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
 from . import pipeline
 
@@ -359,10 +365,183 @@ class UvVisPlugin(SpectroscopyPlugin):
         final_specs = [processed_map[key] for key in order_keys if key in processed_map]
         return final_specs
 
+    @staticmethod
+    def _safe_sample_id(spec: Spectrum, fallback: str) -> str:
+        meta = spec.meta or {}
+        return str(
+            meta.get("sample_id")
+            or meta.get("channel")
+            or meta.get("blank_id")
+            or fallback
+        )
+
+    @staticmethod
+    def _fill_nan(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        if np.all(np.isfinite(arr)):
+            return arr
+        x = np.arange(arr.size)
+        mask = np.isfinite(arr)
+        if not np.any(mask):
+            return np.zeros_like(arr)
+        arr = arr.copy()
+        arr[~mask] = np.interp(x[~mask], x[mask], arr[mask])
+        return arr
+
+    def _compute_band_value(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        center: float,
+        width: float,
+    ) -> float:
+        if wl.size == 0:
+            return float("nan")
+        half = max(float(width) / 2.0, 0.0)
+        mask = (wl >= center - half) & (wl <= center + half)
+        if not np.any(mask):
+            return float(np.interp(center, wl, intensity, left=np.nan, right=np.nan))
+        return float(np.nanmean(intensity[mask]))
+
+    def _compute_band_ratios(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        configs: List[Dict[str, object]],
+    ) -> Dict[str, Dict[str, float]]:
+        ratios: Dict[str, Dict[str, float]] = {}
+        for cfg in configs:
+            name = str(cfg.get("name") or "ratio")
+            numerator = float(cfg.get("numerator", cfg.get("num", 0.0)))
+            denominator = float(cfg.get("denominator", cfg.get("den", 1.0)))
+            num_width = float(cfg.get("numerator_width", cfg.get("bandwidth", 2.0)))
+            den_width = float(cfg.get("denominator_width", cfg.get("bandwidth", 2.0)))
+            num_val = self._compute_band_value(wl, intensity, numerator, num_width)
+            den_val = self._compute_band_value(wl, intensity, denominator, den_width)
+            if not np.isfinite(num_val) or not np.isfinite(den_val) or abs(den_val) < 1e-12:
+                ratio_val = float("nan")
+            else:
+                ratio_val = float(num_val) / float(den_val)
+            ratios[name] = {
+                "value": ratio_val,
+                "numerator_value": num_val,
+                "denominator_value": den_val,
+                "numerator_center": numerator,
+                "denominator_center": denominator,
+            }
+        return ratios
+
+    @staticmethod
+    def _integrate_band(wl: np.ndarray, intensity: np.ndarray, start: float, stop: float) -> float:
+        if wl.size == 0:
+            return float("nan")
+        lo, hi = sorted((float(start), float(stop)))
+        mask = (wl >= lo) & (wl <= hi)
+        if mask.sum() < 2:
+            return float("nan")
+        return float(np.trapezoid(intensity[mask], wl[mask]))
+
+    def _compute_integrals(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        configs: List[Dict[str, object]],
+    ) -> Dict[str, float]:
+        results: Dict[str, float] = {}
+        for cfg in configs:
+            name = str(cfg.get("name") or f"area_{cfg.get('min')}_{cfg.get('max')}")
+            start = cfg.get("min") if cfg.get("min") is not None else cfg.get("start")
+            stop = cfg.get("max") if cfg.get("max") is not None else cfg.get("stop")
+            if start is None or stop is None:
+                continue
+            results[name] = self._integrate_band(wl, intensity, float(start), float(stop))
+        return results
+
+    def _compute_derivatives(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        enabled: bool = True,
+    ) -> Dict[str, np.ndarray]:
+        if not enabled or intensity.size < 3:
+            return {}
+        safe_y = self._fill_nan(intensity)
+        safe_wl = self._fill_nan(wl)
+        first = np.gradient(safe_y, safe_wl)
+        second = np.gradient(first, safe_wl)
+        return {
+            "first_derivative": first,
+            "second_derivative": second,
+        }
+
+    def _compute_peak_metrics(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        peak_cfg: Dict[str, object],
+    ) -> List[Dict[str, float]]:
+        if intensity.size < 3:
+            return []
+        prominence = float(peak_cfg.get("prominence", 0.01))
+        min_distance = max(1, int(peak_cfg.get("min_distance", peak_cfg.get("distance", 5))))
+        height = peak_cfg.get("height")
+        if height is not None:
+            height = float(height)
+        peaks, properties = find_peaks(
+            intensity,
+            prominence=prominence if prominence > 0 else None,
+            distance=min_distance,
+            height=height,
+        )
+        if peaks.size == 0:
+            return []
+        max_peaks = int(peak_cfg.get("max_peaks", peak_cfg.get("num_peaks", 5)))
+        prominences = properties.get("prominences")
+        if prominences is not None:
+            order = np.argsort(prominences)[::-1]
+            prominences = prominences[order]
+            peaks = peaks[order]
+        if max_peaks > 0:
+            peaks = peaks[:max_peaks]
+            if prominences is not None:
+                prominences = prominences[:max_peaks]
+        _, _, left_ips, right_ips = peak_widths(intensity, peaks, rel_height=0.5)
+        x_indices = np.arange(wl.size)
+        peak_rows: List[Dict[str, float]] = []
+        for idx, peak in enumerate(peaks):
+            peak_wl = float(wl[peak])
+            peak_height = float(intensity[peak])
+            left_wl = float(np.interp(left_ips[idx], x_indices, wl))
+            right_wl = float(np.interp(right_ips[idx], x_indices, wl))
+            peak_rows.append({
+                "wavelength": peak_wl,
+                "height": peak_height,
+                "fwhm": max(right_wl - left_wl, 0.0),
+                "prominence": float(prominences[idx]) if prominences is not None else float("nan"),
+            })
+        return peak_rows
+
     def analyze(self, specs, recipe):
         from spectro_app.engine.qc import compute_uvvis_qc
 
+        feature_cfg = dict(recipe.get("features", {})) if recipe else {}
+        peak_cfg = dict(feature_cfg.get("peaks", {}))
+        ratio_cfg = feature_cfg.get("band_ratios")
+        if not ratio_cfg:
+            ratio_cfg = [
+                {"name": "A260_A280", "numerator": 260.0, "denominator": 280.0, "bandwidth": 4.0},
+                {"name": "A260_A230", "numerator": 260.0, "denominator": 230.0, "bandwidth": 4.0},
+            ]
+        integral_cfg = feature_cfg.get("integrals")
+        if not integral_cfg:
+            integral_cfg = [
+                {"name": "Area_240_260", "min": 240.0, "max": 260.0},
+                {"name": "Area_260_280", "min": 260.0, "max": 280.0},
+            ]
+        derivative_enabled = feature_cfg.get("derivatives", True)
+
         qc_rows = []
+        processed_with_features: List[Spectrum] = []
         for idx, spec in enumerate(specs):
             metrics = compute_uvvis_qc(spec, recipe)
             saturation = metrics["saturation"]
@@ -370,6 +549,21 @@ class UvVisPlugin(SpectroscopyPlugin):
             noise = metrics["noise"]
             spikes = metrics["spikes"]
             smoothing = metrics["smoothing"]
+            wl = np.asarray(spec.wavelength, dtype=float)
+            intensity = np.asarray(spec.intensity, dtype=float)
+            derivatives = self._compute_derivatives(wl, intensity, derivative_enabled)
+            band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
+            integrals = self._compute_integrals(wl, intensity, integral_cfg)
+            peaks = self._compute_peak_metrics(wl, intensity, peak_cfg)
+            derivative_stats = {
+                name: {
+                    "min": float(np.nanmin(values)) if values.size else float("nan"),
+                    "max": float(np.nanmax(values)) if values.size else float("nan"),
+                    "mean": float(np.nanmean(values)) if values.size else float("nan"),
+                    "rms": float(np.sqrt(np.nanmean(values ** 2))) if values.size else float("nan"),
+                }
+                for name, values in derivatives.items()
+            }
             row = {
                 "id": idx,
                 "sample_id": spec.meta.get("sample_id") or spec.meta.get("channel") or spec.meta.get("blank_id"),
@@ -391,9 +585,121 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "smoothing_guard": smoothing.flag,
                 "flags": metrics["flags"],
                 "summary": metrics["summary"],
+                "band_ratios": band_ratios,
+                "integrals": integrals,
+                "peak_metrics": peaks,
+                "derivative_stats": derivative_stats,
             }
             qc_rows.append(row)
-        return specs, qc_rows
+            meta = dict(spec.meta)
+            meta.setdefault("features", {})
+            meta["features"].update({
+                "band_ratios": band_ratios,
+                "integrals": integrals,
+                "peaks": peaks,
+                "derivative_stats": derivative_stats,
+            })
+            existing_channels = {
+                key: np.asarray(val, dtype=float)
+                for key, val in (meta.get("channels") or {}).items()
+                if isinstance(val, (list, tuple, np.ndarray))
+            }
+            for name, arr in derivatives.items():
+                existing_channels[name] = np.asarray(arr, dtype=float)
+            if existing_channels:
+                meta["channels"] = existing_channels
+            processed_with_features.append(
+                Spectrum(
+                    wavelength=spec.wavelength.copy(),
+                    intensity=spec.intensity.copy(),
+                    meta=meta,
+                )
+            )
+        return processed_with_features, qc_rows
+
+    def _build_audit_entries(
+        self,
+        specs: List[Spectrum],
+        qc: List[Dict[str, object]],
+        recipe: Dict[str, object],
+        figures: Dict[str, bytes],
+    ) -> List[str]:
+        entries = [
+            "UV-Vis export initiated.",
+            f"Spectra processed: {len(specs)}",
+            f"QC rows: {len(qc)}",
+        ]
+        if recipe:
+            entries.append(f"Recipe keys: {sorted(recipe.keys())}")
+        for spec, qc_row in zip(specs, qc):
+            sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
+            features = spec.meta.get("features", {})
+            ratios = features.get("band_ratios", {})
+            ratio_summary = ", ".join(
+                f"{name}={vals.get('value'):.3f}" if np.isfinite(vals.get("value", np.nan)) else f"{name}=nan"
+                for name, vals in ratios.items()
+            )
+            peak_info = features.get("peaks", [])
+            if peak_info:
+                primary_peak = peak_info[0]
+                peak_summary = (
+                    f"peak@{primary_peak.get('wavelength', float('nan')):.1f}nm"
+                    if np.isfinite(primary_peak.get("wavelength", float("nan")))
+                    else "peak@nan"
+                )
+            else:
+                peak_summary = "no_peaks"
+            entries.append(f"Spectrum {sample_id}: ratios[{ratio_summary}] peaks[{peak_summary}]")
+        if figures:
+            entries.append(f"Generated plots: {', '.join(sorted(figures))}")
+        return entries
+
+    def _generate_figures(self, specs: List[Spectrum]) -> Dict[str, bytes]:
+        figures: Dict[str, bytes] = {}
+        for spec in specs:
+            wl = np.asarray(spec.wavelength, dtype=float)
+            intensity = np.asarray(spec.intensity, dtype=float)
+            if wl.size == 0 or intensity.size == 0:
+                continue
+            channels = spec.meta.get("channels") or {}
+            sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(wl, intensity, label="Processed", linewidth=1.5)
+            for name, channel in channels.items():
+                channel_arr = np.asarray(channel, dtype=float)
+                if channel_arr.shape != wl.shape:
+                    continue
+                ax.plot(wl, channel_arr, label=name.replace("_", " "))
+            features = spec.meta.get("features", {})
+            for peak in features.get("peaks", [])[:5]:
+                wavelength = peak.get("wavelength")
+                if wavelength is None or not np.isfinite(wavelength):
+                    continue
+                ax.axvline(wavelength, color="tab:orange", linestyle="--", alpha=0.3)
+            ax.set_xlabel(self.xlabel)
+            ax.set_ylabel("Intensity")
+            ax.set_title(f"Spectrum {sample_id}")
+            ax.legend(loc="best")
+            ax.grid(True, alpha=0.2)
+            buf = io.BytesIO()
+            fig.tight_layout()
+            fig.savefig(buf, format="png", dpi=150)
+            plt.close(fig)
+            buf.seek(0)
+            figures[f"{sample_id}_processed.png"] = buf.read()
+        return figures
 
     def export(self, specs, qc, recipe):
-        return BatchResult(processed=specs, qc_table=qc, figures={}, audit=["UV-Vis export stub"])
+        export_cfg = dict(recipe.get("export", {})) if recipe else {}
+        output_path = export_cfg.get("path") or export_cfg.get("workbook")
+        figures = self._generate_figures(specs)
+        audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
+        workbook_audit = list(audit_entries)
+        if output_path:
+            resolved_path = str(output_path)
+            workbook_audit.append(f"Workbook written to {resolved_path}")
+            write_workbook(resolved_path, specs, qc, workbook_audit, figures)
+            audit_entries = workbook_audit
+        else:
+            audit_entries.append("No workbook path provided; workbook not written.")
+        return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=audit_entries)
