@@ -1,5 +1,15 @@
+"""UV-Vis plugin primitives and integration helpers.
+
+This module exposes :func:`disable_blank_requirement`, a convenience helper for
+integrators that need to run the UV-Vis pipeline when blank spectra are
+unavailable. The helper creates a recipe copy where blank enforcement is
+disabled while preserving the caller's subtraction and default blank
+configuration, allowing downstream validation to accept the relaxed policy.
+"""
+
 from __future__ import annotations
 
+import copy
 import io
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +29,37 @@ from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spect
 from spectro_app.engine.excel_writer import write_workbook
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
 from . import pipeline
+
+
+def disable_blank_requirement(recipe: Dict[str, object]) -> Dict[str, object]:
+    """Return a copy of ``recipe`` with blank enforcement disabled.
+
+    The helper is intended for programmatic integrations that need to process
+    samples when blank spectra are not guaranteed. Existing subtraction flags
+    and default/fallback blank settings are preserved so the caller can decide
+    whether subtraction should remain enabled.
+    """
+
+    base_recipe: Dict[str, object]
+    if recipe is None:
+        base_recipe = {}
+    elif isinstance(recipe, dict):
+        base_recipe = recipe
+    else:
+        raise TypeError("disable_blank_requirement expects a dict recipe")
+
+    updated = copy.deepcopy(base_recipe)
+    blank_cfg_raw = updated.get("blank")
+    if isinstance(blank_cfg_raw, dict):
+        blank_cfg: Dict[str, object] = dict(blank_cfg_raw)
+    elif blank_cfg_raw is None:
+        blank_cfg = {}
+    else:
+        blank_cfg = dict(blank_cfg_raw)  # type: ignore[arg-type]
+
+    blank_cfg["require"] = False
+    updated["blank"] = blank_cfg
+    return updated
 
 class UvVisPlugin(SpectroscopyPlugin):
     id = "uvvis"
@@ -689,12 +730,13 @@ class UvVisPlugin(SpectroscopyPlugin):
         processed_samples: list[Spectrum] = []
         for spec in samples_stage:
             working = spec
+            blank_identifier = spec.meta.get("blank_id") or fallback_blank
+            blank_spec = None
+            if blank_identifier:
+                blank_spec = blank_lookup.get(str(blank_identifier))
+
             if subtract_blank:
-                blank_id = spec.meta.get("blank_id") or fallback_blank
-                if blank_id:
-                    blank_spec = blank_lookup.get(str(blank_id))
-                    if blank_spec is None:
-                        raise ValueError(f"No blank spectrum available for blank_id '{blank_id}'")
+                if blank_spec is not None:
                     audit = self._validate_blank_pairing(
                         working,
                         blank_spec,
@@ -702,9 +744,30 @@ class UvVisPlugin(SpectroscopyPlugin):
                         enforce=validate_flag,
                     )
                     working = pipeline.subtract_blank(working, blank_spec, audit=audit)
+                elif blank_identifier:
+                    if require_blank:
+                        raise ValueError(
+                            f"No blank spectrum available for blank_id '{blank_identifier}'"
+                        )
+                    audit = self._build_missing_blank_audit(working, blank_identifier)
+                    working = self._attach_blank_audit(working, audit)
                 elif require_blank:
                     sample_id = spec.meta.get("sample_id") or spec.meta.get("channel")
-                    raise ValueError(f"Sample '{sample_id}' does not have a blank for subtraction")
+                    raise ValueError(
+                        f"Sample '{sample_id}' does not have a blank for subtraction"
+                    )
+            else:
+                if blank_spec is not None:
+                    audit = self._validate_blank_pairing(
+                        working,
+                        blank_spec,
+                        blank_cfg,
+                        enforce=False,
+                    )
+                    working = self._attach_blank_audit(working, audit)
+                elif blank_identifier:
+                    audit = self._build_missing_blank_audit(working, blank_identifier)
+                    working = self._attach_blank_audit(working, audit)
 
             if baseline_cfg.get("method"):
                 method = baseline_cfg.get("method")
@@ -783,20 +846,8 @@ class UvVisPlugin(SpectroscopyPlugin):
         the subtraction succeeds. Raises ``ValueError`` when validation fails.
         """
 
-        def _parse_dt(meta: Dict[str, object]) -> datetime | None:
-            for key in ("acquired_datetime", "timestamp", "datetime"):
-                value = meta.get(key)
-                if isinstance(value, datetime):
-                    return value
-                if value:
-                    try:
-                        return datetime.fromisoformat(str(value))
-                    except (TypeError, ValueError):
-                        continue
-            return None
-
-        sample_time = _parse_dt(sample.meta)
-        blank_time = _parse_dt(blank.meta)
+        sample_time = self._parse_timestamp(sample.meta)
+        blank_time = self._parse_timestamp(blank.meta)
 
         max_minutes_cfg = blank_cfg.get("max_time_delta_minutes")
         max_minutes = (
@@ -878,6 +929,57 @@ class UvVisPlugin(SpectroscopyPlugin):
             "validation_violations": violations,
         }
         return audit
+
+    @staticmethod
+    def _parse_timestamp(meta: Dict[str, object]) -> datetime | None:
+        for key in ("acquired_datetime", "timestamp", "datetime"):
+            value = meta.get(key)
+            if isinstance(value, datetime):
+                return value
+            if value:
+                try:
+                    return datetime.fromisoformat(str(value))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def _build_missing_blank_audit(self, sample: Spectrum, blank_id: object) -> Dict[str, object]:
+        sample_time = self._parse_timestamp(sample.meta)
+        sample_identifier = self._safe_sample_id(sample, "sample")
+        sample_path_val = self._coerce_float(sample.meta.get("pathlength_cm"))
+        violation = {
+            "type": "blank_missing",
+            "sample_id": sample_identifier,
+            "blank_id": str(blank_id),
+        }
+        return {
+            "sample_id": sample_identifier,
+            "blank_id": str(blank_id),
+            "blank_source_file": None,
+            "sample_timestamp": sample_time.isoformat() if sample_time else None,
+            "blank_timestamp": None,
+            "timestamp_delta_minutes": None,
+            "sample_pathlength_cm": sample_path_val,
+            "blank_pathlength_cm": None,
+            "pathlength_delta_cm": None,
+            "validation_ran": False,
+            "validation_enforced": False,
+            "validation_violations": [violation],
+        }
+
+    @staticmethod
+    def _attach_blank_audit(sample: Spectrum, audit: Dict[str, object]) -> Spectrum:
+        meta = dict(sample.meta or {})
+        existing_audit = meta.get("blank_audit")
+        if isinstance(existing_audit, dict):
+            merged = dict(existing_audit)
+            for key, value in audit.items():
+                merged.setdefault(key, value)
+        else:
+            merged = dict(audit)
+        meta["blank_audit"] = merged
+        meta.setdefault("blank_subtracted", False)
+        return Spectrum(wavelength=sample.wavelength, intensity=sample.intensity, meta=meta)
 
     @staticmethod
     def _coerce_float(value: object) -> float | None:

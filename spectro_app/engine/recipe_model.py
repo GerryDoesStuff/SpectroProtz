@@ -35,6 +35,4 @@ class Recipe:
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
         require_blank = blank_cfg.get("require", subtract)
         fallback = blank_cfg.get("default") or blank_cfg.get("fallback")
-        if subtract and not require_blank and not fallback:
-            errs.append("Blank subtraction allows missing blanks but provides no fallback/default blank")
         return errs
