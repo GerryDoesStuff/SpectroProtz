@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -22,6 +23,8 @@ class UvVisPlugin(SpectroscopyPlugin):
     id = "uvvis"
     label = "UV-Vis"
     xlabel = "Wavelength (nm)"
+    DEFAULT_BLANK_TIME_WINDOW_MINUTES = 240.0
+    DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
 
     def detect(self, paths):
         return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
@@ -297,7 +300,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                     blank_spec = blank_lookup.get(str(blank_id))
                     if blank_spec is None:
                         raise ValueError(f"No blank spectrum available for blank_id '{blank_id}'")
-                    working = pipeline.subtract_blank(working, blank_spec)
+                    audit = self._validate_blank_pairing(
+                        working,
+                        blank_spec,
+                        blank_cfg,
+                    )
+                    working = pipeline.subtract_blank(working, blank_spec, audit=audit)
                 elif require_blank:
                     sample_id = spec.meta.get("sample_id") or spec.meta.get("channel")
                     raise ValueError(f"Sample '{sample_id}' does not have a blank for subtraction")
@@ -364,6 +372,97 @@ class UvVisPlugin(SpectroscopyPlugin):
         processed_map = {**blank_map_by_key, **sample_map}
         final_specs = [processed_map[key] for key in order_keys if key in processed_map]
         return final_specs
+
+    def _validate_blank_pairing(
+        self,
+        sample: Spectrum,
+        blank: Spectrum,
+        blank_cfg: Dict[str, object],
+    ) -> Dict[str, object]:
+        """Validate metadata compatibility between ``sample`` and ``blank``.
+
+        Returns a dictionary with audit metadata that should be recorded when
+        the subtraction succeeds. Raises ``ValueError`` when validation fails.
+        """
+
+        def _parse_dt(meta: Dict[str, object]) -> datetime | None:
+            for key in ("acquired_datetime", "timestamp", "datetime"):
+                value = meta.get(key)
+                if isinstance(value, datetime):
+                    return value
+                if value:
+                    try:
+                        return datetime.fromisoformat(str(value))
+                    except (TypeError, ValueError):
+                        continue
+            return None
+
+        sample_time = _parse_dt(sample.meta)
+        blank_time = _parse_dt(blank.meta)
+
+        max_minutes_cfg = blank_cfg.get("max_time_delta_minutes")
+        max_minutes = (
+            float(max_minutes_cfg)
+            if max_minutes_cfg is not None
+            else self.DEFAULT_BLANK_TIME_WINDOW_MINUTES
+        )
+        time_delta_minutes: float | None = None
+        if sample_time and blank_time:
+            delta = abs(sample_time - blank_time)
+            time_delta_minutes = delta.total_seconds() / 60.0
+            if max_minutes is not None and time_delta_minutes > max_minutes:
+                sample_id = self._safe_sample_id(sample, "sample")
+                blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
+                raise ValueError(
+                    "Blank/sample timestamp gap exceeds allowed window: "
+                    f"sample '{sample_id}' vs blank '{blank_id}'"
+                )
+
+        tolerance_cfg = blank_cfg.get("pathlength_tolerance_cm")
+        tolerance = (
+            float(tolerance_cfg)
+            if tolerance_cfg is not None
+            else self.DEFAULT_PATHLENGTH_TOLERANCE_CM
+        )
+        sample_path = sample.meta.get("pathlength_cm")
+        blank_path = blank.meta.get("pathlength_cm")
+        sample_path_val = self._coerce_float(sample_path)
+        blank_path_val = self._coerce_float(blank_path)
+        path_delta: float | None = None
+        if sample_path_val is not None and blank_path_val is not None:
+            path_delta = abs(sample_path_val - blank_path_val)
+            if tolerance is not None and path_delta > tolerance:
+                sample_id = self._safe_sample_id(sample, "sample")
+                blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
+                raise ValueError(
+                    "Sample and blank pathlengths are incompatible for subtraction: "
+                    f"sample '{sample_id}' vs blank '{blank_id}'"
+                )
+
+        sample_identifier = self._safe_sample_id(sample, "sample")
+        blank_identifier = blank.meta.get("blank_id") or blank.meta.get("sample_id")
+
+        audit: Dict[str, object] = {
+            "sample_id": sample_identifier,
+            "blank_id": blank_identifier,
+            "blank_source_file": blank.meta.get("source_file"),
+            "sample_timestamp": sample_time.isoformat() if sample_time else None,
+            "blank_timestamp": blank_time.isoformat() if blank_time else None,
+            "timestamp_delta_minutes": time_delta_minutes,
+            "sample_pathlength_cm": sample_path_val,
+            "blank_pathlength_cm": blank_path_val,
+            "pathlength_delta_cm": path_delta,
+        }
+        return audit
+
+    @staticmethod
+    def _coerce_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _safe_sample_id(spec: Spectrum, fallback: str) -> str:
