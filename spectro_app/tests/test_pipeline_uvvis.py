@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta
+from typing import Dict
+
 import numpy as np
 import pytest
 
@@ -37,6 +40,11 @@ def test_subtract_blank_validates_overlap_and_subtracts():
     expected = sample.intensity - np.interp(sample.wavelength, blank.wavelength, blank.intensity)
     assert np.allclose(corrected.intensity[1:], expected[1:])
     assert corrected.meta["blank_subtracted"] is True
+    audit = corrected.meta.get("blank_audit")
+    expected_interp = np.interp(sample.wavelength, blank.wavelength, blank.intensity)
+    assert audit["overlap_points"] == sample.wavelength.size
+    assert audit["overlap_fraction"] == pytest.approx(1.0)
+    assert audit["blank_mean_intensity"] == pytest.approx(np.mean(expected_interp))
 
     far_blank = Spectrum(
         wavelength=np.array([600.0, 610.0]),
@@ -45,6 +53,135 @@ def test_subtract_blank_validates_overlap_and_subtracts():
     )
     with pytest.raises(ValueError):
         pipeline.subtract_blank(sample, far_blank)
+
+
+def _build_simple_spectrum(role: str, wl: np.ndarray, value: float, meta: Dict[str, object]) -> Spectrum:
+    return Spectrum(wavelength=wl, intensity=np.full_like(wl, value, dtype=float), meta={"role": role, **meta})
+
+
+def test_preprocess_blank_pairing_records_audit_metadata():
+    wl = np.linspace(400, 410, 3)
+    blank_time = datetime(2024, 1, 1, 10, 0)
+    sample_time = blank_time + timedelta(minutes=30)
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.5,
+        {"blank_id": "B1", "sample_id": "B1", "acquired_datetime": blank_time.isoformat(), "pathlength_cm": 1.0},
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {"sample_id": "S1", "blank_id": "B1", "acquired_datetime": sample_time.isoformat(), "pathlength_cm": 1.0},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": True, "max_time_delta_minutes": 120}}
+    processed = plugin.preprocess([blank, sample], recipe)
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+    audit = processed_sample.meta.get("blank_audit")
+    assert audit["timestamp_delta_minutes"] == pytest.approx(30.0)
+    assert audit["pathlength_delta_cm"] == pytest.approx(0.0)
+    assert audit["blank_id"] == "B1"
+    assert audit["sample_id"] == "S1"
+    assert audit["validation_ran"] is True
+    assert audit["validation_enforced"] is True
+    assert audit["validation_violations"] == []
+
+
+def test_preprocess_blank_pairing_rejects_time_gap():
+    wl = np.linspace(400, 410, 3)
+    blank_time = datetime(2024, 1, 1, 8, 0)
+    sample_time = blank_time + timedelta(hours=5)
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.5,
+        {"blank_id": "B1", "sample_id": "B1", "acquired_datetime": blank_time.isoformat(), "pathlength_cm": 1.0},
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {"sample_id": "S1", "blank_id": "B1", "acquired_datetime": sample_time.isoformat(), "pathlength_cm": 1.0},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": True, "max_time_delta_minutes": 60}}
+    with pytest.raises(ValueError):
+        plugin.preprocess([blank, sample], recipe)
+
+
+def test_preprocess_blank_pairing_rejects_pathlength_mismatch():
+    wl = np.linspace(400, 410, 3)
+    timestamp = datetime(2024, 1, 1, 9, 0).isoformat()
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.5,
+        {"blank_id": "B1", "sample_id": "B1", "acquired_datetime": timestamp, "pathlength_cm": 0.5},
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {"sample_id": "S1", "blank_id": "B1", "acquired_datetime": timestamp, "pathlength_cm": 1.0},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": True, "pathlength_tolerance_cm": 0.1}}
+    with pytest.raises(ValueError):
+        plugin.preprocess([blank, sample], recipe)
+
+
+def test_preprocess_blank_pairing_opt_out_logs_violations():
+    wl = np.linspace(400, 410, 3)
+    blank_time = datetime(2024, 1, 1, 8, 0)
+    sample_time = blank_time + timedelta(hours=5)
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.5,
+        {
+            "blank_id": "B1",
+            "sample_id": "B1",
+            "acquired_datetime": blank_time.isoformat(),
+            "pathlength_cm": 0.5,
+        },
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {
+            "sample_id": "S1",
+            "blank_id": "B1",
+            "acquired_datetime": sample_time.isoformat(),
+            "pathlength_cm": 1.0,
+        },
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {
+        "blank": {
+            "subtract": True,
+            "max_time_delta_minutes": 60,
+            "pathlength_tolerance_cm": 0.1,
+            "validate_metadata": False,
+        }
+    }
+    processed = plugin.preprocess([blank, sample], recipe)
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+    audit = processed_sample.meta.get("blank_audit")
+
+    assert processed_sample.meta.get("blank_subtracted") is True
+    assert audit["validation_ran"] is True
+    assert audit["validation_enforced"] is False
+    violations = audit["validation_violations"]
+    assert {v["type"] for v in violations} == {"timestamp_gap", "pathlength_mismatch"}
+    assert any(v["observed_minutes"] > 60 for v in violations if v["type"] == "timestamp_gap")
+    assert any(v["observed_delta_cm"] > 0.1 for v in violations if v["type"] == "pathlength_mismatch")
 
 
 def test_baseline_methods_reduce_background():

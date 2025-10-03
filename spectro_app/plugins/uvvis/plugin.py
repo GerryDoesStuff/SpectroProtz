@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 
@@ -23,6 +24,11 @@ class UvVisPlugin(SpectroscopyPlugin):
     id = "uvvis"
     label = "UV-Vis"
     xlabel = "Wavelength (nm)"
+    DEFAULT_BLANK_TIME_WINDOW_MINUTES = 240.0
+    DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
+
+    def __init__(self, *, enable_manifest: bool = True) -> None:
+        self.enable_manifest = bool(enable_manifest)
 
     def detect(self, paths):
         return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
@@ -35,6 +41,19 @@ class UvVisPlugin(SpectroscopyPlugin):
         for path in path_objects:
             if path.resolve() in manifest_files:
                 continue
+        manifest_entries: List[Dict[str, object]] = []
+        data_paths: List[Path] = []
+
+        for path_str in paths:
+            path = Path(path_str)
+            if self.enable_manifest and self._is_manifest_file(path):
+                manifest_entries.extend(self._parse_manifest(path))
+            else:
+                data_paths.append(path)
+
+        manifest_lookup = self._build_manifest_lookup(manifest_entries) if self.enable_manifest else {}
+
+        for path in data_paths:
             suffix = path.suffix.lower()
             file_records: List[Dict[str, object]]
 
@@ -77,9 +96,168 @@ class UvVisPlugin(SpectroscopyPlugin):
                                 and meta.get("blank_id") == meta.get("channel")
                             ):
                                 meta["blank_id"] = meta.get("sample_id")
+                if self.enable_manifest:
+                    manifest_meta = self._lookup_manifest(manifest_lookup, path, meta)
+                    if manifest_meta:
+                        meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
 
         return spectra
+
+    @staticmethod
+    def _is_manifest_file(path: Path) -> bool:
+        name = path.name.lower()
+        if "manifest" not in name:
+            return False
+        return path.suffix.lower() in {".csv", ".txt", ".tsv", ".xls", ".xlsx"}
+
+    @staticmethod
+    def _normalize_manifest_key(key: object) -> str:
+        key_str = str(key).strip().lower()
+        key_str = key_str.replace("-", "_")
+        key_str = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in key_str)
+        while "__" in key_str:
+            key_str = key_str.replace("__", "_")
+        return key_str.strip("_")
+
+    @staticmethod
+    def _normalize_manifest_token(value: object) -> str:
+        text = str(value).strip().replace("\\", "/")
+        return text.lower()
+
+    @staticmethod
+    def _first_manifest_field(entry: Dict[str, object], keys: Iterable[str]) -> object | None:
+        for key in keys:
+            value = entry.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    def _parse_manifest(self, path: Path) -> List[Dict[str, object]]:
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".csv", ".txt", ".tsv"}:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                if not text.strip():
+                    return []
+                locale = sniff_locale(text)
+                df = pd.read_csv(
+                    io.StringIO(text),
+                    sep=locale["delimiter"] if locale.get("delimiter") else None,
+                    decimal=locale.get("decimal", "."),
+                    engine="python",
+                )
+            elif suffix in {".xls", ".xlsx"}:
+                df = pd.read_excel(path)
+            else:
+                return []
+        except Exception:
+            return []
+
+        if df.empty:
+            return []
+
+        df = df.dropna(how="all")
+        df.columns = [self._normalize_manifest_key(col) for col in df.columns]
+
+        entries: List[Dict[str, object]] = []
+        for row in df.to_dict(orient="records"):
+            entry: Dict[str, object] = {}
+            for key, value in row.items():
+                if value is None:
+                    continue
+                if isinstance(value, float) and np.isnan(value):
+                    continue
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        continue
+                entry[key] = value
+            if entry:
+                entries.append(entry)
+        return entries
+
+    def _build_manifest_lookup(self, entries: List[Dict[str, object]]) -> Dict[str, Dict[str, Dict[str, object]]]:
+        lookup: Dict[str, Dict[str, Dict[str, object]]] = {
+            "by_source": {},
+            "by_sample": {},
+            "by_channel": {},
+        }
+        for entry in entries:
+            file_value = self._first_manifest_field(
+                entry,
+                ("file", "filename", "file_name", "source_file", "data_file", "path"),
+            )
+            sample_value = self._first_manifest_field(
+                entry,
+                ("sample_id", "sample", "sample_name"),
+            )
+            channel_value = self._first_manifest_field(
+                entry,
+                ("channel", "channel_id", "channel_name"),
+            )
+
+            if file_value:
+                norm_full = self._normalize_manifest_token(file_value)
+                lookup["by_source"][norm_full] = entry
+                try:
+                    norm_name = self._normalize_manifest_token(Path(str(file_value)).name)
+                    lookup["by_source"].setdefault(norm_name, entry)
+                except Exception:
+                    pass
+            if sample_value:
+                lookup["by_sample"][self._normalize_manifest_token(sample_value)] = entry
+            if channel_value:
+                lookup["by_channel"][self._normalize_manifest_token(channel_value)] = entry
+
+        return lookup
+
+    def _lookup_manifest(
+        self,
+        lookup: Dict[str, Dict[str, Dict[str, object]]],
+        path: Path,
+        meta: Dict[str, object],
+    ) -> Dict[str, object]:
+        if not lookup:
+            return {}
+
+        matches: List[Dict[str, object]] = []
+        seen: set[int] = set()
+
+        def add_entry(entry: Dict[str, object] | None) -> None:
+            if not entry:
+                return
+            entry_id = id(entry)
+            if entry_id in seen:
+                return
+            seen.add(entry_id)
+            matches.append(entry)
+
+        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(str(path))))
+        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(path.name)))
+
+        sample_id = meta.get("sample_id")
+        if sample_id is not None:
+            add_entry(lookup.get("by_sample", {}).get(self._normalize_manifest_token(sample_id)))
+
+        channel = meta.get("channel")
+        if channel is not None:
+            add_entry(lookup.get("by_channel", {}).get(self._normalize_manifest_token(channel)))
+
+        if not matches:
+            return {}
+
+        skip_keys = {"file", "filename", "file_name", "data_file", "source_file", "path"}
+        merged: Dict[str, object] = {}
+        for entry in matches:
+            for key, value in entry.items():
+                if key in skip_keys:
+                    continue
+                merged[key] = value
+        return merged
 
     # ------------------------------------------------------------------
     # Manifest ingestion helpers
@@ -501,6 +679,11 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         subtract_blank = blank_cfg.get("subtract", blank_cfg.get("enabled", True))
         require_blank = blank_cfg.get("require", subtract_blank)
+        validate_flag = blank_cfg.get("validate_metadata")
+        if validate_flag is None:
+            validate_flag = True
+        else:
+            validate_flag = bool(validate_flag)
         fallback_blank = blank_cfg.get("default") or blank_cfg.get("fallback")
 
         processed_samples: list[Spectrum] = []
@@ -512,7 +695,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                     blank_spec = blank_lookup.get(str(blank_id))
                     if blank_spec is None:
                         raise ValueError(f"No blank spectrum available for blank_id '{blank_id}'")
-                    working = pipeline.subtract_blank(working, blank_spec)
+                    audit = self._validate_blank_pairing(
+                        working,
+                        blank_spec,
+                        blank_cfg,
+                        enforce=validate_flag,
+                    )
+                    working = pipeline.subtract_blank(working, blank_spec, audit=audit)
                 elif require_blank:
                     sample_id = spec.meta.get("sample_id") or spec.meta.get("channel")
                     raise ValueError(f"Sample '{sample_id}' does not have a blank for subtraction")
@@ -579,6 +768,125 @@ class UvVisPlugin(SpectroscopyPlugin):
         processed_map = {**blank_map_by_key, **sample_map}
         final_specs = [processed_map[key] for key in order_keys if key in processed_map]
         return final_specs
+
+    def _validate_blank_pairing(
+        self,
+        sample: Spectrum,
+        blank: Spectrum,
+        blank_cfg: Dict[str, object],
+        *,
+        enforce: bool = True,
+    ) -> Dict[str, object]:
+        """Validate metadata compatibility between ``sample`` and ``blank``.
+
+        Returns a dictionary with audit metadata that should be recorded when
+        the subtraction succeeds. Raises ``ValueError`` when validation fails.
+        """
+
+        def _parse_dt(meta: Dict[str, object]) -> datetime | None:
+            for key in ("acquired_datetime", "timestamp", "datetime"):
+                value = meta.get(key)
+                if isinstance(value, datetime):
+                    return value
+                if value:
+                    try:
+                        return datetime.fromisoformat(str(value))
+                    except (TypeError, ValueError):
+                        continue
+            return None
+
+        sample_time = _parse_dt(sample.meta)
+        blank_time = _parse_dt(blank.meta)
+
+        max_minutes_cfg = blank_cfg.get("max_time_delta_minutes")
+        max_minutes = (
+            float(max_minutes_cfg)
+            if max_minutes_cfg is not None
+            else self.DEFAULT_BLANK_TIME_WINDOW_MINUTES
+        )
+        time_delta_minutes: float | None = None
+        violations: List[Dict[str, object]] = []
+        if sample_time and blank_time:
+            delta = abs(sample_time - blank_time)
+            time_delta_minutes = delta.total_seconds() / 60.0
+            if max_minutes is not None and time_delta_minutes > max_minutes:
+                sample_id = self._safe_sample_id(sample, "sample")
+                blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
+                violations.append(
+                    {
+                        "type": "timestamp_gap",
+                        "sample_id": sample_id,
+                        "blank_id": blank_id,
+                        "limit_minutes": max_minutes,
+                        "observed_minutes": time_delta_minutes,
+                    }
+                )
+                if enforce:
+                    raise ValueError(
+                        "Blank/sample timestamp gap exceeds allowed window: "
+                        f"sample '{sample_id}' vs blank '{blank_id}'"
+                    )
+
+        tolerance_cfg = blank_cfg.get("pathlength_tolerance_cm")
+        tolerance = (
+            float(tolerance_cfg)
+            if tolerance_cfg is not None
+            else self.DEFAULT_PATHLENGTH_TOLERANCE_CM
+        )
+        sample_path = sample.meta.get("pathlength_cm")
+        blank_path = blank.meta.get("pathlength_cm")
+        sample_path_val = self._coerce_float(sample_path)
+        blank_path_val = self._coerce_float(blank_path)
+        path_delta: float | None = None
+        if sample_path_val is not None and blank_path_val is not None:
+            path_delta = abs(sample_path_val - blank_path_val)
+            if tolerance is not None and path_delta > tolerance:
+                sample_id = self._safe_sample_id(sample, "sample")
+                blank_id = blank.meta.get("blank_id") or blank.meta.get("sample_id") or "blank"
+                violations.append(
+                    {
+                        "type": "pathlength_mismatch",
+                        "sample_id": sample_id,
+                        "blank_id": blank_id,
+                        "tolerance_cm": tolerance,
+                        "observed_delta_cm": path_delta,
+                        "sample_pathlength_cm": sample_path_val,
+                        "blank_pathlength_cm": blank_path_val,
+                    }
+                )
+                if enforce:
+                    raise ValueError(
+                        "Sample and blank pathlengths are incompatible for subtraction: "
+                        f"sample '{sample_id}' vs blank '{blank_id}'"
+                    )
+
+        sample_identifier = self._safe_sample_id(sample, "sample")
+        blank_identifier = blank.meta.get("blank_id") or blank.meta.get("sample_id")
+
+        audit: Dict[str, object] = {
+            "sample_id": sample_identifier,
+            "blank_id": blank_identifier,
+            "blank_source_file": blank.meta.get("source_file"),
+            "sample_timestamp": sample_time.isoformat() if sample_time else None,
+            "blank_timestamp": blank_time.isoformat() if blank_time else None,
+            "timestamp_delta_minutes": time_delta_minutes,
+            "sample_pathlength_cm": sample_path_val,
+            "blank_pathlength_cm": blank_path_val,
+            "pathlength_delta_cm": path_delta,
+            "validation_ran": True,
+            "validation_enforced": bool(enforce),
+            "validation_violations": violations,
+        }
+        return audit
+
+    @staticmethod
+    def _coerce_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _safe_sample_id(spec: Spectrum, fallback: str) -> str:
