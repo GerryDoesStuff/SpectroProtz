@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QAction
+from PyQt6.QtGui import QAction
 
 def build_menus(window):
     menubar = window.menuBar()
