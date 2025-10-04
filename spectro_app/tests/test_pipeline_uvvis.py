@@ -23,6 +23,14 @@ def test_coerce_domain_interpolates_and_sorts():
     expected_intensity = np.interp(expected_wl, sorted_wl, sorted_intensity)
     assert np.allclose(coerced.wavelength, expected_wl)
     assert np.allclose(coerced.intensity, expected_intensity)
+    domain_meta = coerced.meta.get("wavelength_domain_nm")
+    assert domain_meta is not None
+    assert domain_meta["original_min_nm"] == pytest.approx(400.0)
+    assert domain_meta["original_max_nm"] == pytest.approx(500.0)
+    assert domain_meta["requested_min_nm"] == pytest.approx(400.0)
+    assert domain_meta["requested_max_nm"] == pytest.approx(500.0)
+    assert domain_meta["output_min_nm"] == pytest.approx(400.0)
+    assert domain_meta["output_max_nm"] == pytest.approx(500.0)
 
 
 def test_subtract_blank_validates_overlap_and_subtracts():
@@ -476,3 +484,31 @@ def test_preprocess_guardrails_and_missing_blank():
     recipe_missing_blank = {"blank": {"subtract": True}}
     with pytest.raises(ValueError):
         plugin.preprocess([sample], recipe_missing_blank)
+
+
+def test_preprocess_applies_default_domain_limits():
+    wavelengths = np.array([150.0, 190.0, 250.0, 1090.0, 1120.0])
+    intensities = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    sample = Spectrum(
+        wavelength=wavelengths,
+        intensity=intensities,
+        meta={"role": "sample", "instrument": "Helios Gamma"},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": False}}
+
+    processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    trimmed = processed[0]
+    assert np.all(trimmed.wavelength >= 190.0)
+    assert np.all(trimmed.wavelength <= 1100.0)
+    assert trimmed.wavelength[0] == pytest.approx(190.0)
+    assert trimmed.wavelength[-1] == pytest.approx(1090.0)
+    domain_meta = trimmed.meta.get("wavelength_domain_nm")
+    assert domain_meta["original_min_nm"] == pytest.approx(150.0)
+    assert domain_meta["original_max_nm"] == pytest.approx(1120.0)
+    assert domain_meta["requested_min_nm"] == pytest.approx(190.0)
+    assert domain_meta["requested_max_nm"] == pytest.approx(1100.0)
+    assert domain_meta["output_min_nm"] == pytest.approx(190.0)
+    assert domain_meta["output_max_nm"] == pytest.approx(1090.0)

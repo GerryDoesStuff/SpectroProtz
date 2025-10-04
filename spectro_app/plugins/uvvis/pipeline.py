@@ -44,7 +44,7 @@ def _nan_safe(values: np.ndarray) -> np.ndarray:
 
 
 def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
-    """Ensure wavelength axis is sorted and optionally interpolated."""
+    """Ensure wavelength axis is sorted, clipped, and optionally interpolated."""
 
     wl = np.asarray(spec.wavelength, dtype=float)
     inten = np.asarray(spec.intensity, dtype=float)
@@ -60,13 +60,24 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     if wl.size == 0:
         raise ValueError("Spectrum does not contain finite wavelength samples")
 
+    original_min = float(wl[0])
+    original_max = float(wl[-1])
+
+    output_wl = wl
+    output_inten = inten
+    requested_min: float | None = None
+    requested_max: float | None = None
+
     if domain:
-        start = float(domain.get("min", wl.min()))
-        stop = float(domain.get("max", wl.max()))
+        start = float(domain.get("min", wl.min())) if domain.get("min") is not None else float(wl.min())
+        stop = float(domain.get("max", wl.max())) if domain.get("max") is not None else float(wl.max())
         if start >= stop:
             raise ValueError("Domain minimum must be smaller than maximum")
 
-        if "step" in domain:
+        requested_min = float(start) if domain.get("min") is not None else None
+        requested_max = float(stop) if domain.get("max") is not None else None
+
+        if "step" in domain and domain["step"] is not None:
             step = float(domain["step"])
             if step <= 0:
                 raise ValueError("Domain step must be positive")
@@ -76,16 +87,37 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
                 axis = axis[axis <= stop + 1e-9]
             if axis.size < 2:
                 axis = np.linspace(start, stop, 2)
-        else:
+            output_wl = axis
+            output_inten = np.interp(axis, wl, inten, left=np.nan, right=np.nan)
+        elif domain.get("num") is not None:
             num = int(domain.get("num", wl.size))
             if num < 2:
                 raise ValueError("Domain must request at least two points")
             axis = np.linspace(start, stop, num)
+            output_wl = axis
+            output_inten = np.interp(axis, wl, inten, left=np.nan, right=np.nan)
+        else:
+            clip_mask = (wl >= start) & (wl <= stop)
+            output_wl = wl[clip_mask]
+            output_inten = inten[clip_mask]
+            if output_wl.size == 0:
+                raise ValueError("Spectrum does not overlap requested domain")
 
-        inten = np.interp(axis, wl, inten, left=np.nan, right=np.nan)
-        wl = axis
+    meta = dict(spec.meta)
+    if domain:
+        domain_meta = {
+            "original_min_nm": original_min,
+            "original_max_nm": original_max,
+            "output_min_nm": float(output_wl[0]) if output_wl.size else float("nan"),
+            "output_max_nm": float(output_wl[-1]) if output_wl.size else float("nan"),
+        }
+        if requested_min is not None:
+            domain_meta["requested_min_nm"] = requested_min
+        if requested_max is not None:
+            domain_meta["requested_max_nm"] = requested_max
+        meta["wavelength_domain_nm"] = domain_meta
 
-    return Spectrum(wavelength=wl, intensity=inten, meta=dict(spec.meta))
+    return Spectrum(wavelength=output_wl, intensity=output_inten, meta=meta)
 
 
 def subtract_blank(
