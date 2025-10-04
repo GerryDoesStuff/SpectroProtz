@@ -166,6 +166,31 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     assert blank_spec.meta["group_id"] == "QC"
 
 
+def test_manifest_file_specific_overrides_defaults(tmp_path):
+    sample_csv = """wavelength,Sample A
+200,0.100
+205,0.105
+"""
+    data_path = tmp_path / "priority.csv"
+    data_path.write_text(sample_csv, encoding="utf-8")
+
+    manifest_csv = """file,channel,sample_id,blank_id,treatment
+priority.csv,Sample A,Treated-A,File-Blank,
+,Sample A,,Default-Blank,Default-Treatment
+"""
+    manifest_path = tmp_path / "uv_manifest.csv"
+    manifest_path.write_text(manifest_csv, encoding="utf-8")
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(data_path), str(manifest_path)])
+
+    assert len(spectra) == 1
+    spec = spectra[0]
+    assert spec.meta["sample_id"] == "Treated-A"
+    assert spec.meta["blank_id"] == "File-Blank"
+    assert spec.meta.get("treatment") == "Default-Treatment"
+
+
 def test_manifest_metadata_ignored_when_disabled(tmp_path):
     generic_csv = """wavelength,Sample A,Sample B,Blank Control
 200,0.100,0.200,0.010
