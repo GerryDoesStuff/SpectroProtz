@@ -11,6 +11,15 @@ from scipy.signal import medfilt
 
 from spectro_app.engine.plugin_api import Spectrum
 
+STAGE_CHANNEL_NAMES: Tuple[str, ...] = (
+    "raw",
+    "blanked",
+    "baseline_corrected",
+    "joined",
+    "despiked",
+    "smoothed",
+)
+
 
 @dataclass
 class SaturationResult:
@@ -68,6 +77,18 @@ class DriftResult:
     window: Tuple[float | None, float | None]
 
 
+def _mean_abs_first_difference(values: np.ndarray) -> float:
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size < 2:
+        return float("nan")
+    diffs = np.diff(arr)
+    if diffs.size == 0:
+        return float("nan")
+    abs_diffs = np.abs(diffs)
+    finite = np.isfinite(abs_diffs)
+    if not np.any(finite):
+        return float("nan")
+    return float(np.nanmean(abs_diffs[finite]))
 @dataclass
 class NegativeIntensityResult:
     processed_count: int
@@ -534,6 +555,19 @@ def compute_uvvis_qc(
     smoothing = smoothing_guard(spec, recipe.get("smoothing"))
     negative = detect_negative_intensity(spec)
 
+    processed_roughness = _mean_abs_first_difference(spec.intensity)
+    channel_roughness: Dict[str, float] = {}
+    channels_meta = spec.meta.get("channels") if isinstance(spec.meta, dict) else None
+    if isinstance(channels_meta, dict):
+        for name in STAGE_CHANNEL_NAMES:
+            if name not in channels_meta:
+                continue
+            try:
+                channel_roughness[name] = _mean_abs_first_difference(channels_meta[name])
+            except (TypeError, ValueError):
+                continue
+    roughness_metrics = {"processed": processed_roughness, "channels": channel_roughness}
+
     if drift is None:
         drift_cfg = qc_cfg.get("drift", {}) if qc_cfg else {}
         window_cfg = drift_cfg.get("window") or {}
@@ -602,6 +636,7 @@ def compute_uvvis_qc(
         "spikes": spikes,
         "smoothing": smoothing,
         "drift": drift,
+        "roughness": roughness_metrics,
         "negative_intensity": negative,
         "flags": flags,
         "summary": summary,
