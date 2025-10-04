@@ -126,6 +126,45 @@ def test_apply_baseline_records_channel():
     assert np.allclose(channels["baseline_corrected"], corrected.intensity)
 
 
+def test_apply_baseline_anchor_windows_zeroed():
+    wl = np.linspace(400, 520, 25)
+    baseline = 0.015 * (wl - 400)
+    peak = np.exp(-0.5 * ((wl - 460) / 6.0) ** 2)
+    intensity = baseline + peak + 0.2
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    anchor_cfg = {
+        "enabled": True,
+        "windows": [
+            {"min_nm": 400.0, "max_nm": 420.0, "target": 0.0, "label": "low"},
+            {"min_nm": 500.0, "max_nm": 520.0, "target": 0.05},
+        ],
+    }
+
+    corrected = pipeline.apply_baseline(
+        spec,
+        "asls",
+        lam=5e4,
+        p=0.01,
+        niter=15,
+        anchor=anchor_cfg,
+    )
+
+    left_mask = (wl >= 400.0) & (wl <= 420.0)
+    right_mask = (wl >= 500.0) & (wl <= 520.0)
+    assert np.allclose(corrected.intensity[left_mask], 0.0, atol=1e-8)
+    assert np.allclose(corrected.intensity[right_mask], 0.05, atol=1e-8)
+
+    anchor_meta = corrected.meta.get("baseline_anchor")
+    assert anchor_meta is not None
+    assert anchor_meta.get("applied") is True
+    windows_meta = anchor_meta.get("windows") or []
+    assert len(windows_meta) == 2
+    assert windows_meta[0]["label"] == "low"
+    assert windows_meta[0]["points"] > 0
+    assert windows_meta[1]["target_level"] == pytest.approx(0.05)
+
+
 def test_correct_joins_records_channel():
     wl = np.linspace(400, 450, 6)
     intensity = np.array([0.1, 0.2, 0.3, 5.0, 5.1, 5.2])
@@ -604,6 +643,48 @@ def test_plugin_preprocess_full_pipeline():
     right_mean = np.nanmean(processed_sample.intensity[-5:])
     assert abs(left_mean - right_mean) < 0.1
     assert processed_blank.meta.get("baseline") == "asls"
+
+
+def test_preprocess_threads_baseline_anchor_configuration():
+    wl = np.linspace(400.0, 600.0, 21)
+    baseline = 0.01 * (wl - 400.0)
+    intensity = baseline + 0.2
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"role": "sample", "sample_id": "S1"},
+    )
+
+    recipe = disable_blank_requirement(
+        {
+            "baseline": {
+                "method": "asls",
+                "lam": 2e4,
+                "p": 0.01,
+                "anchor": {
+                    "windows": [
+                        {"min_nm": 400.0, "max_nm": 420.0, "target": 0.0},
+                        {"min_nm": 580.0, "max_nm": 600.0, "target": 0.02},
+                    ]
+                },
+            }
+        }
+    )
+
+    plugin = UvVisPlugin()
+    processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+
+    left_mask = (wl >= 400.0) & (wl <= 420.0)
+    right_mask = (wl >= 580.0) & (wl <= 600.0)
+    assert np.allclose(processed_sample.intensity[left_mask], 0.0, atol=1e-8)
+    assert np.allclose(processed_sample.intensity[right_mask], 0.02, atol=1e-8)
+
+    anchor_meta = processed_sample.meta.get("baseline_anchor")
+    assert anchor_meta is not None
+    assert anchor_meta.get("applied") is True
+    assert len(anchor_meta.get("windows") or []) == 2
 
 
 def test_preprocess_guardrails_and_missing_blank():
