@@ -29,6 +29,15 @@ def build_menus(window):
     process_menu.addAction(_act(window, "Run", shortcut="F5", slot=window.on_run))
     process_menu.addAction(_act(window, "Cancel", shortcut="Esc", slot=window.on_cancel))
 
+    tools_menu = menubar.addMenu("&Tools")
+    tools_menu.addAction(_act(window, "Settings...", slot=window.on_settings))
+    tools_menu.addAction(
+        _act(window, "Check for Updates...", slot=window.on_check_updates)
+    )
+    tools_menu.addAction(
+        _act(window, "Open Log Folder", slot=window.on_open_log_folder)
+    )
+
     help_menu = menubar.addMenu("&Help")
     help_menu.addAction(_act(window, "Help Contents", slot=window.on_help))
     help_menu.addAction(_act(window, "About", slot=window.on_about))
