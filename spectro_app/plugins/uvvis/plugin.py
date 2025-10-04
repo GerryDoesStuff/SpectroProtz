@@ -2166,8 +2166,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                     "included": bool(entry.get("include", True)),
                 }
                 weight_val = self._coerce_float(entry.get("weight"))
-                if weight_val is not None and math.isfinite(weight_val) and weight_val > 0:
+                if weight_val is not None and math.isfinite(weight_val):
                     point["weight"] = float(weight_val)
+                if weight_val is not None and math.isfinite(weight_val) and weight_val > 0:
+                    point["applied_weight"] = float(weight_val)
+                else:
+                    point["applied_weight"] = 1.0
                 if not sample_specs:
                     target_result["errors"].append(f"Standard {sample_id} was not found in the processed spectra.")
                 if concentration_val is None or not math.isfinite(point["concentration"]):
@@ -2270,20 +2274,46 @@ class UvVisPlugin(SpectroscopyPlugin):
 
             x = np.array([point["concentration"] for point in valid_points], dtype=float)
             y = np.array([point["response"] for point in valid_points], dtype=float)
+            weight_values: List[float] = []
+            weighting_applied = False
+            for point in valid_points:
+                raw_weight = point.get("weight")
+                if raw_weight is not None and math.isfinite(raw_weight) and raw_weight > 0:
+                    weight = float(raw_weight)
+                    weighting_applied = True
+                else:
+                    weight = 1.0
+                point["applied_weight"] = float(weight)
+                weight_values.append(weight)
+            for point in standard_points:
+                if "applied_weight" not in point or not math.isfinite(point.get("applied_weight", float("nan"))):
+                    raw_weight = point.get("weight")
+                    if raw_weight is not None and math.isfinite(raw_weight) and raw_weight > 0:
+                        point["applied_weight"] = float(raw_weight)
+                    else:
+                        point["applied_weight"] = 1.0
+            weights_arr = np.array(weight_values, dtype=float) if weighting_applied else None
 
             model_valid = False
             slope = float("nan")
             intercept = float("nan")
             if not fit_intercept:
-                numerator = float(np.dot(x, y))
-                denominator = float(np.dot(x, x))
+                if weights_arr is not None:
+                    numerator = float(np.dot(weights_arr, x * y))
+                    denominator = float(np.dot(weights_arr, x * x))
+                else:
+                    numerator = float(np.dot(x, y))
+                    denominator = float(np.dot(x, x))
                 if math.isfinite(denominator) and denominator > 0:
                     slope = numerator / denominator
                     intercept = 0.0
                     model_valid = math.isfinite(slope)
             else:
                 try:
-                    slope, intercept = np.polyfit(x, y, 1)
+                    if weights_arr is not None:
+                        slope, intercept = np.polyfit(x, y, 1, w=weights_arr)
+                    else:
+                        slope, intercept = np.polyfit(x, y, 1)
                     model_valid = math.isfinite(slope) and math.isfinite(intercept)
                 except Exception as exc:  # pragma: no cover - numpy failure unlikely
                     target_result["errors"].append(f"Regression failed: {exc}")
@@ -2297,9 +2327,17 @@ class UvVisPlugin(SpectroscopyPlugin):
 
             y_pred = slope * x + intercept if math.isfinite(slope) else np.full_like(y, np.nan)
             residuals = y - y_pred
-            ss_res = float(np.nansum((residuals) ** 2))
-            mean_y = float(np.nanmean(y)) if np.isfinite(np.nanmean(y)) else 0.0
-            ss_tot = float(np.nansum((y - mean_y) ** 2))
+            if weights_arr is not None:
+                ss_res = float(np.nansum(weights_arr * (residuals**2)))
+                try:
+                    mean_y = float(np.average(y, weights=weights_arr))
+                except ZeroDivisionError:
+                    mean_y = float(np.nanmean(y)) if np.isfinite(np.nanmean(y)) else 0.0
+                ss_tot = float(np.nansum(weights_arr * (y - mean_y) ** 2))
+            else:
+                ss_res = float(np.nansum((residuals) ** 2))
+                mean_y = float(np.nanmean(y)) if np.isfinite(np.nanmean(y)) else 0.0
+                ss_tot = float(np.nansum((y - mean_y) ** 2))
             if ss_tot <= 0:
                 r_squared = 1.0 if ss_res <= 1e-12 else 0.0
             else:
@@ -2341,6 +2379,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                     "included": point.get("included", True),
                     "predicted_response": point.get("predicted_response"),
                     "residual": point.get("residual"),
+                    "weight": point.get("weight"),
+                    "applied_weight": point.get("applied_weight"),
                 }
                 if target_result.get("status") == "failed":
                     payload["status"] = "no_model"
@@ -2361,6 +2401,11 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "points": len(valid_points),
                 "min_concentration": min_conc,
                 "max_concentration": max_conc,
+                "weights": {
+                    str(point.get("sample_id")): float(point.get("applied_weight", 1.0))
+                    for point in valid_points
+                },
+                "weighting_applied": bool(weighting_applied),
             }
             target_result["fit"] = fit_summary
 
@@ -2717,9 +2762,10 @@ class UvVisPlugin(SpectroscopyPlugin):
                 r_squared = fit.get("r_squared")
                 slope_str = f"{slope:.4f}" if isinstance(slope, (int, float)) and math.isfinite(slope) else "nan"
                 r2_str = f"{r_squared:.4f}" if isinstance(r_squared, (int, float)) and math.isfinite(r_squared) else "nan"
+                weighting_flag = "weighted" if fit.get("weighting_applied") else "unweighted"
                 entries.append(
                     f"Calibration {target.get('name', 'target')}: status={target.get('status', 'unknown')} "
-                    f"slope={slope_str} r2={r2_str}"
+                    f"slope={slope_str} r2={r2_str} weighting={weighting_flag}"
                 )
         else:
             entries.append("Calibration: not performed.")

@@ -550,8 +550,11 @@ def test_uvvis_calibration_success(tmp_path):
 
     standards_header = next(row for row in rows if row and "Response (A/cm)" in row)
     assert standards_header[:3] == ("Sample ID", "Concentration", "Response (A/cm)")
+    assert "Applied Weight" in standards_header
+    applied_weight_idx = standards_header.index("Applied Weight")
     std_row = next(row for row in rows if row and row[0] == "Std-1")
     assert std_row[2] == pytest.approx(intercept + slope * 5.0, rel=1e-6)
+    assert std_row[applied_weight_idx] == pytest.approx(1.0)
 
     unknowns_header = next(row for row in rows if row and "Predicted Concentration" in row)
     assert unknowns_header[0] == "Sample ID"
@@ -559,6 +562,88 @@ def test_uvvis_calibration_success(tmp_path):
     assert sample_row[3] == pytest.approx(7.5, rel=1e-4)
     assert any("Calibration Analyte" in entry for entry in result.audit)
     assert any(name.startswith("calibration_Analyte") for name in result.figures)
+
+
+def test_uvvis_calibration_weighted_regression(tmp_path):
+    plugin = UvVisPlugin()
+    standards = [
+        ("Std-0", 0.0, 0.05, 1.0),
+        ("Std-1", 5.0, 0.65, 1.0),
+        ("Std-2", 10.0, 1.05, 5.0),
+    ]
+    concentrations = np.array([item[1] for item in standards], dtype=float)
+    responses = np.array([item[2] for item in standards], dtype=float)
+    weights = np.array([item[3] for item in standards], dtype=float)
+    coeff = np.polyfit(concentrations, responses, 1, w=weights)
+    expected_slope, expected_intercept = coeff
+    target_conc = 6.0
+    unknown_response = expected_intercept + expected_slope * target_conc
+
+    spectra = [
+        _calibration_spectrum(sample_id, response, role="standard")
+        for sample_id, _, response, _ in standards
+    ]
+    spectra.append(
+        _calibration_spectrum("Sample-1", unknown_response, role="sample")
+    )
+
+    recipe = {
+        "calibration": {
+            "targets": [
+                {
+                    "name": "Analyte",
+                    "wavelength": 260.0,
+                    "standards": [
+                        {
+                            "sample_id": sample_id,
+                            "concentration": conc,
+                            "weight": weight,
+                        }
+                        for sample_id, conc, _, weight in standards
+                    ],
+                    "unknowns": [{"sample_id": "Sample-1"}],
+                }
+            ],
+        },
+        "export": {"path": str(tmp_path / "calibration_weighted.xlsx")},
+    }
+
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    calibration = plugin.last_calibration_results
+    assert calibration and calibration["status"] == "ok"
+    target = calibration["targets"][0]
+    fit = target["fit"]
+    assert fit["weighting_applied"] is True
+    assert fit["weights"]["Std-0"] == pytest.approx(1.0)
+    assert fit["weights"]["Std-1"] == pytest.approx(1.0)
+    assert fit["weights"]["Std-2"] == pytest.approx(5.0)
+    assert fit["slope"] == pytest.approx(expected_slope, rel=1e-6)
+    assert fit["intercept"] == pytest.approx(expected_intercept, rel=1e-6)
+
+    unknown_entry = target["unknowns"][0]
+    assert unknown_entry["predicted_concentration"] == pytest.approx(target_conc, rel=1e-6)
+
+    std_entries = {entry["sample_id"]: entry for entry in target["standards"]}
+    assert std_entries["Std-2"]["applied_weight"] == pytest.approx(5.0)
+
+    qc_standard = next(row for row in qc_rows if row["sample_id"] == "Std-2")
+    qc_calibration = qc_standard.get("calibration", {}).get("Analyte")
+    assert qc_calibration["applied_weight"] == pytest.approx(5.0)
+
+    workbook_path = Path(recipe["export"]["path"])
+    wb = load_workbook(workbook_path)
+    ws_calibration = wb["Calibration"]
+    rows = list(ws_calibration.iter_rows(values_only=True))
+    standards_header = next(row for row in rows if row and "Applied Weight" in row)
+    applied_idx = standards_header.index("Applied Weight")
+    configured_idx = standards_header.index("Configured Weight")
+    std_row = next(row for row in rows if row and row[0] == "Std-2")
+    assert std_row[configured_idx] == pytest.approx(5.0)
+    assert std_row[applied_idx] == pytest.approx(5.0)
+
+    assert any("weighting=weighted" in entry for entry in result.audit)
 
 
 def test_uvvis_calibration_insufficient_standards():

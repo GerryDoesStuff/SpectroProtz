@@ -269,6 +269,8 @@ def _write_calibration_sheet(ws, calibration: Dict[str, Any] | None) -> None:
                 "Included",
                 "Replicates",
                 "Pathlength (cm)",
+                "Configured Weight",
+                "Applied Weight",
             ]
             ws.append(std_header)
             for entry in standards:
@@ -283,6 +285,8 @@ def _write_calibration_sheet(ws, calibration: Dict[str, Any] | None) -> None:
                         _clean_value(entry.get("included")),
                         _clean_value(entry.get("replicates")),
                         _clean_value(entry.get("pathlength_cm")),
+                        _clean_value(entry.get("weight")),
+                        _clean_value(entry.get("applied_weight")),
                     ]
                 )
         else:
