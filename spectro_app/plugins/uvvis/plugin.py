@@ -1149,7 +1149,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         return peak_rows
 
     def analyze(self, specs, recipe):
-        from spectro_app.engine.qc import compute_uvvis_qc
+        from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
 
         feature_cfg = dict(recipe.get("features", {})) if recipe else {}
         peak_cfg = dict(feature_cfg.get("peaks", {}))
@@ -1168,14 +1168,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         derivative_enabled = feature_cfg.get("derivatives", True)
 
         qc_rows = []
+        drift_map = compute_uvvis_drift_map(specs, recipe)
         processed_with_features: List[Spectrum] = []
         for idx, spec in enumerate(specs):
-            metrics = compute_uvvis_qc(spec, recipe)
+            metrics = compute_uvvis_qc(spec, recipe, drift_map.get(id(spec)))
             saturation = metrics["saturation"]
             join = metrics["join"]
             noise = metrics["noise"]
             spikes = metrics["spikes"]
             smoothing = metrics["smoothing"]
+            drift = metrics["drift"]
             wl = np.asarray(spec.wavelength, dtype=float)
             intensity = np.asarray(spec.intensity, dtype=float)
             derivatives = self._compute_derivatives(wl, intensity, derivative_enabled)
@@ -1210,6 +1212,18 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "spike_count": spikes.count,
                 "spike_threshold": spikes.threshold,
                 "smoothing_guard": smoothing.flag,
+                "drift_available": drift.available,
+                "drift_flag": drift.flag,
+                "drift_reasons": drift.reasons,
+                "drift_batch_reasons": drift.batch_reasons,
+                "drift_baseline": drift.baseline,
+                "drift_baseline_delta": drift.baseline_delta,
+                "drift_slope_per_hour": drift.slope_per_hour,
+                "drift_residual": drift.residual,
+                "drift_predicted": drift.predicted,
+                "drift_span_minutes": drift.span_minutes,
+                "drift_timestamp": drift.timestamp.isoformat() if drift.timestamp else None,
+                "drift_window": drift.window,
                 "flags": metrics["flags"],
                 "summary": metrics["summary"],
                 "band_ratios": band_ratios,
