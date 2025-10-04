@@ -597,6 +597,36 @@ def test_preprocess_smoothing_uses_join_segments():
     assert processed_sample.meta.get("join_indices") == (10,)
 
     assert np.allclose(processed_sample.intensity, expected.intensity)
+
+
+def test_preprocess_uses_default_join_detection():
+    wl = np.linspace(300.0, 800.0, 101)
+    baseline = 0.002 * (wl - wl.min())
+    join_idx = 60
+    intensity = baseline.copy()
+    intensity[join_idx:] += 0.4
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"role": "sample", "instrument": "Helios Gamma"},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": False}}
+
+    processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+
+    assert processed_sample.meta.get("join_indices") == (join_idx,)
+    assert processed_sample.meta.get("join_corrected") is True
+
+    original_delta = np.max(np.abs(intensity - baseline))
+    corrected_delta = np.max(np.abs(processed_sample.intensity - baseline))
+    assert original_delta > 0.3
+    assert corrected_delta < 0.05
+
+
 def test_preprocess_applies_default_domain_limits():
     wavelengths = np.array([150.0, 190.0, 250.0, 1090.0, 1120.0])
     intensities = np.array([0.0, 1.0, 2.0, 3.0, 4.0])

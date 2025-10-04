@@ -1,4 +1,8 @@
 defaults:
+  join:
+    enabled: true
+    window: 3
+    threshold: 0.2
   smoothing:
     enabled: false
     window: 15
