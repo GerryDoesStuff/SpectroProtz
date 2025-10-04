@@ -26,6 +26,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks, peak_widths
@@ -2659,6 +2660,8 @@ class UvVisPlugin(SpectroscopyPlugin):
     def _render_qc_summary_figures(self, qc_rows: Sequence[Dict[str, object]] | None) -> List[Tuple[str, Figure]]:
         if not qc_rows:
             return []
+
+        figures: List[Tuple[str, Figure]] = []
         noise_values = np.array(
             [row.get("noise_rsd", float("nan")) for row in qc_rows],
             dtype=float,
@@ -2666,13 +2669,36 @@ class UvVisPlugin(SpectroscopyPlugin):
         finite_mask = np.isfinite(noise_values)
         if not np.any(finite_mask):
             return []
+
         sample_labels = [
             str(row.get("sample_id") or row.get("id") or idx)
             for idx, row in enumerate(qc_rows)
         ]
         join_counts = np.array([row.get("join_count", 0) or 0 for row in qc_rows], dtype=float)
-        x = np.arange(len(sample_labels))
-        fig, ax = plt.subplots(figsize=(max(6, len(sample_labels) * 0.6), 4))
+
+        scatter_fig = self._plot_noise_scatter(sample_labels, noise_values, join_counts, finite_mask)
+        figures.append((self._sanitise_figure_name("qc", "summary", "noise"), scatter_fig))
+
+        hist_fig = self._plot_noise_histogram(noise_values[finite_mask])
+        if hist_fig is not None:
+            figures.append((self._sanitise_figure_name("qc", "summary", "noise", "hist"), hist_fig))
+
+        timestamp_fig = self._plot_noise_trend(sample_labels, noise_values, qc_rows, finite_mask)
+        if timestamp_fig is not None:
+            figures.append((self._sanitise_figure_name("qc", "summary", "noise", "trend"), timestamp_fig))
+
+        return figures
+
+    @staticmethod
+    def _plot_noise_scatter(
+        sample_labels: Sequence[str],
+        noise_values: np.ndarray,
+        join_counts: np.ndarray,
+        finite_mask: np.ndarray,
+    ) -> Figure:
+        x = np.arange(len(sample_labels), dtype=float)
+        width = max(6.0, len(sample_labels) * 0.6)
+        fig, ax = plt.subplots(figsize=(width, 4.0))
         scatter = ax.scatter(
             x[finite_mask],
             noise_values[finite_mask],
@@ -2690,7 +2716,105 @@ class UvVisPlugin(SpectroscopyPlugin):
         cbar = fig.colorbar(scatter, ax=ax)
         cbar.set_label("Join count")
         fig.tight_layout()
-        return [(self._sanitise_figure_name("qc", "summary", "noise"), fig)]
+        return fig
+
+    @staticmethod
+    def _plot_noise_histogram(noise_values: np.ndarray) -> Figure | None:
+        if noise_values.size < 3:
+            return None
+        finite_noise = noise_values[np.isfinite(noise_values)]
+        if finite_noise.size < 3:
+            return None
+        bins = min(30, max(5, int(np.ceil(np.sqrt(finite_noise.size)))))
+        fig, ax = plt.subplots(figsize=(6.0, 4.0))
+        ax.hist(
+            finite_noise,
+            bins=bins,
+            color="tab:blue",
+            alpha=0.75,
+            edgecolor="black",
+        )
+        mean_val = float(np.nanmean(finite_noise))
+        median_val = float(np.nanmedian(finite_noise))
+        ax.axvline(mean_val, color="tab:orange", linestyle="--", linewidth=1.5, label=f"Mean: {mean_val:.3f}")
+        ax.axvline(median_val, color="tab:green", linestyle=":", linewidth=1.5, label=f"Median: {median_val:.3f}")
+        ax.set_xlabel("Noise RSD (%)")
+        ax.set_ylabel("Count")
+        ax.set_title("QC summary: noise distribution")
+        ax.grid(True, axis="y", alpha=0.2)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        return fig
+
+    def _plot_noise_trend(
+        self,
+        sample_labels: Sequence[str],
+        noise_values: np.ndarray,
+        qc_rows: Sequence[Dict[str, object]],
+        finite_mask: np.ndarray,
+    ) -> Figure | None:
+        timestamp_strings: List[Optional[str]] = []
+        for row in qc_rows:
+            ts: Optional[str] = None
+            kinetics = row.get("kinetics") if isinstance(row, dict) else None
+            if isinstance(kinetics, dict):
+                candidate = kinetics.get("timestamp")
+                if isinstance(candidate, str):
+                    ts = candidate
+            if not ts:
+                for key in ("timestamp", "acquired_datetime", "drift_timestamp"):
+                    candidate = row.get(key) if isinstance(row, dict) else None
+                    if isinstance(candidate, str):
+                        ts = candidate
+                        break
+            timestamp_strings.append(ts)
+
+        if not any(timestamp_strings):
+            return None
+
+        timestamps = pd.to_datetime(timestamp_strings, errors="coerce", utc=True)
+        try:
+            timestamps = timestamps.tz_convert(None)  # type: ignore[call-arg]
+        except AttributeError:
+            pass
+
+        timestamp_mask = ~pd.isna(timestamps)
+        if not np.any(timestamp_mask):
+            return None
+
+        combined_mask = np.asarray(finite_mask) & np.asarray(timestamp_mask)
+        if np.count_nonzero(combined_mask) < 2:
+            return None
+
+        valid_times = timestamps[combined_mask]
+        valid_noise = noise_values[combined_mask]
+        valid_labels = np.asarray(sample_labels, dtype=object)[combined_mask]
+
+        order = np.argsort(valid_times.astype("datetime64[ns]"))
+        ordered_times = valid_times[order]
+        ordered_noise = valid_noise[order]
+        ordered_labels = valid_labels[order]
+
+        fig, ax = plt.subplots(figsize=(6.0, 4.0))
+        ordered_python_times = ordered_times.to_pydatetime()
+        ax.plot(ordered_python_times, ordered_noise, linestyle="-", marker="o", color="tab:blue")
+        for time_val, noise_val, label in zip(ordered_python_times, ordered_noise, ordered_labels):
+            ax.annotate(
+                str(label),
+                xy=(time_val, noise_val),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                fontsize=8,
+            )
+        ax.set_ylabel("Noise RSD (%)")
+        ax.set_xlabel("Timestamp")
+        ax.set_title("QC summary: noise trend")
+        ax.grid(True, alpha=0.2)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d\n%H:%M"))
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        return fig
 
     def _generate_figures(
         self,
