@@ -36,7 +36,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
         spectra: List[Spectrum] = []
         path_objects = [Path(p) for p in paths]
-        manifest_index, manifest_files = self._parse_manifest(path_objects)
+        manifest_index, manifest_files = self._build_manifest_index(path_objects)
 
         for path in path_objects:
             if path.resolve() in manifest_files:
@@ -47,7 +47,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         for path_str in paths:
             path = Path(path_str)
             if self.enable_manifest and self._is_manifest_file(path):
-                manifest_entries.extend(self._parse_manifest(path))
+                manifest_entries.extend(self._parse_manifest_file(path))
             else:
                 data_paths.append(path)
 
@@ -80,7 +80,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
                 if manifest_index:
-                    updates = self._lookup_manifest(manifest_index, path, meta)
+                    updates = self._lookup_manifest_index(manifest_index, path, meta)
                     if updates:
                         for key, value in updates.items():
                             if key == "role" and isinstance(value, str):
@@ -97,7 +97,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                             ):
                                 meta["blank_id"] = meta.get("sample_id")
                 if self.enable_manifest:
-                    manifest_meta = self._lookup_manifest(manifest_lookup, path, meta)
+                    manifest_meta = self._lookup_manifest_entries(manifest_lookup, path, meta)
                     if manifest_meta:
                         meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
@@ -136,7 +136,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             return value
         return None
 
-    def _parse_manifest(self, path: Path) -> List[Dict[str, object]]:
+    def _parse_manifest_file(self, path: Path) -> List[Dict[str, object]]:
         suffix = path.suffix.lower()
         try:
             if suffix in {".csv", ".txt", ".tsv"}:
@@ -215,7 +215,7 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         return lookup
 
-    def _lookup_manifest(
+    def _lookup_manifest_entries(
         self,
         lookup: Dict[str, Dict[str, Dict[str, object]]],
         path: Path,
@@ -236,16 +236,47 @@ class UvVisPlugin(SpectroscopyPlugin):
             seen.add(entry_id)
             matches.append(entry)
 
-        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(str(path))))
-        add_entry(lookup.get("by_source", {}).get(self._normalize_manifest_token(path.name)))
-
+        sample_tokens: List[str] = []
         sample_id = meta.get("sample_id")
         if sample_id is not None:
-            add_entry(lookup.get("by_sample", {}).get(self._normalize_manifest_token(sample_id)))
+            token = self._normalize_manifest_token(sample_id)
+            if token:
+                sample_tokens.append(token)
 
+        blank_id = meta.get("blank_id")
+        if blank_id is not None:
+            token = self._normalize_manifest_token(blank_id)
+            if token and token not in sample_tokens:
+                role = str(meta.get("role", "")).lower()
+                if role == "blank" or not sample_tokens:
+                    sample_tokens.append(token)
+
+        channel_tokens: List[str] = []
         channel = meta.get("channel")
         if channel is not None:
-            add_entry(lookup.get("by_channel", {}).get(self._normalize_manifest_token(channel)))
+            token = self._normalize_manifest_token(channel)
+            if token:
+                channel_tokens.append(token)
+
+        file_tokens: List[str] = []
+        try:
+            resolved = path.resolve()
+        except FileNotFoundError:
+            resolved = path
+        for candidate in (str(resolved), resolved.name):
+            token = self._normalize_manifest_token(candidate)
+            if token:
+                file_tokens.append(token)
+
+        for token in sample_tokens:
+            add_entry(lookup.get("by_sample", {}).get(token))
+
+        for token in channel_tokens:
+            add_entry(lookup.get("by_channel", {}).get(token))
+
+        if not matches:
+            for token in file_tokens:
+                add_entry(lookup.get("by_source", {}).get(token))
 
         if not matches:
             return {}
@@ -270,7 +301,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         def __bool__(self) -> bool:  # pragma: no cover - trivial
             return bool(self.by_file_channel or self.by_file_sample)
 
-    def _parse_manifest(
+    def _build_manifest_index(
         self, paths: Iterable[Path]
     ) -> Tuple["UvVisPlugin._ManifestIndex", Set[Path]]:
         manifest_files: Set[Path] = set()
@@ -386,7 +417,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     break
         return assignments
 
-    def _lookup_manifest(
+    def _lookup_manifest_index(
         self,
         index: "UvVisPlugin._ManifestIndex",
         source_path: Path,
@@ -408,7 +439,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         if blank_id:
             norm = self._normalize_manifest_token(blank_id)
             if norm and norm not in candidates_sample:
-                candidates_sample.append(norm)
+                role = str(meta.get("role", "")).lower()
+                if role == "blank" or not candidates_sample:
+                    candidates_sample.append(norm)
 
         if not candidates_channel and not candidates_sample:
             return {}
@@ -640,6 +673,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 raise ValueError("Savitzky-Golay window must exceed polynomial order")
 
         average_replicates = bool(replicate_cfg.get("average", True))
+        outlier_cfg = replicate_cfg.get("outlier")
 
         stage_one: list[Spectrum] = []
         for spec in specs:
@@ -668,7 +702,11 @@ class UvVisPlugin(SpectroscopyPlugin):
         samples_stage = [spec for spec in stage_one if spec.meta.get("role") != "blank"]
 
         if average_replicates and blanks_stage:
-            blanks_avg, blank_map_by_key = pipeline.average_replicates(blanks_stage, return_mapping=True)
+            blanks_avg, blank_map_by_key = pipeline.average_replicates(
+                blanks_stage,
+                return_mapping=True,
+                outlier=outlier_cfg,
+            )
         else:
             blanks_avg = blanks_stage
             blank_map_by_key = {pipeline.replicate_key(b): b for b in blanks_stage}
@@ -728,7 +766,11 @@ class UvVisPlugin(SpectroscopyPlugin):
             processed_samples.append(working)
 
         if average_replicates and processed_samples:
-            processed_samples, sample_map = pipeline.average_replicates(processed_samples, return_mapping=True)
+            processed_samples, sample_map = pipeline.average_replicates(
+                processed_samples,
+                return_mapping=True,
+                outlier=outlier_cfg,
+            )
         else:
             sample_map = {pipeline.replicate_key(s): s for s in processed_samples}
 
