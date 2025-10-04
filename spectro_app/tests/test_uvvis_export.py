@@ -140,6 +140,35 @@ def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
     assert "qc_summary_noise.png" in result.figures
     assert "qc_summary_noise_hist.png" in result.figures
     assert "qc_summary_noise_trend.png" in result.figures
+
+
+def test_uvvis_generate_figures_trend_uses_sanitised_name():
+    plugin = UvVisPlugin()
+    qc_rows = [
+        {
+            "sample_id": "QC-1",
+            "noise_rsd": 0.8,
+            "timestamp": "2024-01-01T09:00:00Z",
+        },
+        {
+            "sample_id": "QC-2",
+            "noise_rsd": 1.1,
+            "kinetics": {"timestamp": "2024-01-01T09:05:00+00:00"},
+        },
+    ]
+
+    figures, figure_objs = plugin._generate_figures([], qc_rows)
+
+    trend_keys = [name for name in figures if "noise_trend" in name]
+    assert trend_keys, "Noise trend figure should be generated when QC timestamps exist"
+
+    # The sanitised filename should remain stable so downstream exports keep the expected
+    # ``qc_summary_noise_trend.png`` path; this guards against regressions where the
+    # sanitisation logic was applied multiple times (producing ``..._png.png``).
+    assert "qc_summary_noise_trend.png" in figures
+
+    trend_obj_names = [name for name, _ in figure_objs if "noise_trend" in name]
+    assert trend_obj_names == ["qc_summary_noise_trend.png"]
 def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
