@@ -177,6 +177,29 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
     assert data_row[smoothed_idx] is not None
     assert data_row[raw_idx] > data_row[smoothed_idx]
     assert data_row[raw_delta_idx] > 0.0
+
+
+def test_uvvis_export_emits_svg_when_requested(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_svg.xlsx"),
+            "formats": ["png", "svg"],
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    expected_base = Path("Sample-1_processed")
+    png_name = expected_base.with_suffix(".png").name
+    svg_name = expected_base.with_suffix(".svg").name
+    assert png_name in result.figures
+    assert svg_name in result.figures
+    svg_stems = {Path(name).stem for name in result.figures if name.endswith(".svg")}
+    png_stems = {Path(name).stem for name in result.figures if name.endswith(".png")}
+    assert svg_stems <= png_stems
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
