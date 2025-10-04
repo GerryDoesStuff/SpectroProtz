@@ -27,3 +27,20 @@ def test_recipe_validation_requires_blank_fallback_when_optional():
     }
     errs = Recipe(params=params).validate()
     assert "fallback" in errs[0].lower()
+
+
+def test_recipe_validation_flags_invalid_drift_limits():
+    params = {
+        "qc": {
+            "drift": {
+                "enabled": True,
+                "window": {"min": 300, "max": 200},
+                "max_slope_per_hour": -1,
+                "max_delta": "not-a-number",
+            }
+        }
+    }
+    errs = Recipe(params=params).validate()
+    assert any("Drift window" in err for err in errs)
+    assert any("slope limit" in err for err in errs)
+    assert any("delta limit" in err for err in errs)

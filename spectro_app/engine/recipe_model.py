@@ -35,4 +35,33 @@ class Recipe:
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
         require_blank = blank_cfg.get("require", subtract)
         fallback = blank_cfg.get("default") or blank_cfg.get("fallback")
+        if subtract and not require_blank and not fallback:
+            errs.append("Blank subtraction allows missing blanks but provides no fallback/default blank")
+        qc_cfg = self.params.get("qc", {})
+        drift_cfg = qc_cfg.get("drift", {}) if isinstance(qc_cfg, dict) else {}
+        if drift_cfg.get("enabled"):
+            window = drift_cfg.get("window", {})
+            if isinstance(window, dict):
+                w_min = window.get("min")
+                w_max = window.get("max")
+                try:
+                    if w_min is not None and w_max is not None and float(w_min) >= float(w_max):
+                        errs.append("Drift window min must be less than max")
+                except (TypeError, ValueError):
+                    errs.append("Drift window bounds must be numeric")
+            else:
+                errs.append("Drift window must be a mapping with min/max")
+            for key, label in (
+                ("max_slope_per_hour", "slope limit"),
+                ("max_delta", "delta limit"),
+                ("max_residual", "residual limit"),
+            ):
+                value = drift_cfg.get(key)
+                if value is None:
+                    continue
+                try:
+                    if float(value) <= 0:
+                        errs.append(f"Drift {label} must be positive")
+                except (TypeError, ValueError):
+                    errs.append(f"Drift {label} must be numeric")
         return errs
