@@ -136,6 +136,16 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
 
     recipe = {"export": {"path": str(tmp_path / "stage_channels.xlsx")}}
     result = plugin.export([smoothed], [{}], recipe)
+    processed, qc_rows = plugin.analyze([smoothed], recipe)
+    assert qc_rows
+    qc_row = qc_rows[0]
+    assert "roughness" in qc_row
+    assert "raw" in qc_row["roughness"]["channels"]
+    assert "smoothed" in qc_row["roughness"]["channels"]
+    assert qc_row["roughness"]["channels"]["smoothed"] <= qc_row["roughness"]["channels"]["raw"]
+    assert qc_row["roughness_delta"]["raw"] > 0.0
+
+    plugin.export(processed, qc_rows, recipe)
 
     workbook_path = Path(recipe["export"]["path"])
     assert workbook_path.exists()
@@ -151,6 +161,22 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
     expected = {"raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"}
     assert expected.issubset(channels)
     assert any(name.endswith("join_1.png") for name in result.figures)
+    ws_qc = wb["QC_Flags"]
+    qc_header = [cell.value for cell in next(ws_qc.iter_rows(min_row=1, max_row=1))]
+    assert "roughness.processed" in qc_header
+    assert "roughness.channels.raw" in qc_header
+    assert "roughness.channels.smoothed" in qc_header
+    assert "roughness_delta.raw" in qc_header
+    data_row = next(ws_qc.iter_rows(min_row=2, max_row=2, values_only=True))
+    processed_idx = qc_header.index("roughness.processed")
+    raw_idx = qc_header.index("roughness.channels.raw")
+    smoothed_idx = qc_header.index("roughness.channels.smoothed")
+    raw_delta_idx = qc_header.index("roughness_delta.raw")
+    assert data_row[processed_idx] is not None
+    assert data_row[raw_idx] is not None
+    assert data_row[smoothed_idx] is not None
+    assert data_row[raw_idx] > data_row[smoothed_idx]
+    assert data_row[raw_delta_idx] > 0.0
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
