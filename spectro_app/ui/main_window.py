@@ -39,11 +39,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 800)
         self._recent_menu = None
         self._recent_placeholder_text = "No Recent Files"
+        self._view_menu: Optional[QtWidgets.QMenu] = None
+        self._panels_menu: Optional[QtWidgets.QMenu] = None
+        self._default_layout_state: Optional[QtCore.QByteArray] = None
         build_menus(self)
         self._refresh_recent_menu()
         self._collect_actions()
         self._init_toolbar()
         self._init_docks()
+        self._init_view_menu()
         self._init_status()
         self.restore_state()
 
@@ -97,6 +101,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.qcDock)
         self.loggerDock = LoggerDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.loggerDock)
+
+    def _init_view_menu(self):
+        if not self._view_menu:
+            # Fallback lookup in case build_menus didn't set the attribute for any reason
+            for action in self.menuBar().actions():
+                menu = action.menu()
+                if menu and menu.objectName() == "viewMenu":
+                    self._view_menu = menu
+                    break
+
+        if not self._view_menu:
+            self._default_layout_state = QtCore.QByteArray(self.saveState())
+            return
+
+        self._view_menu.addSeparator()
+        panels_menu = self._view_menu.addMenu("Panels")
+        self._panels_menu = panels_menu
+
+        for dock in (self.fileDock, self.recipeDock, self.qcDock, self.loggerDock):
+            panels_menu.addAction(dock.toggleViewAction())
+
+        self._default_layout_state = QtCore.QByteArray(self.saveState())
 
     def _init_toolbar(self):
         self._toolbar = self.addToolBar("Main")
@@ -433,7 +459,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_action_states()
 
     def on_reset_layout(self):
-        self.restoreState(self.saveState())
+        if self._default_layout_state is not None:
+            self.restoreState(QtCore.QByteArray(self._default_layout_state))
+        else:
+            self.restoreState(self.saveState())
 
     def on_run(self):
         if self._job_running:
