@@ -1,5 +1,6 @@
 import copy
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,7 +37,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx = appctx
         self.setWindowTitle("Spectroscopy Processing App")
         self.resize(1280, 800)
+        self._recent_menu = None
+        self._recent_placeholder_text = "No Recent Files"
         build_menus(self)
+        self._refresh_recent_menu()
         self._collect_actions()
         self._init_toolbar()
         self._init_docks()
@@ -238,6 +242,76 @@ class MainWindow(QtWidgets.QMainWindow):
                 ordered.append(item)
         return ordered
 
+    def _refresh_recent_menu(self):
+        menu = getattr(self, "_recent_menu", None)
+        if not menu:
+            return
+        settings = self.appctx.settings
+        stored = self._coerce_settings_list(settings.value("recentFiles", []))
+        valid: List[str] = []
+        for entry in stored:
+            try:
+                path = Path(entry)
+            except (TypeError, ValueError):
+                continue
+            if path.exists():
+                valid.append(str(path))
+        limited = valid[:20]
+        if len(stored) != len(limited) or stored[: len(limited)] != limited:
+            settings.setValue("recentFiles", limited)
+        self._populate_recent_menu(limited)
+
+    def _populate_recent_menu(self, paths: List[str]):
+        menu = getattr(self, "_recent_menu", None)
+        if not menu:
+            return
+        menu.clear()
+        if not paths:
+            placeholder = menu.addAction(self._recent_placeholder_text)
+            placeholder.setEnabled(False)
+            return
+        for path in paths:
+            action = menu.addAction(path)
+            action.setData(path)
+            action.setToolTip(path)
+            action.triggered.connect(partial(self._open_recent_file, path))
+
+    def _preview_recent_menu(self, paths: List[str]):
+        preview = self._coerce_settings_list(paths)[:20]
+        self._populate_recent_menu(preview)
+
+    def _open_recent_file(self, path_str: str):
+        target = Path(path_str)
+        if not target.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The file '{path_str}' could not be found on disk.",
+            )
+            self._remove_recent_entry(path_str)
+            return
+
+        normalized = str(target)
+        lowered = normalized.lower()
+        if lowered.endswith(".recipe.json"):
+            self._load_recipe(target)
+        else:
+            self._set_queue([normalized])
+            base_dir = target.parent if target.is_file() else target
+            if base_dir.is_dir():
+                self._export_default_dir = base_dir
+                self.appctx.settings.setValue("export/defaultDir", str(base_dir))
+
+        self._record_recent_files([normalized])
+
+    def _remove_recent_entry(self, path_str: str):
+        settings = self.appctx.settings
+        current = self._coerce_settings_list(settings.value("recentFiles", []))
+        if path_str in current:
+            current.remove(path_str)
+            settings.setValue("recentFiles", current)
+            self._refresh_recent_menu()
+
     def _record_recent_files(self, paths: List[str]):
         clean_paths = [str(p) for p in paths if p]
         if not clean_paths:
@@ -249,6 +323,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current.remove(path)
             current.insert(0, path)
         settings.setValue("recentFiles", current[:20])
+        self._refresh_recent_menu()
 
     def _connect_recipe_editor(self):
         self.recipeDock.module.currentTextChanged.connect(self._on_module_changed)
@@ -416,7 +491,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_settings(self):
         dialog = SettingsDialog(self.appctx.settings, self)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+        dialog.recent_files_changed.connect(self._preview_recent_menu)
+        result = dialog.exec()
+        if result != QtWidgets.QDialog.DialogCode.Accepted:
+            self._refresh_recent_menu()
             return
 
         values = dialog.values()
@@ -442,6 +520,7 @@ class MainWindow(QtWidgets.QMainWindow):
             export_cfg["path"] = export_name
 
         self.status.showMessage("Settings updated.", 5000)
+        self._refresh_recent_menu()
 
     def on_check_updates(self):
         QtWidgets.QMessageBox.information(

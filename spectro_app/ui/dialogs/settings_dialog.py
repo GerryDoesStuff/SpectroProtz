@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -22,6 +23,8 @@ from PyQt6.QtWidgets import (
 
 class SettingsDialog(QDialog):
     """Application preferences editor."""
+
+    recent_files_changed = pyqtSignal(list)
 
     def __init__(self, settings, parent: QWidget | None = None):
         super().__init__(parent)
@@ -145,14 +148,17 @@ class SettingsDialog(QDialog):
             if path and path not in current:
                 self._recent_list.addItem(path)
                 current.append(path)
+        self._emit_recent_changed()
 
     def _on_remove_recent(self):
         for item in self._recent_list.selectedItems():
             row = self._recent_list.row(item)
             self._recent_list.takeItem(row)
+        self._emit_recent_changed()
 
     def _on_clear_recent(self):
         self._recent_list.clear()
+        self._emit_recent_changed()
 
     def _on_browse_export_dir(self):
         start_dir = self._export_dir_edit.text().strip() or str(Path.home())
@@ -164,3 +170,6 @@ class SettingsDialog(QDialog):
         container = QWidget()
         container.setLayout(layout)
         return container
+
+    def _emit_recent_changed(self):
+        self.recent_files_changed.emit(self._collect_recent_files())
