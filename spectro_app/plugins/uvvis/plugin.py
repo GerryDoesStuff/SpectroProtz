@@ -2373,7 +2373,11 @@ class UvVisPlugin(SpectroscopyPlugin):
         sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(wl, intensity, label="Processed", linewidth=1.5)
-        for name, channel in channels.items():
+        stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
+        ordered_names = [name for name in stage_order if name in channels]
+        ordered_names.extend(name for name in channels.keys() if name not in ordered_names)
+        for name in ordered_names:
+            channel = channels[name]
             channel_arr = np.asarray(channel, dtype=float)
             if channel_arr.shape != wl.shape:
                 continue
@@ -2482,21 +2486,6 @@ class UvVisPlugin(SpectroscopyPlugin):
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
         calibration_results = getattr(self, "_last_calibration_results", None)
-        if output_path:
-            resolved_path = str(output_path)
-            workbook_audit.append(f"Workbook written to {resolved_path}")
-            write_workbook(
-                resolved_path,
-                specs,
-                qc,
-                workbook_audit,
-                figures,
-                calibration_results,
-            )
-            audit_entries = workbook_audit
-        else:
-            audit_entries.append("No workbook path provided; workbook not written.")
-        return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=audit_entries)
         workbook_default = workbook_target if workbook_target else None
         recipe_target = self._coerce_export_path(
             export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar") or export_cfg.get("recipe"),
@@ -2514,7 +2503,14 @@ class UvVisPlugin(SpectroscopyPlugin):
             if workbook_target:
                 resolved_path = str(workbook_target)
                 workbook_audit.append(f"Workbook written to {resolved_path}")
-                write_workbook(resolved_path, specs, qc, workbook_audit, figures)
+                write_workbook(
+                    resolved_path,
+                    specs,
+                    qc,
+                    workbook_audit,
+                    figures,
+                    calibration_results,
+                )
             else:
                 workbook_audit.append("No workbook path provided; workbook not written.")
 

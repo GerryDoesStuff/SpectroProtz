@@ -85,7 +85,11 @@ def _processed_rows(processed: Sequence[Spectrum]) -> List[List[Any]]:
                 _clean_value(inten_val),
             ])
         extra_channels = meta.get("channels") or {}
-        for name, channel in extra_channels.items():
+        stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
+        ordered_names = [name for name in stage_order if name in extra_channels]
+        ordered_names.extend(name for name in extra_channels.keys() if name not in ordered_names)
+        for name in ordered_names:
+            channel = extra_channels[name]
             arr = np.asarray(channel, dtype=float)
             if arr.shape != wl.shape:
                 continue
