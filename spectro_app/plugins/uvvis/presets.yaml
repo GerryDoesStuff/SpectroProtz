@@ -7,6 +7,10 @@ defaults:
       helios:
         - min_nm: 340.0
           max_nm: 360.0
+  qc:
+    quiet_window:
+      min: 850.0
+      max: 900.0
   smoothing:
     enabled: false
     window: 15

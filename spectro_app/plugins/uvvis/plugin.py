@@ -88,6 +88,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             {"min_nm": 340.0, "max_nm": 360.0},
         ),
     }
+    DEFAULT_QC_QUIET_WINDOW_NM = (850.0, 900.0)
 
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
@@ -123,6 +124,25 @@ class UvVisPlugin(SpectroscopyPlugin):
         if join_defaults.get("windows") is None:
             join_defaults["windows"] = copy.deepcopy(self.DEFAULT_JOIN_WINDOWS_BY_INSTRUMENT)
         base["join"] = join_defaults
+
+        qc_cfg_raw = base.get("qc")
+        if qc_cfg_raw is None:
+            qc_cfg: Dict[str, object] = {}
+        elif isinstance(qc_cfg_raw, dict):
+            qc_cfg = dict(qc_cfg_raw)
+        else:
+            raise TypeError("QC configuration must be a mapping")
+
+        quiet_cfg = qc_cfg.get("quiet_window")
+        if quiet_cfg is None:
+            qc_cfg["quiet_window"] = {
+                "min": float(self.DEFAULT_QC_QUIET_WINDOW_NM[0]),
+                "max": float(self.DEFAULT_QC_QUIET_WINDOW_NM[1]),
+            }
+        elif not isinstance(quiet_cfg, Mapping):
+            raise TypeError("Quiet window configuration must be a mapping")
+
+        base["qc"] = qc_cfg
         return base
 
     def _resolve_join_windows(

@@ -72,6 +72,24 @@ def test_uvvis_analyze_produces_qc_metrics():
     assert row["roughness_delta"] == {}
 
 
+def test_uvvis_analyze_uses_default_quiet_window():
+    wl = np.linspace(800.0, 920.0, 121)
+    intensity = np.ones_like(wl)
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"sample_id": "Q1", "role": "sample"},
+    )
+
+    _, qc_rows = UvVisPlugin().analyze([spec], {})
+
+    assert len(qc_rows) == 1
+    row = qc_rows[0]
+
+    assert row["noise_window"] == (850.0, 900.0)
+    assert row["noise_points"] > 0
+
+
 def test_uvvis_qc_reports_roughness_for_stage_channels():
     wl = np.linspace(200.0, 260.0, 121)
     raw_intensity = np.sin(wl / 9.0) + 0.25 * np.sin(wl * 0.9)
