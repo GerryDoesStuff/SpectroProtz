@@ -4,7 +4,22 @@ import numpy as np
 import pytest
 
 from spectro_app.engine.plugin_api import Spectrum
+from spectro_app.plugins.uvvis import pipeline
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
+
+
+def _mean_abs_first_diff(values: np.ndarray) -> float:
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size < 2:
+        return float("nan")
+    diffs = np.diff(arr)
+    if diffs.size == 0:
+        return float("nan")
+    abs_diffs = np.abs(diffs)
+    finite = np.isfinite(abs_diffs)
+    if not np.any(finite):
+        return float("nan")
+    return float(np.nanmean(abs_diffs[finite]))
 
 
 def test_uvvis_analyze_produces_qc_metrics():
@@ -43,6 +58,42 @@ def test_uvvis_analyze_produces_qc_metrics():
     assert "saturation" in row["flags"]
     assert "Spikes" in row["summary"]
     assert row["noise_window"] == (400.0, 420.0)
+    assert "roughness" in row
+    assert np.isfinite(row["roughness"]["processed"])
+    assert row["roughness"]["channels"] == {}
+    assert "roughness_delta" in row
+    assert row["roughness_delta"] == {}
+
+
+def test_uvvis_qc_reports_roughness_for_stage_channels():
+    wl = np.linspace(200.0, 260.0, 121)
+    raw_intensity = np.sin(wl / 9.0) + 0.25 * np.sin(wl * 0.9)
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=raw_intensity,
+        meta={"sample_id": "rough", "role": "sample"},
+    )
+    coerced = pipeline.coerce_domain(spec, None)
+    smoothed = pipeline.smooth_spectrum(coerced, window=9, polyorder=3)
+
+    _, qc_rows = UvVisPlugin().analyze([smoothed], {})
+    assert len(qc_rows) == 1
+    row = qc_rows[0]
+
+    processed_expected = _mean_abs_first_diff(smoothed.intensity)
+    raw_expected = _mean_abs_first_diff(smoothed.meta["channels"]["raw"])
+    smoothed_expected = _mean_abs_first_diff(smoothed.meta["channels"]["smoothed"])
+
+    roughness = row["roughness"]
+    assert roughness["processed"] == pytest.approx(processed_expected)
+    assert roughness["channels"]["raw"] == pytest.approx(raw_expected)
+    assert roughness["channels"]["smoothed"] == pytest.approx(smoothed_expected)
+    assert roughness["channels"]["smoothed"] <= roughness["channels"]["raw"]
+
+    delta = row["roughness_delta"]
+    assert delta["raw"] == pytest.approx(raw_expected - processed_expected)
+    assert delta["smoothed"] == pytest.approx(smoothed_expected - processed_expected, abs=1e-9)
+    assert delta["raw"] > 0.0
 
 
 def test_uvvis_rolling_noise_disabled_without_recipe():
@@ -174,6 +225,46 @@ def test_uvvis_isosbestic_checks_capture_crossing():
 
     feature_checks = processed[0].meta["features"]["isosbestic"]
     assert feature_checks == qc_rows[0]["isosbestic"]
+
+
+def test_uvvis_negative_intensity_flagging():
+    wl = np.linspace(400.0, 410.0, 6)
+    positive = Spectrum(
+        wavelength=wl,
+        intensity=np.linspace(0.1, 0.2, wl.size),
+        meta={"sample_id": "pos", "role": "sample"},
+    )
+
+    negative_trace = np.linspace(0.1, 0.2, wl.size)
+    negative_trace[2] = -0.05
+    negative = Spectrum(
+        wavelength=wl,
+        intensity=negative_trace,
+        meta={
+            "sample_id": "neg",
+            "role": "sample",
+            "channels": {"raw": negative_trace.copy(), "processed": negative_trace.copy()},
+        },
+    )
+
+    recipe = {"qc": {"negative_intensity_tolerance": 0.0}}
+
+    _, qc_rows = UvVisPlugin().analyze([positive, negative], recipe)
+
+    by_id = {row["sample_id"]: row for row in qc_rows}
+    pos_row = by_id["pos"]
+    neg_row = by_id["neg"]
+
+    assert pos_row["negative_intensity_flag"] is False
+    assert pos_row["negative_intensity_fraction"] == pytest.approx(0.0)
+    assert "negative_intensity" not in pos_row["flags"]
+
+    assert neg_row["negative_intensity_flag"] is True
+    assert neg_row["negative_intensity_fraction"] == pytest.approx(1 / wl.size)
+    assert "negative_intensity" in neg_row["flags"]
+    channels = neg_row["negative_intensity_channels"]
+    assert channels["raw"]["count"] >= 1
+    assert channels["raw"]["fraction"] == pytest.approx(1 / wl.size)
 
 
 def test_uvvis_kinetics_summary_tracks_delta_a():
