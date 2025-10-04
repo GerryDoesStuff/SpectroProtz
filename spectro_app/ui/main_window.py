@@ -900,7 +900,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if isinstance(result, BatchResult):
             self._last_result = result
-            self.previewDock.show_figures(result.figures)
+            self.previewDock.show_batch_result(result)
             self.qcDock.show_qc_table(result.qc_table)
             if result.audit:
                 self.loggerDock.stream_lines(result.audit)

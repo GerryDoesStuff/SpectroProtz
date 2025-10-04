@@ -76,8 +76,8 @@ def test_run_controller_populates_docks(qt_app):
         assert finished, "RunController did not emit job_finished"
         qt_app.processEvents()
 
-        assert window.previewDock.tabs.count() == 1
-        assert window.previewDock.tabs.tabText(0) == "Result"
+        assert window.previewDock.tabs.count() >= 1
+        assert window.previewDock.tabs.tabText(0) == "Spectra"
 
         assert window.qcDock.model.rowCount() == 1
 
