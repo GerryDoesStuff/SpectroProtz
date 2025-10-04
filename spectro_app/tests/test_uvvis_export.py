@@ -107,6 +107,35 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert any("Workbook written" in entry for entry in result.audit)
 
 
+def test_uvvis_export_with_workbook_path_creates_sidecar_and_pdf(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_batch.xlsx"),
+            "recipe_sidecar": True,
+            "pdf_report": True,
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+
+    result = plugin.export(processed, qc_rows, recipe)
+
+    workbook_path = tmp_path / "uvvis_batch.xlsx"
+    recipe_sidecar = tmp_path / "uvvis_batch.recipe.json"
+    pdf_report = tmp_path / "uvvis_batch.pdf"
+
+    assert workbook_path.exists()
+    assert recipe_sidecar.exists()
+    assert pdf_report.exists()
+
+    audit_text = "\n".join(result.audit)
+    assert "Workbook written" in audit_text
+    assert "Recipe sidecar written" in audit_text
+    assert "PDF report written" in audit_text
+
+
 def test_uvvis_calibration_success(tmp_path):
     plugin = UvVisPlugin()
     slope = 0.12
