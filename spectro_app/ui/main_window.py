@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtGui import QDesktopServices
 
 from spectro_app.engine.plugin_api import BatchResult
 from spectro_app.engine.recipe_model import Recipe
@@ -61,6 +62,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._queued_paths: List[str] = []
         self._recipe_data: Dict[str, Any] = self._normalise_recipe_data({})
+        self.fileDock.set_plugin_resolver(
+            lambda paths: self._resolve_plugin(paths, self._recipe_data.get("module"))
+        )
         self._current_recipe_path: Optional[Path] = None
         self._last_result: Optional[BatchResult] = None
         self._active_plugin = None
@@ -80,6 +84,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _init_docks(self):
         self.fileDock = FileQueueDock(self)
+        self.fileDock.paths_dropped.connect(self._on_queue_paths_dropped)
+        self.fileDock.inspect_requested.connect(self._on_queue_inspect_requested)
+        self.fileDock.preview_requested.connect(self._on_queue_preview_requested)
+        self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.fileDock)
         self.recipeDock = RecipeEditorDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.recipeDock)
@@ -556,6 +564,96 @@ class MainWindow(QtWidgets.QMainWindow):
             else "Queue cleared"
         )
         self.status.showMessage(message, 5000)
+
+    # ------------------------------------------------------------------
+    # File queue interactions
+    def _on_queue_paths_dropped(self, paths: List[str]):
+        if not paths:
+            return
+        self._set_queue(paths)
+        first_existing = next((Path(p) for p in paths if Path(p).exists()), None)
+        if first_existing:
+            target_dir = first_existing.parent if first_existing.is_file() else first_existing
+            if target_dir.is_dir():
+                self._export_default_dir = target_dir
+
+    def _on_queue_inspect_requested(self, path: str):
+        self._open_file_preview(Path(path), "Inspect Header", 4096)
+
+    def _on_queue_preview_requested(self, path: str):
+        self._open_file_preview(Path(path), "Preview", 65536)
+
+    def _on_queue_locate_requested(self, path: str):
+        target = Path(path)
+        if not target.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The file '{path}' could not be found on disk.",
+            )
+            return
+        directory = target.parent if target.is_file() else target
+        QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory.resolve())))
+
+    def _open_file_preview(self, path: Path, title: str, max_bytes: int):
+        if not path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The file '{path}' could not be found on disk.",
+            )
+            return
+
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(max_bytes + 1)
+        except Exception as exc:  # pragma: no cover - filesystem error path
+            QtWidgets.QMessageBox.critical(
+                self,
+                f"Unable to Open {title}",
+                f"Failed to open '{path}': {exc}",
+            )
+            return
+
+        text = data.decode("utf-8", errors="replace")
+        truncated = len(data) > max_bytes
+        if truncated:
+            text += "\n\n… output truncated …"
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"{title} — {path.name}")
+        dialog.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        info = QtWidgets.QLabel(str(path))
+        info.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        layout.addWidget(info)
+
+        text_edit = QtWidgets.QPlainTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        text_edit.setPlainText(text)
+        layout.addWidget(text_edit)
+
+        if truncated:
+            notice = QtWidgets.QLabel(
+                "Only a portion of the file is shown to keep the preview responsive."
+            )
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(900, 600 if max_bytes > 8192 else 520)
+        dialog.exec()
 
     def _normalise_recipe_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         base = dict(data or {})
