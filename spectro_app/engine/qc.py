@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -50,11 +50,16 @@ class RollingNoiseResult:
 
 @dataclass
 class JoinResult:
-    count: int
-    max_offset: float
-    mean_offset: float
-    max_overlap_error: float
-    indices: List[int]
+    count: int = 0
+    max_offset: float = 0.0
+    mean_offset: float = 0.0
+    max_overlap_error: float = 0.0
+    indices: List[int] = field(default_factory=list)
+    offsets: List[float] = field(default_factory=list)
+    pre_deltas: List[float] = field(default_factory=list)
+    post_deltas: List[float] = field(default_factory=list)
+    pre_overlap_errors: List[float] = field(default_factory=list)
+    post_overlap_errors: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -279,50 +284,191 @@ def compute_join_diagnostics(
 
     join_cfg = join_cfg or {}
     if not join_cfg.get("enabled"):
-        return JoinResult(count=0, max_offset=0.0, mean_offset=0.0, max_overlap_error=0.0, indices=[])
+        return JoinResult()
 
     window = int(join_cfg.get("window", 10))
     if window < 1:
         window = 1
 
-    y = np.asarray(spec.intensity, dtype=float)
-    joins = pipeline.detect_joins(
-        spec.wavelength,
-        y,
-        threshold=join_cfg.get("threshold"),
-        window=window,
-    )
-    if not joins:
-        return JoinResult(count=0, max_offset=0.0, mean_offset=0.0, max_overlap_error=0.0, indices=[])
+    meta = spec.meta if isinstance(spec.meta, dict) else {}
 
+    def _as_float_list(values: Iterable[Any] | None) -> List[float]:
+        if values is None:
+            return []
+        result: List[float] = []
+        for value in values:
+            try:
+                result.append(float(value))
+            except (TypeError, ValueError):
+                result.append(float("nan"))
+        return result
+
+    indices: List[int] = []
     offsets: List[float] = []
-    overlap_errors: List[float] = []
-    for join_idx in joins:
-        left = y[max(0, join_idx - window) : join_idx]
-        right = y[join_idx : min(y.size, join_idx + window)]
-        if left.size == 0 or right.size == 0:
-            continue
-        left_mean = float(np.nanmean(left))
-        right_mean = float(np.nanmean(right))
-        offsets.append(right_mean - left_mean)
-        overlap_len = min(left.size, right.size)
-        if overlap_len:
-            left_tail = left[-overlap_len:]
-            right_head = right[:overlap_len]
-            overlap_errors.append(float(np.nanmean(np.abs(right_head - left_tail))))
+    pre_deltas: List[float] = []
+    post_deltas: List[float] = []
+    pre_overlap_errors: List[float] = []
+    post_overlap_errors: List[float] = []
 
-    if not offsets:
-        return JoinResult(count=len(joins), max_offset=0.0, mean_offset=0.0, max_overlap_error=0.0, indices=list(joins))
+    stats_meta = meta.get("join_statistics") if isinstance(meta, dict) else None
+    segments_meta = meta.get("join_segments") if isinstance(meta, dict) else None
 
-    max_offset = float(np.nanmax(np.abs(offsets))) if offsets else 0.0
-    mean_offset = float(np.nanmean(offsets)) if offsets else 0.0
-    max_overlap_error = float(np.nanmax(overlap_errors)) if overlap_errors else 0.0
+    if isinstance(stats_meta, dict):
+        indices = [int(idx) for idx in stats_meta.get("indices", [])]
+        offsets = _as_float_list(stats_meta.get("offsets"))
+        pre_deltas = _as_float_list(stats_meta.get("pre_deltas"))
+        post_deltas = _as_float_list(stats_meta.get("post_deltas"))
+        pre_overlap_errors = _as_float_list(stats_meta.get("pre_overlap_errors"))
+        post_overlap_errors = _as_float_list(stats_meta.get("post_overlap_errors"))
+
+        if (not pre_deltas or len(pre_deltas) != len(indices)) and isinstance(stats_meta.get("pre_means"), dict):
+            left_means = _as_float_list(stats_meta["pre_means"].get("left"))
+            right_means = _as_float_list(stats_meta["pre_means"].get("right"))
+            pre_deltas = [
+                right_means[i] - left_means[i]
+                if i < len(left_means) and i < len(right_means)
+                else float("nan")
+                for i in range(len(indices))
+            ]
+        if (not post_deltas or len(post_deltas) != len(indices)) and isinstance(stats_meta.get("post_means"), dict):
+            left_means = _as_float_list(stats_meta["post_means"].get("left"))
+            right_means = _as_float_list(stats_meta["post_means"].get("right"))
+            post_deltas = [
+                right_means[i] - left_means[i]
+                if i < len(left_means) and i < len(right_means)
+                else float("nan")
+                for i in range(len(indices))
+            ]
+
+    if (not indices or len(offsets) != len(indices)) and isinstance(segments_meta, dict):
+        seg_indices = [int(idx) for idx in segments_meta.get("indices", [])]
+        raw_segments = segments_meta.get("raw") or []
+        corrected_segments = segments_meta.get("corrected") or []
+        segment_window = int(segments_meta.get("window") or window)
+        if segment_window < 1:
+            segment_window = 1
+        if raw_segments and corrected_segments and len(raw_segments) >= len(seg_indices) + 1:
+            indices = seg_indices
+            offsets = []
+            pre_deltas = []
+            post_deltas = []
+            pre_overlap_errors = []
+            post_overlap_errors = []
+            for idx in range(len(seg_indices)):
+                left_raw = np.asarray(raw_segments[idx], dtype=float)
+                right_raw = np.asarray(raw_segments[idx + 1], dtype=float)
+                left_post = np.asarray(corrected_segments[idx], dtype=float)
+                right_post = np.asarray(corrected_segments[idx + 1], dtype=float)
+                if left_raw.size == 0 or right_raw.size == 0:
+                    offsets.append(float("nan"))
+                    pre_deltas.append(float("nan"))
+                    post_deltas.append(float("nan"))
+                    pre_overlap_errors.append(float("nan"))
+                    post_overlap_errors.append(float("nan"))
+                    continue
+
+                left_window_raw = left_raw[-segment_window:]
+                right_window_raw = right_raw[:segment_window]
+                left_window_post = left_post[-segment_window:]
+                right_window_post = right_post[:segment_window]
+
+                left_mean_pre = float(np.nanmean(left_window_raw)) if left_window_raw.size else float("nan")
+                right_mean_pre = float(np.nanmean(right_window_raw)) if right_window_raw.size else float("nan")
+                pre_deltas.append(right_mean_pre - left_mean_pre)
+
+                left_mean_post = float(np.nanmean(left_window_post)) if left_window_post.size else float("nan")
+                right_mean_post = float(np.nanmean(right_window_post)) if right_window_post.size else float("nan")
+                post_deltas.append(right_mean_post - left_mean_post)
+
+                offsets.append(
+                    float(np.nanmedian(right_window_raw) - np.nanmedian(left_window_raw))
+                )
+
+                overlap_len = min(left_window_raw.size, right_window_raw.size)
+                if overlap_len:
+                    left_tail_pre = left_window_raw[-overlap_len:]
+                    right_head_pre = right_window_raw[:overlap_len]
+                    pre_overlap_errors.append(float(np.nanmean(np.abs(right_head_pre - left_tail_pre))))
+                else:
+                    pre_overlap_errors.append(float("nan"))
+
+                overlap_len_post = min(left_window_post.size, right_window_post.size)
+                if overlap_len_post:
+                    left_tail_post = left_window_post[-overlap_len_post:]
+                    right_head_post = right_window_post[:overlap_len_post]
+                    post_overlap_errors.append(float(np.nanmean(np.abs(right_head_post - left_tail_post))))
+                else:
+                    post_overlap_errors.append(float("nan"))
+
+    if not indices:
+        y = np.asarray(spec.intensity, dtype=float)
+        joins = pipeline.detect_joins(
+            spec.wavelength,
+            y,
+            threshold=join_cfg.get("threshold"),
+            window=window,
+        )
+        if not joins:
+            return JoinResult()
+
+        offsets = []
+        pre_deltas = []
+        post_deltas = []
+        pre_overlap_errors = []
+        post_overlap_errors = []
+        for join_idx in joins:
+            left = y[max(0, join_idx - window) : join_idx]
+            right = y[join_idx : min(y.size, join_idx + window)]
+            if left.size == 0 or right.size == 0:
+                offsets.append(float("nan"))
+                pre_deltas.append(float("nan"))
+                post_deltas.append(float("nan"))
+                pre_overlap_errors.append(float("nan"))
+                post_overlap_errors.append(float("nan"))
+                continue
+            left_mean = float(np.nanmean(left))
+            right_mean = float(np.nanmean(right))
+            offsets.append(right_mean - left_mean)
+            pre_deltas.append(right_mean - left_mean)
+            post_deltas.append(right_mean - left_mean)
+            overlap_len = min(left.size, right.size)
+            if overlap_len:
+                left_tail = left[-overlap_len:]
+                right_head = right[:overlap_len]
+                overlap_val = float(np.nanmean(np.abs(right_head - left_tail)))
+            else:
+                overlap_val = float("nan")
+            pre_overlap_errors.append(overlap_val)
+            post_overlap_errors.append(overlap_val)
+        indices = list(joins)
+
+    offsets_arr = np.asarray(offsets, dtype=float)
+    finite_offsets = offsets_arr[np.isfinite(offsets_arr)]
+    if finite_offsets.size:
+        max_offset = float(np.nanmax(np.abs(finite_offsets)))
+        mean_offset = float(np.nanmean(finite_offsets))
+    else:
+        max_offset = 0.0
+        mean_offset = 0.0
+
+    post_overlap_arr = np.asarray(post_overlap_errors, dtype=float)
+    finite_post_overlap = post_overlap_arr[np.isfinite(post_overlap_arr)]
+    if finite_post_overlap.size:
+        max_overlap_error = float(np.nanmax(finite_post_overlap))
+    else:
+        max_overlap_error = 0.0
+
     return JoinResult(
-        count=len(joins),
+        count=len(indices),
         max_offset=max_offset,
         mean_offset=mean_offset,
         max_overlap_error=max_overlap_error,
-        indices=list(joins),
+        indices=list(indices),
+        offsets=list(offsets),
+        pre_deltas=list(pre_deltas),
+        post_deltas=list(post_deltas),
+        pre_overlap_errors=list(pre_overlap_errors),
+        post_overlap_errors=list(post_overlap_errors),
     )
 
 

@@ -597,28 +597,123 @@ def detect_joins(
 def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 10) -> Spectrum:
     """Apply offset corrections after joins using neighbouring medians."""
 
-    y = np.asarray(spec.intensity, dtype=float).copy()
-    n = y.size
+    raw_values = np.asarray(spec.intensity, dtype=float)
+    corrected = raw_values.astype(float).copy()
+    n = corrected.size
     window = max(1, int(window))
 
-    for join in sorted(set(int(idx) for idx in join_indices)):
-        if join <= 0 or join >= n:
+    joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
+
+    offsets: list[float] = []
+    pre_left_means: list[float] = []
+    pre_right_means: list[float] = []
+    post_left_means: list[float] = []
+    post_right_means: list[float] = []
+    pre_deltas: list[float] = []
+    post_deltas: list[float] = []
+    pre_overlap_errors: list[float] = []
+    post_overlap_errors: list[float] = []
+
+    for join in joins:
+        left_slice = slice(max(0, join - window), join)
+        right_slice = slice(join, min(n, join + window))
+        left_window_raw = raw_values[left_slice]
+        right_window_raw = raw_values[right_slice]
+        if left_window_raw.size == 0 or right_window_raw.size == 0:
+            offsets.append(float("nan"))
+            pre_left_means.append(float("nan"))
+            pre_right_means.append(float("nan"))
+            post_left_means.append(float("nan"))
+            post_right_means.append(float("nan"))
+            pre_deltas.append(float("nan"))
+            post_deltas.append(float("nan"))
+            pre_overlap_errors.append(float("nan"))
+            post_overlap_errors.append(float("nan"))
             continue
-        left = y[max(0, join - window) : join]
-        right = y[join : min(n, join + window)]
-        if left.size == 0 or right.size == 0:
-            continue
-        offset = np.nanmedian(right) - np.nanmedian(left)
+
+        left_mean_pre = float(np.nanmean(left_window_raw))
+        right_mean_pre = float(np.nanmean(right_window_raw))
+        pre_left_means.append(left_mean_pre)
+        pre_right_means.append(right_mean_pre)
+        pre_delta = float(right_mean_pre - left_mean_pre)
+        pre_deltas.append(pre_delta)
+
+        overlap_len = min(left_window_raw.size, right_window_raw.size)
+        if overlap_len:
+            left_tail_pre = left_window_raw[-overlap_len:]
+            right_head_pre = right_window_raw[:overlap_len]
+            pre_overlap = float(np.nanmean(np.abs(right_head_pre - left_tail_pre)))
+        else:
+            pre_overlap = float("nan")
+        pre_overlap_errors.append(pre_overlap)
+
+        offset = np.nanmedian(right_window_raw) - np.nanmedian(left_window_raw)
         if np.isfinite(offset):
-            y[join:] -= offset
+            corrected[join:] -= offset
+            offsets.append(float(offset))
+        else:
+            offsets.append(float("nan"))
+
+        left_window_post = corrected[left_slice]
+        right_window_post = corrected[right_slice]
+        left_mean_post = float(np.nanmean(left_window_post)) if left_window_post.size else float("nan")
+        right_mean_post = float(np.nanmean(right_window_post)) if right_window_post.size else float("nan")
+        post_left_means.append(left_mean_post)
+        post_right_means.append(right_mean_post)
+        post_delta = float(right_mean_post - left_mean_post)
+        post_deltas.append(post_delta)
+
+        if overlap_len:
+            left_tail_post = left_window_post[-overlap_len:]
+            right_head_post = right_window_post[:overlap_len]
+            post_overlap = float(np.nanmean(np.abs(right_head_post - left_tail_post)))
+        else:
+            post_overlap = float("nan")
+        post_overlap_errors.append(post_overlap)
+
+    boundaries = [0, *joins, n]
+    raw_segments = [
+        np.asarray(raw_values[start:stop], dtype=float).tolist()
+        for start, stop in zip(boundaries[:-1], boundaries[1:])
+    ]
+    corrected_segments = [
+        np.asarray(corrected[start:stop], dtype=float).tolist()
+        for start, stop in zip(boundaries[:-1], boundaries[1:])
+    ]
 
     meta = dict(spec.meta)
-    if join_indices:
+    if joins:
         meta.setdefault("join_corrected", True)
-    _update_channel(meta, "joined", y, overwrite=True)
+
+    join_segments_meta = dict(meta.get("join_segments") or {})
+    join_segments_meta.setdefault("raw", raw_segments)
+    join_segments_meta["corrected"] = corrected_segments
+    join_segments_meta["indices"] = [int(idx) for idx in joins]
+    join_segments_meta["window"] = window
+    meta["join_segments"] = join_segments_meta
+
+    join_stats = {
+        "indices": [int(idx) for idx in joins],
+        "window": window,
+        "offsets": offsets,
+        "pre_means": {"left": pre_left_means, "right": pre_right_means},
+        "post_means": {"left": post_left_means, "right": post_right_means},
+        "pre_deltas": pre_deltas,
+        "post_deltas": post_deltas,
+        "pre_overlap_errors": pre_overlap_errors,
+        "post_overlap_errors": post_overlap_errors,
+    }
+    meta["join_statistics"] = join_stats
+
+    channels = dict(meta.get("channels") or {})
+    if "join_raw" not in channels:
+        channels["join_raw"] = np.asarray(raw_values, dtype=float).copy()
+    channels["join_corrected"] = np.asarray(corrected, dtype=float).copy()
+    meta["channels"] = channels
+    _update_channel(meta, "joined", corrected, overwrite=True)
     return Spectrum(
         wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
-        intensity=np.asarray(y, dtype=float).copy(),
+        intensity=np.asarray(corrected, dtype=float).copy(),
         meta=meta,
     )
 

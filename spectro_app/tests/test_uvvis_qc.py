@@ -54,6 +54,13 @@ def test_uvvis_analyze_produces_qc_metrics():
     assert row["saturation_flag"] is True
     assert row["spike_count"] >= 1
     assert row["join_count"] >= 1
+    assert isinstance(row["join_offsets"], list) and row["join_offsets"]
+    assert isinstance(row["join_pre_deltas"], list) and row["join_pre_deltas"]
+    assert isinstance(row["join_post_deltas"], list) and row["join_post_deltas"]
+    assert isinstance(row["join_pre_overlap_errors"], list)
+    assert isinstance(row["join_post_overlap_errors"], list)
+    assert row["join_pre_delta_abs_max"] >= row["join_post_delta_abs_max"]
+    assert row["join_post_overlap_max"] <= row["join_pre_overlap_max"] or np.isnan(row["join_pre_overlap_max"])
     assert np.isfinite(row["noise_rsd"]) and row["noise_rsd"] >= 0
     assert "saturation" in row["flags"]
     assert "Spikes" in row["summary"]

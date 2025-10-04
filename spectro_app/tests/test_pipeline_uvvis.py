@@ -785,6 +785,23 @@ def test_preprocess_uses_default_join_detection():
     assert processed_sample.meta.get("join_indices") == (join_idx,)
     assert processed_sample.meta.get("join_corrected") is True
 
+    stats = processed_sample.meta.get("join_statistics")
+    assert isinstance(stats, dict)
+    assert stats["indices"] == [join_idx]
+    assert stats["offsets"][0] == pytest.approx(stats["pre_deltas"][0], rel=1e-6)
+    assert stats["offsets"][0] > 0.3
+    assert stats["post_deltas"][0] == pytest.approx(0.0, abs=1e-6)
+
+    segments = processed_sample.meta.get("join_segments")
+    assert isinstance(segments, dict)
+    assert segments["indices"] == [join_idx]
+    assert len(segments["raw"]) == 2
+    assert len(segments["corrected"]) == 2
+
+    channels = processed_sample.meta.get("channels")
+    assert "join_raw" in channels
+    assert "join_corrected" in channels
+
     original_delta = np.max(np.abs(intensity - baseline))
     corrected_delta = np.max(np.abs(processed_sample.intensity - baseline))
     assert original_delta > 0.3
