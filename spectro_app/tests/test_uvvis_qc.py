@@ -194,6 +194,46 @@ def test_uvvis_isosbestic_checks_capture_crossing():
     assert feature_checks == qc_rows[0]["isosbestic"]
 
 
+def test_uvvis_negative_intensity_flagging():
+    wl = np.linspace(400.0, 410.0, 6)
+    positive = Spectrum(
+        wavelength=wl,
+        intensity=np.linspace(0.1, 0.2, wl.size),
+        meta={"sample_id": "pos", "role": "sample"},
+    )
+
+    negative_trace = np.linspace(0.1, 0.2, wl.size)
+    negative_trace[2] = -0.05
+    negative = Spectrum(
+        wavelength=wl,
+        intensity=negative_trace,
+        meta={
+            "sample_id": "neg",
+            "role": "sample",
+            "channels": {"raw": negative_trace.copy(), "processed": negative_trace.copy()},
+        },
+    )
+
+    recipe = {"qc": {"negative_intensity_tolerance": 0.0}}
+
+    _, qc_rows = UvVisPlugin().analyze([positive, negative], recipe)
+
+    by_id = {row["sample_id"]: row for row in qc_rows}
+    pos_row = by_id["pos"]
+    neg_row = by_id["neg"]
+
+    assert pos_row["negative_intensity_flag"] is False
+    assert pos_row["negative_intensity_fraction"] == pytest.approx(0.0)
+    assert "negative_intensity" not in pos_row["flags"]
+
+    assert neg_row["negative_intensity_flag"] is True
+    assert neg_row["negative_intensity_fraction"] == pytest.approx(1 / wl.size)
+    assert "negative_intensity" in neg_row["flags"]
+    channels = neg_row["negative_intensity_channels"]
+    assert channels["raw"]["count"] >= 1
+    assert channels["raw"]["fraction"] == pytest.approx(1 / wl.size)
+
+
 def test_uvvis_kinetics_summary_tracks_delta_a():
     wl = np.linspace(200.0, 260.0, 121)
     start = datetime(2024, 1, 1, 10, 0)

@@ -89,6 +89,14 @@ def _mean_abs_first_difference(values: np.ndarray) -> float:
     if not np.any(finite):
         return float("nan")
     return float(np.nanmean(abs_diffs[finite]))
+@dataclass
+class NegativeIntensityResult:
+    processed_count: int
+    processed_total: int
+    processed_fraction: float
+    channels: Dict[str, Dict[str, float | int]]
+    flag: bool = False
+    tolerance: float = 0.0
 
 
 def _infer_mode(spec: Spectrum) -> str:
@@ -468,6 +476,43 @@ def compute_uvvis_drift_map(specs: Iterable[Spectrum], recipe: Dict[str, Any]) -
     return drift_map
 
 
+def detect_negative_intensity(spec: Spectrum) -> NegativeIntensityResult:
+    intensity = np.asarray(spec.intensity, dtype=float)
+    finite = np.isfinite(intensity)
+    total = int(np.count_nonzero(finite))
+    negatives = int(np.count_nonzero(intensity[finite] < 0)) if total else 0
+    fraction = float(negatives / total) if total else 0.0
+
+    channel_stats: Dict[str, Dict[str, float | int]] = {}
+    channels_meta = spec.meta.get("channels") if isinstance(spec.meta, dict) else None
+    if isinstance(channels_meta, dict):
+        for name, values in channels_meta.items():
+            try:
+                arr = np.asarray(values, dtype=float)
+            except Exception:  # pragma: no cover - unexpected metadata types
+                continue
+            mask = np.isfinite(arr)
+            total_ch = int(np.count_nonzero(mask))
+            if total_ch == 0:
+                count_ch = 0
+                frac_ch = 0.0
+            else:
+                count_ch = int(np.count_nonzero(arr[mask] < 0))
+                frac_ch = float(count_ch / total_ch)
+            channel_stats[name] = {
+                "count": count_ch,
+                "total": total_ch,
+                "fraction": frac_ch,
+            }
+
+    return NegativeIntensityResult(
+        processed_count=negatives,
+        processed_total=total,
+        processed_fraction=fraction,
+        channels=channel_stats,
+    )
+
+
 def summarise_uvvis_metrics(metrics: Dict[str, Any]) -> str:
     parts: List[str] = []
     saturation: SaturationResult = metrics["saturation"]
@@ -476,6 +521,7 @@ def summarise_uvvis_metrics(metrics: Dict[str, Any]) -> str:
     spikes: SpikeResult = metrics["spikes"]
     smoothing: SmoothingGuardResult = metrics["smoothing"]
     drift: DriftResult = metrics.get("drift")
+    negative: NegativeIntensityResult | None = metrics.get("negative_intensity")
 
     if saturation.flag:
         parts.append("Saturation detected")
@@ -491,6 +537,8 @@ def summarise_uvvis_metrics(metrics: Dict[str, Any]) -> str:
             parts.append(f"Drift {drift.slope_per_hour:.3g}/h")
         elif drift.available and drift.slope_per_hour is not None and np.isfinite(drift.slope_per_hour):
             parts.append(f"Drift slope {drift.slope_per_hour:.3g}/h")
+    if negative and negative.processed_count:
+        parts.append(f"Negative intensity {negative.processed_fraction:.1%}")
     return "; ".join(parts)
 
 
@@ -505,6 +553,7 @@ def compute_uvvis_qc(
     join = compute_join_diagnostics(spec, recipe.get("join"))
     spikes = count_spikes(spec, recipe.get("despike"))
     smoothing = smoothing_guard(spec, recipe.get("smoothing"))
+    negative = detect_negative_intensity(spec)
 
     processed_roughness = _mean_abs_first_difference(spec.intensity)
     channel_roughness: Dict[str, float] = {}
@@ -546,6 +595,11 @@ def compute_uvvis_qc(
     noise_limit = float(qc_cfg.get("noise_rsd_limit", 5.0))
     join_limit = float(qc_cfg.get("join_offset_limit", recipe.get("join", {}).get("threshold", 0.0) or 0.5))
     spike_limit = int(qc_cfg.get("spike_limit", 0))
+    negative_tolerance = float(qc_cfg.get("negative_intensity_tolerance", 0.0))
+    if negative_tolerance < 0:
+        negative_tolerance = 0.0
+    negative.tolerance = negative_tolerance
+    negative.flag = negative.processed_fraction > negative_tolerance
 
     if saturation.flag:
         flags.append("saturation")
@@ -559,6 +613,8 @@ def compute_uvvis_qc(
         flags.append("smoothing_guard")
     if drift.flag:
         flags.append("drift")
+    if negative.flag:
+        flags.append("negative_intensity")
 
     summary = summarise_uvvis_metrics(
         {
@@ -568,6 +624,7 @@ def compute_uvvis_qc(
             "spikes": spikes,
             "smoothing": smoothing,
             "drift": drift,
+            "negative_intensity": negative,
         }
     )
 
@@ -580,6 +637,7 @@ def compute_uvvis_qc(
         "smoothing": smoothing,
         "drift": drift,
         "roughness": roughness_metrics,
+        "negative_intensity": negative,
         "flags": flags,
         "summary": summary,
     }
