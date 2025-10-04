@@ -71,6 +71,8 @@ class UvVisPlugin(SpectroscopyPlugin):
     xlabel = "Wavelength (nm)"
     DEFAULT_BLANK_TIME_WINDOW_MINUTES = 240.0
     DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
+    HELIOS_GAMMA_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
+    GENERIC_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
 
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
@@ -81,6 +83,35 @@ class UvVisPlugin(SpectroscopyPlugin):
         """Return results from the most recent calibration run."""
 
         return self._last_calibration_results
+
+    def _default_wavelength_limits(self, spec: Spectrum) -> tuple[float, float]:
+        instrument = str(spec.meta.get("instrument") or "").lower()
+        if "helios gamma" in instrument:
+            return self.HELIOS_GAMMA_WAVELENGTH_LIMITS_NM
+        return self.GENERIC_WAVELENGTH_LIMITS_NM
+
+    def _effective_domain(
+        self, base_domain: dict[str, object] | None, spec: Spectrum
+    ) -> dict[str, object] | None:
+        limits_min, limits_max = self._default_wavelength_limits(spec)
+        domain: dict[str, object]
+        if base_domain:
+            domain = dict(base_domain)
+        else:
+            domain = {}
+
+        base_min = domain.get("min")
+        base_max = domain.get("max")
+
+        effective_min = limits_min if base_min is None else max(limits_min, float(base_min))
+        effective_max = limits_max if base_max is None else min(limits_max, float(base_max))
+
+        if effective_min >= effective_max:
+            raise ValueError("Domain minimum must be smaller than maximum")
+
+        domain["min"] = effective_min
+        domain["max"] = effective_max
+        return domain
 
     def detect(self, paths):
         return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
@@ -696,7 +727,13 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not specs:
             return []
 
-        domain_cfg = recipe.get("domain")
+        domain_cfg_raw = recipe.get("domain")
+        if domain_cfg_raw is None:
+            domain_cfg: dict[str, object] | None = None
+        elif isinstance(domain_cfg_raw, dict):
+            domain_cfg = dict(domain_cfg_raw)
+        else:
+            raise TypeError("Domain configuration must be a mapping")
         blank_cfg = recipe.get("blank", {})
         baseline_cfg = recipe.get("baseline", {})
         join_cfg = recipe.get("join", {})
@@ -729,7 +766,8 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         stage_one: list[Spectrum] = []
         for spec in specs:
-            coerced = pipeline.coerce_domain(spec, domain_cfg)
+            effective_domain = self._effective_domain(domain_cfg, spec)
+            coerced = pipeline.coerce_domain(spec, effective_domain)
             processed = coerced
             joins: list[int] = []
             if join_cfg.get("enabled"):
