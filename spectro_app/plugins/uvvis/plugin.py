@@ -74,6 +74,9 @@ class UvVisPlugin(SpectroscopyPlugin):
     DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
     HELIOS_GAMMA_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
     GENERIC_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
+    DEFAULT_JOIN_ENABLED = True
+    DEFAULT_JOIN_WINDOW_POINTS = 3
+    DEFAULT_JOIN_THRESHOLD_ABS = 0.2
 
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
@@ -84,6 +87,30 @@ class UvVisPlugin(SpectroscopyPlugin):
         """Return results from the most recent calibration run."""
 
         return self._last_calibration_results
+
+    def _apply_recipe_defaults(self, recipe: Dict[str, object] | None) -> Dict[str, object]:
+        if recipe is None:
+            base: Dict[str, object] = {}
+        elif isinstance(recipe, dict):
+            base = dict(recipe)
+        else:
+            raise TypeError("Recipe configuration must be a mapping or None")
+
+        join_cfg_raw = base.get("join")
+        if join_cfg_raw is None:
+            join_cfg: Dict[str, object] = {}
+        elif isinstance(join_cfg_raw, dict):
+            join_cfg = dict(join_cfg_raw)
+        else:
+            raise TypeError("Join configuration must be a mapping")
+
+        join_defaults: Dict[str, object] = {"enabled": self.DEFAULT_JOIN_ENABLED, "window": self.DEFAULT_JOIN_WINDOW_POINTS}
+        if self.DEFAULT_JOIN_THRESHOLD_ABS is not None:
+            join_defaults["threshold"] = self.DEFAULT_JOIN_THRESHOLD_ABS
+
+        join_defaults.update(join_cfg)
+        base["join"] = join_defaults
+        return base
 
     def _default_wavelength_limits(self, spec: Spectrum) -> tuple[float, float]:
         instrument = str(spec.meta.get("instrument") or "").lower()
@@ -743,6 +770,8 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not specs:
             return []
 
+        recipe = self._apply_recipe_defaults(recipe)
+
         domain_cfg_raw = recipe.get("domain")
         if domain_cfg_raw is None:
             domain_cfg: dict[str, object] | None = None
@@ -752,7 +781,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             raise TypeError("Domain configuration must be a mapping")
         blank_cfg = recipe.get("blank", {})
         baseline_cfg = recipe.get("baseline", {})
-        join_cfg = recipe.get("join", {})
+        join_cfg = dict(recipe.get("join", {}))
         despike_cfg = recipe.get("despike", {})
         smoothing_cfg = recipe.get("smoothing", {})
         replicate_cfg = recipe.get("replicates", {})
@@ -2124,6 +2153,8 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def analyze(self, specs, recipe):
         from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
+
+        recipe = self._apply_recipe_defaults(recipe)
 
         feature_cfg = dict(recipe.get("features", {})) if recipe else {}
         peak_cfg = dict(feature_cfg.get("peaks", {}))
