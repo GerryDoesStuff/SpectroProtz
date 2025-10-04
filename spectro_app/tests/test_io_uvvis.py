@@ -55,8 +55,13 @@ def test_helios_excel_parsing(tmp_path):
     assert len(spectra) == 1
     spec = spectra[0]
     assert np.allclose(spec.wavelength, [240.0, 260.0])
-    assert np.allclose(spec.intensity, [85.0, 83.0])
-    assert spec.meta["mode"] == "transmittance"
+    expected_absorbance = -np.log10(np.array([0.85, 0.83]))
+    assert np.allclose(spec.intensity, expected_absorbance)
+    assert spec.meta["mode"] == "absorbance"
+    assert spec.meta.get("original_mode") == "transmittance"
+    channels = spec.meta.get("channels") or {}
+    assert "raw_transmittance" in channels
+    assert np.allclose(np.asarray(channels["raw_transmittance"], dtype=float), [85.0, 83.0])
     assert spec.meta["pathlength_cm"] == 0.5
     assert spec.meta["blank_id"] == "Buffer"
     assert spec.meta["sample_id"] == "Protein-01"
@@ -91,6 +96,33 @@ wavelength,Sample A,Blank Control
 
     assert blank_spec.meta["role"] == "blank"
     assert blank_spec.meta["blank_id"] == "Blank Control"
+
+
+def test_generic_reflectance_conversion(tmp_path):
+    generic_csv = """Instrument: CustomSpec 2000
+Mode: Reflectance
+
+wavelength,Sample
+400,45
+450,30
+"""
+
+    path = tmp_path / "reflectance.csv"
+    path.write_text(generic_csv, encoding="utf-8")
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(path)])
+
+    assert len(spectra) == 1
+    spec = spectra[0]
+    assert np.allclose(spec.wavelength, [400.0, 450.0])
+    expected_absorbance = -np.log10(np.array([0.45, 0.30]))
+    assert np.allclose(spec.intensity, expected_absorbance)
+    assert spec.meta["mode"] == "absorbance"
+    assert spec.meta.get("original_mode") == "reflectance"
+    channels = spec.meta.get("channels") or {}
+    assert "raw_reflectance" in channels
+    assert np.allclose(np.asarray(channels["raw_reflectance"], dtype=float), [45.0, 30.0])
 
 
 def test_manifest_metadata_enrichment(tmp_path):

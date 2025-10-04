@@ -31,6 +31,7 @@ from scipy.signal import find_peaks, peak_widths
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from spectro_app.engine.excel_writer import write_workbook
+from .conversions import convert_intensity_to_absorbance, normalise_mode
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
 from . import pipeline
 
@@ -595,11 +596,13 @@ class UvVisPlugin(SpectroscopyPlugin):
         parsed_meta = parse_metadata_lines(meta_lines)
         meta: Dict[str, object] = {**base_meta, **parsed_meta}
         meta.setdefault("technique", "uvvis")
-        mode = meta.get("mode")
-        if not mode:
-            mode = self._infer_mode_from_headers(df.columns[1:])
-            if mode:
-                meta["mode"] = mode
+        mode = normalise_mode(meta.get("mode"))
+        if mode:
+            meta["mode"] = mode
+        else:
+            inferred_mode = self._infer_mode_from_headers(df.columns[1:])
+            if inferred_mode:
+                meta["mode"] = inferred_mode
 
         wavelength = pd.to_numeric(df.iloc[:, 0], errors="coerce")
         intensity_columns = df.columns[1:]
@@ -621,6 +624,19 @@ class UvVisPlugin(SpectroscopyPlugin):
                 column_meta.setdefault("blank_id", blank_candidates[0])
             if role == "blank":
                 column_meta.setdefault("blank_id", column)
+            raw_trace = inten.copy()
+            converted, channel_key, updated_mode, original_mode = convert_intensity_to_absorbance(
+                inten, column_meta.get("mode")
+            )
+            inten = converted
+            if channel_key:
+                channels = dict(column_meta.get("channels") or {})
+                channels[channel_key] = raw_trace
+                column_meta["channels"] = channels
+                if original_mode:
+                    column_meta.setdefault("original_mode", original_mode)
+            if updated_mode:
+                column_meta["mode"] = updated_mode
             records.append({
                 "wavelength": wl,
                 "intensity": inten,

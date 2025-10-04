@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import pandas as pd
 
 from spectro_app.engine.io_common import sniff_locale
+from .conversions import convert_intensity_to_absorbance, normalise_mode
 
 
 KEY_ALIASES = {
@@ -227,6 +228,11 @@ def _dataframe_to_records(df: pd.DataFrame, base_meta: Dict[str, Any]) -> List[D
     if df.shape[1] < 2:
         raise ValueError("Helios export must contain wavelength and at least one intensity column")
 
+    base_meta = dict(base_meta)
+    mode = normalise_mode(base_meta.get("mode"))
+    if mode:
+        base_meta["mode"] = mode
+
     wavelength = pd.to_numeric(df.iloc[:, 0], errors="coerce")
     records: List[Dict[str, Any]] = []
     for idx, column in enumerate(df.columns[1:], start=1):
@@ -245,6 +251,19 @@ def _dataframe_to_records(df: pd.DataFrame, base_meta: Dict[str, Any]) -> List[D
         column_meta.setdefault("role", role)
         if role == "blank":
             column_meta.setdefault("blank_id", column_meta.get("sample_id", column))
+        raw_trace = inten.copy()
+        converted, channel_key, updated_mode, original_mode = convert_intensity_to_absorbance(
+            inten, column_meta.get("mode")
+        )
+        inten = converted
+        if channel_key:
+            channels = dict(column_meta.get("channels") or {})
+            channels[channel_key] = raw_trace
+            column_meta["channels"] = channels
+            if original_mode:
+                column_meta.setdefault("original_mode", original_mode)
+        if updated_mode:
+            column_meta["mode"] = updated_mode
         records.append(
             {
                 "wavelength": wl,
@@ -301,18 +320,7 @@ def _is_number(token: str, decimal: str) -> bool:
 
 
 def _normalise_mode(value: str | None) -> Optional[str]:
-    if value is None:
-        return None
-    val = str(value).strip().lower()
-    if not val:
-        return None
-    if val.startswith("abs") or "absorb" in val:
-        return "absorbance"
-    if "%t" in val or "trans" in val:
-        return "transmittance"
-    if "reflect" in val:
-        return "reflectance"
-    return val
+    return normalise_mode(value)
 
 
 def _parse_pathlength(value: str | None) -> Optional[float]:
