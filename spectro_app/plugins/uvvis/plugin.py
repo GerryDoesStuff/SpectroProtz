@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import copy
 import io
+import math
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -73,6 +74,13 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
+        self._last_calibration_results: Dict[str, Any] | None = None
+
+    @property
+    def last_calibration_results(self) -> Dict[str, Any] | None:
+        """Return results from the most recent calibration run."""
+
+        return self._last_calibration_results
 
     def detect(self, paths):
         return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
@@ -1074,6 +1082,154 @@ class UvVisPlugin(SpectroscopyPlugin):
         arr[~mask] = np.interp(x[~mask], x[mask], arr[mask])
         return arr
 
+    @staticmethod
+    def _calibration_signal_from_spec(
+        spec: Spectrum,
+        *,
+        wavelength: float,
+        bandwidth: float | None,
+    ) -> float:
+        wl = np.asarray(spec.wavelength, dtype=float)
+        intensity = np.asarray(spec.intensity, dtype=float)
+        mask = np.isfinite(wl) & np.isfinite(intensity)
+        if mask.sum() < 2:
+            return float("nan")
+        wl = wl[mask]
+        intensity = intensity[mask]
+        if wavelength < float(np.min(wl)) or wavelength > float(np.max(wl)):
+            return float("nan")
+        if bandwidth is not None:
+            width = float(bandwidth)
+        else:
+            width = 0.0
+        if width > 0:
+            half = width / 2.0
+            region = (wl >= wavelength - half) & (wl <= wavelength + half)
+            if np.count_nonzero(region) >= 1:
+                window_values = intensity[region]
+                if window_values.size == 0:
+                    return float("nan")
+                return float(np.nanmean(window_values))
+        return float(np.interp(wavelength, wl, intensity))
+
+    def _collect_calibration_measurements(
+        self,
+        sample_specs: Sequence[Spectrum],
+        *,
+        wavelength: float,
+        bandwidth: float | None,
+        default_pathlength: float | None,
+    ) -> Dict[str, Any]:
+        raw_values: List[float] = []
+        norm_values: List[float] = []
+        pathlengths: List[float] = []
+        for spec in sample_specs:
+            raw = self._calibration_signal_from_spec(
+                spec,
+                wavelength=wavelength,
+                bandwidth=bandwidth,
+            )
+            if not math.isfinite(raw):
+                continue
+            path = self._coerce_float(spec.meta.get("pathlength_cm")) if spec.meta else None
+            if path is None or not math.isfinite(path) or path <= 0:
+                path = default_pathlength
+            if path is None or not math.isfinite(path) or path <= 0:
+                path = 1.0
+            raw_values.append(float(raw))
+            norm_values.append(float(raw) / float(path))
+            pathlengths.append(float(path))
+        if not raw_values:
+            return {
+                "raw_absorbance": float("nan"),
+                "response": float("nan"),
+                "responses": [],
+                "raw_values": [],
+                "pathlengths": [],
+                "pathlength_cm": float(default_pathlength) if default_pathlength is not None else float("nan"),
+                "replicates": 0,
+            }
+        return {
+            "raw_absorbance": float(np.nanmean(raw_values)),
+            "response": float(np.nanmean(norm_values)),
+            "responses": [float(val) for val in norm_values],
+            "raw_values": [float(val) for val in raw_values],
+            "pathlengths": [float(val) for val in pathlengths],
+            "pathlength_cm": float(np.nanmean(pathlengths)) if pathlengths else (
+                float(default_pathlength) if default_pathlength is not None else float("nan")
+            ),
+            "replicates": len(raw_values),
+        }
+
+    @staticmethod
+    def _normalize_standard_entries(entries: Any) -> List[Dict[str, Any]]:
+        if entries is None:
+            return []
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(entries, dict):
+            items: Sequence[Any] = [
+                {"sample_id": key, "concentration": value} for key, value in entries.items()
+            ]
+        elif isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)):
+            items = entries
+        else:
+            items = [entries]
+        for item in items:
+            if isinstance(item, dict):
+                sample_id = item.get("sample_id") or item.get("id") or item.get("name")
+                if sample_id is None:
+                    continue
+                normalized.append({"sample_id": str(sample_id), **{k: v for k, v in item.items() if k not in {"sample_id", "id", "name"}}})
+            elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                normalized.append({"sample_id": str(item[0]), "concentration": item[1]})
+        return normalized
+
+    @staticmethod
+    def _normalize_unknown_entries(entries: Any) -> List[Dict[str, Any]]:
+        if entries is None:
+            return []
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(entries, dict):
+            items: Sequence[Any] = []
+            for key, value in entries.items():
+                if isinstance(value, dict):
+                    payload = dict(value)
+                else:
+                    payload = {"dilution_factor": value} if isinstance(value, (int, float)) else {}
+                payload["sample_id"] = key
+                items.append(payload)
+        elif isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)):
+            items = entries
+        else:
+            items = [entries]
+        for item in items:
+            if isinstance(item, dict):
+                sample_id = item.get("sample_id") or item.get("id") or item.get("name")
+                if sample_id is None:
+                    continue
+                payload = dict(item)
+                payload["sample_id"] = str(sample_id)
+                normalized.append(payload)
+            else:
+                normalized.append({"sample_id": str(item)})
+        return normalized
+
+    @staticmethod
+    def _assign_calibration_payload(
+        sample_specs: Sequence[Spectrum] | None,
+        qc_rows: Sequence[Dict[str, Any]] | None,
+        target_name: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        for spec in sample_specs or []:
+            if spec.meta is None:
+                spec.meta = {}
+            calibration_meta = spec.meta.setdefault("calibration", {})
+            calibration_meta[target_name] = dict(payload)
+        for row in qc_rows or []:
+            row.setdefault("calibration", {})
+            row["calibration"][target_name] = dict(payload)
+
     def _compute_band_value(
         self,
         wl: np.ndarray,
@@ -1483,6 +1639,431 @@ class UvVisPlugin(SpectroscopyPlugin):
             summaries[sample_id] = summary
         return summaries
 
+    def _perform_calibration(
+        self,
+        specs: List[Spectrum],
+        qc_rows: List[Dict[str, Any]],
+        recipe: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        calibration_cfg = dict(recipe.get("calibration", {})) if recipe else {}
+        enabled = bool(calibration_cfg.get("enabled", True))
+        if not calibration_cfg or not enabled:
+            status = "disabled" if calibration_cfg and not enabled else "not_configured"
+            return {"enabled": False, "status": status, "targets": []}
+
+        lod_multiplier = float(calibration_cfg.get("lod_multiplier", 3.0))
+        loq_multiplier = float(calibration_cfg.get("loq_multiplier", 10.0))
+        default_bandwidth = self._coerce_float(calibration_cfg.get("bandwidth"))
+
+        sample_lookup: Dict[str, List[Spectrum]] = {}
+        sample_roles: Dict[str, str] = {}
+        for spec in specs:
+            sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
+            sample_lookup.setdefault(sample_id, []).append(spec)
+            role = str(spec.meta.get("role", "")) if spec.meta else ""
+            if sample_id not in sample_roles and role:
+                sample_roles[sample_id] = role.lower()
+
+        qc_lookup: Dict[str, List[Dict[str, Any]]] = {}
+        for row in qc_rows:
+            sample_id = row.get("sample_id")
+            if sample_id is None:
+                continue
+            qc_lookup.setdefault(str(sample_id), []).append(row)
+
+        raw_targets = calibration_cfg.get("targets")
+        if raw_targets is None:
+            raw_targets = []
+        elif not isinstance(raw_targets, Sequence) or isinstance(raw_targets, (str, bytes)):
+            raw_targets = [raw_targets]
+
+        target_results: List[Dict[str, Any]] = []
+        for index, target_cfg_raw in enumerate(raw_targets):
+            if isinstance(target_cfg_raw, dict):
+                target_cfg = dict(target_cfg_raw)
+            else:
+                target_cfg = {"name": target_cfg_raw}
+
+            name = str(target_cfg.get("name") or f"target_{index + 1}")
+            wavelength_val = self._coerce_float(target_cfg.get("wavelength"))
+            if wavelength_val is None:
+                target_results.append(
+                    {
+                        "name": name,
+                        "status": "failed",
+                        "errors": ["Target wavelength was not provided."],
+                        "warnings": [],
+                        "standards": [],
+                        "unknowns": [],
+                        "fit": None,
+                        "wavelength": None,
+                        "bandwidth": None,
+                        "pathlength_cm": None,
+                    }
+                )
+                continue
+
+            bandwidth = self._coerce_float(target_cfg.get("bandwidth"))
+            if bandwidth is None:
+                bandwidth = default_bandwidth
+
+            pathlength = self._coerce_float(target_cfg.get("pathlength_cm"))
+            if pathlength is None:
+                pathlength = self._coerce_float(calibration_cfg.get("pathlength_cm"))
+            if pathlength is None or not math.isfinite(pathlength) or pathlength <= 0:
+                pathlength = 1.0
+
+            fit_intercept = bool(target_cfg.get("fit_intercept", True))
+            r2_threshold = self._coerce_float(target_cfg.get("r2_threshold"))
+            if r2_threshold is None:
+                r2_threshold = self._coerce_float(calibration_cfg.get("r2_threshold"))
+
+            standards_entries = self._normalize_standard_entries(target_cfg.get("standards"))
+            if not standards_entries and calibration_cfg.get("standards") is not None:
+                standards_entries = self._normalize_standard_entries(calibration_cfg.get("standards"))
+
+            detected_standards: Dict[str, float] = {}
+            if not standards_entries:
+                for sample_id, sample_specs in sample_lookup.items():
+                    role = sample_roles.get(sample_id, "").lower()
+                    if "standard" not in role:
+                        continue
+                    concentration_val: float | None = None
+                    for spec in sample_specs:
+                        meta = spec.meta or {}
+                        concentration_val = (
+                            self._coerce_float(meta.get("concentration"))
+                            or self._coerce_float(meta.get("target_concentration"))
+                            or self._coerce_float(meta.get("standard_concentration"))
+                        )
+                        if concentration_val is not None:
+                            break
+                    if concentration_val is None:
+                        continue
+                    if sample_id not in detected_standards:
+                        detected_standards[sample_id] = concentration_val
+                standards_entries = [
+                    {"sample_id": sample_id, "concentration": conc}
+                    for sample_id, conc in detected_standards.items()
+                ]
+
+            target_result: Dict[str, Any] = {
+                "name": name,
+                "status": "not_computed",
+                "errors": [],
+                "warnings": [],
+                "standards": [],
+                "unknowns": [],
+                "fit": None,
+                "wavelength": float(wavelength_val),
+                "bandwidth": float(bandwidth) if bandwidth is not None else None,
+                "pathlength_cm": float(pathlength),
+            }
+
+            if not standards_entries:
+                target_result["status"] = "failed"
+                target_result["errors"].append("No calibration standards were provided.")
+                target_results.append(target_result)
+                continue
+
+            standard_points: List[Dict[str, Any]] = []
+            for entry in standards_entries:
+                sample_id = str(entry.get("sample_id")) if entry.get("sample_id") is not None else None
+                if not sample_id:
+                    continue
+                concentration_val = self._coerce_float(entry.get("concentration"))
+                if concentration_val is None or not math.isfinite(concentration_val):
+                    meta_specs = sample_lookup.get(sample_id, [])
+                    for spec in meta_specs:
+                        meta = spec.meta or {}
+                        concentration_val = (
+                            self._coerce_float(meta.get("concentration"))
+                            or self._coerce_float(meta.get("target_concentration"))
+                            or self._coerce_float(meta.get("standard_concentration"))
+                        )
+                        if concentration_val is not None and math.isfinite(concentration_val):
+                            break
+                sample_specs = sample_lookup.get(sample_id, [])
+                measurement = self._collect_calibration_measurements(
+                    sample_specs,
+                    wavelength=float(wavelength_val),
+                    bandwidth=bandwidth,
+                    default_pathlength=pathlength,
+                )
+                point = {
+                    "sample_id": sample_id,
+                    "concentration": float(concentration_val) if concentration_val is not None else float("nan"),
+                    "response": measurement["response"],
+                    "raw_absorbance": measurement["raw_absorbance"],
+                    "pathlength_cm": measurement["pathlength_cm"],
+                    "replicates": measurement["replicates"],
+                    "responses": measurement["responses"],
+                    "included": bool(entry.get("include", True)),
+                }
+                weight_val = self._coerce_float(entry.get("weight"))
+                if weight_val is not None and math.isfinite(weight_val) and weight_val > 0:
+                    point["weight"] = float(weight_val)
+                if not sample_specs:
+                    target_result["errors"].append(f"Standard {sample_id} was not found in the processed spectra.")
+                if concentration_val is None or not math.isfinite(point["concentration"]):
+                    target_result["errors"].append(f"Standard {sample_id} is missing a concentration value.")
+                if not math.isfinite(point["response"]):
+                    target_result["warnings"].append(f"Standard {sample_id} did not yield a valid absorbance measurement.")
+                standard_points.append(point)
+
+            target_result["standards"] = standard_points
+
+            unknown_entries = self._normalize_unknown_entries(target_cfg.get("unknowns"))
+            if not unknown_entries and calibration_cfg.get("unknowns") is not None:
+                unknown_entries = self._normalize_unknown_entries(calibration_cfg.get("unknowns"))
+
+            if not unknown_entries:
+                for sample_id in sample_lookup.keys():
+                    if sample_id in {point["sample_id"] for point in standard_points}:
+                        continue
+                    role = sample_roles.get(sample_id, "").lower()
+                    if role == "blank":
+                        continue
+                    unknown_entries.append({"sample_id": sample_id})
+
+            unknown_measurements: List[Dict[str, Any]] = []
+            for entry in unknown_entries:
+                sample_id = str(entry.get("sample_id")) if entry.get("sample_id") is not None else None
+                if not sample_id:
+                    continue
+                sample_specs = sample_lookup.get(sample_id, [])
+                measurement = self._collect_calibration_measurements(
+                    sample_specs,
+                    wavelength=float(wavelength_val),
+                    bandwidth=bandwidth,
+                    default_pathlength=pathlength,
+                )
+                payload_base = {
+                    "role": "unknown",
+                    "target": name,
+                    "response": measurement["response"],
+                    "raw_absorbance": measurement["raw_absorbance"],
+                    "pathlength_cm": measurement["pathlength_cm"],
+                    "replicates": measurement["replicates"],
+                }
+                dilution_val = self._coerce_float(entry.get("dilution_factor") or entry.get("dilution"))
+                if dilution_val is not None and math.isfinite(dilution_val):
+                    payload_base["dilution_factor"] = float(dilution_val)
+                unknown_measurements.append(
+                    {
+                        "sample_id": sample_id,
+                        "entry": entry,
+                        "measurement": measurement,
+                        "payload": payload_base,
+                    }
+                )
+
+            valid_points = [
+                point
+                for point in standard_points
+                if point.get("included", True)
+                and math.isfinite(point.get("response", float("nan")))
+                and math.isfinite(point.get("concentration", float("nan")))
+            ]
+
+            if len(valid_points) < 2:
+                target_result["status"] = "failed"
+                target_result["errors"].append("At least two calibration standards with valid responses are required.")
+                target_results.append(target_result)
+                for point in standard_points:
+                    payload = {
+                        "role": "standard",
+                        "status": "no_model",
+                        "target": name,
+                        "concentration": point.get("concentration"),
+                        "response": point.get("response"),
+                        "raw_absorbance": point.get("raw_absorbance"),
+                        "pathlength_cm": point.get("pathlength_cm"),
+                        "replicates": point.get("replicates"),
+                        "included": point.get("included", True),
+                    }
+                    self._assign_calibration_payload(sample_lookup.get(point["sample_id"]), qc_lookup.get(point["sample_id"]), name, payload)
+                target_result["unknowns"] = []
+                for unknown in unknown_measurements:
+                    payload = dict(unknown["payload"])
+                    payload.update(
+                        {
+                            "status": "no_model",
+                            "predicted_concentration": float("nan"),
+                            "within_range": False,
+                            "lod_flag": None,
+                        }
+                    )
+                    self._assign_calibration_payload(
+                        sample_lookup.get(unknown["sample_id"]),
+                        qc_lookup.get(unknown["sample_id"]),
+                        name,
+                        payload,
+                    )
+                    target_result["unknowns"].append(payload | {"sample_id": unknown["sample_id"]})
+                continue
+
+            x = np.array([point["concentration"] for point in valid_points], dtype=float)
+            y = np.array([point["response"] for point in valid_points], dtype=float)
+
+            model_valid = False
+            slope = float("nan")
+            intercept = float("nan")
+            if not fit_intercept:
+                numerator = float(np.dot(x, y))
+                denominator = float(np.dot(x, x))
+                if math.isfinite(denominator) and denominator > 0:
+                    slope = numerator / denominator
+                    intercept = 0.0
+                    model_valid = math.isfinite(slope)
+            else:
+                try:
+                    slope, intercept = np.polyfit(x, y, 1)
+                    model_valid = math.isfinite(slope) and math.isfinite(intercept)
+                except Exception as exc:  # pragma: no cover - numpy failure unlikely
+                    target_result["errors"].append(f"Regression failed: {exc}")
+
+            if not model_valid or not math.isfinite(slope):
+                target_result["status"] = "failed"
+                target_result["errors"].append("Calibration regression could not be computed.")
+            elif slope <= 0:
+                target_result["status"] = "failed"
+                target_result["errors"].append("Calibration slope must be positive for Beer-Lambert model.")
+
+            y_pred = slope * x + intercept if math.isfinite(slope) else np.full_like(y, np.nan)
+            residuals = y - y_pred
+            ss_res = float(np.nansum((residuals) ** 2))
+            mean_y = float(np.nanmean(y)) if np.isfinite(np.nanmean(y)) else 0.0
+            ss_tot = float(np.nansum((y - mean_y) ** 2))
+            if ss_tot <= 0:
+                r_squared = 1.0 if ss_res <= 1e-12 else 0.0
+            else:
+                r_squared = max(0.0, 1.0 - ss_res / ss_tot)
+
+            dof = max(len(valid_points) - (1 if not fit_intercept else 2), 1)
+            residual_std = math.sqrt(ss_res / dof) if dof > 0 else float("nan")
+            lod = (lod_multiplier * residual_std / slope) if model_valid and slope > 0 else float("nan")
+            loq = (loq_multiplier * residual_std / slope) if model_valid and slope > 0 else float("nan")
+            min_conc = float(np.nanmin(x)) if x.size else float("nan")
+            max_conc = float(np.nanmax(x)) if x.size else float("nan")
+
+            if r2_threshold is not None and math.isfinite(r2_threshold) and r_squared < r2_threshold:
+                target_result["errors"].append(
+                    f"Calibration R^2 {r_squared:.4f} is below threshold {r2_threshold:.4f}."
+                )
+                target_result["status"] = "failed"
+
+            for point in standard_points:
+                conc_val = point.get("concentration")
+                if math.isfinite(conc_val) and math.isfinite(slope):
+                    predicted = slope * conc_val + intercept
+                else:
+                    predicted = float("nan")
+                point["predicted_response"] = float(predicted)
+                if math.isfinite(point.get("response", float("nan"))) and math.isfinite(predicted):
+                    point["residual"] = float(point["response"] - predicted)
+                else:
+                    point["residual"] = float("nan")
+                payload = {
+                    "role": "standard",
+                    "status": "ok" if target_result.get("status") not in {"failed"} else "no_model",
+                    "target": name,
+                    "concentration": point.get("concentration"),
+                    "response": point.get("response"),
+                    "raw_absorbance": point.get("raw_absorbance"),
+                    "pathlength_cm": point.get("pathlength_cm"),
+                    "replicates": point.get("replicates"),
+                    "included": point.get("included", True),
+                    "predicted_response": point.get("predicted_response"),
+                    "residual": point.get("residual"),
+                }
+                if target_result.get("status") == "failed":
+                    payload["status"] = "no_model"
+                self._assign_calibration_payload(
+                    sample_lookup.get(point["sample_id"]),
+                    qc_lookup.get(point["sample_id"]),
+                    name,
+                    payload,
+                )
+
+            fit_summary = {
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "r_squared": float(r_squared),
+                "residual_std": float(residual_std),
+                "lod": float(lod),
+                "loq": float(loq),
+                "points": len(valid_points),
+                "min_concentration": min_conc,
+                "max_concentration": max_conc,
+            }
+            target_result["fit"] = fit_summary
+
+            unknown_results: List[Dict[str, Any]] = []
+            for unknown in unknown_measurements:
+                sample_id = unknown["sample_id"]
+                measurement = unknown["measurement"]
+                payload = dict(unknown["payload"])
+                response_val = measurement["response"]
+                model_available = target_result.get("status") not in {"failed"} and math.isfinite(slope) and slope != 0
+                predicted_conc = float("nan")
+                status = "no_model"
+                if model_available:
+                    predicted_conc = (response_val - intercept) / slope
+                    dilution_val = payload.get("dilution_factor")
+                    if dilution_val is not None and math.isfinite(dilution_val):
+                        predicted_conc *= float(dilution_val)
+                    status = "ok"
+                    if not math.isfinite(predicted_conc):
+                        status = "invalid"
+                within_range = (
+                    math.isfinite(predicted_conc)
+                    and math.isfinite(fit_summary["min_concentration"])
+                    and math.isfinite(fit_summary["max_concentration"])
+                    and fit_summary["min_concentration"] <= predicted_conc <= fit_summary["max_concentration"]
+                )
+                if status == "ok" and not within_range:
+                    status = "extrapolated"
+                lod_flag = None
+                if status != "no_model" and math.isfinite(predicted_conc) and math.isfinite(lod) and predicted_conc < lod:
+                    lod_flag = "below_lod"
+                elif status != "no_model" and math.isfinite(predicted_conc) and math.isfinite(loq) and predicted_conc < loq:
+                    lod_flag = "below_loq"
+                payload.update(
+                    {
+                        "status": status if model_available else "no_model",
+                        "predicted_concentration": float(predicted_conc),
+                        "within_range": within_range if status not in {"no_model", "invalid"} else False,
+                        "lod_flag": lod_flag if status not in {"no_model", "invalid"} else None,
+                    }
+                )
+                self._assign_calibration_payload(
+                    sample_lookup.get(sample_id),
+                    qc_lookup.get(sample_id),
+                    name,
+                    payload,
+                )
+                unknown_results.append(payload | {"sample_id": sample_id})
+
+            target_result["unknowns"] = unknown_results
+
+            if target_result.get("status") == "failed" and not target_result["errors"]:
+                target_result["errors"].append("Calibration failed for an unspecified reason.")
+            elif target_result.get("status") != "failed":
+                target_result["status"] = "ok"
+                if target_result["warnings"]:
+                    target_result["status"] = "warning"
+
+            target_results.append(target_result)
+
+        overall_status = "ok"
+        if any(target.get("status") == "failed" for target in target_results):
+            overall_status = "failed"
+        elif any(target.get("status") == "warning" for target in target_results):
+            overall_status = "warning"
+
+        return {"enabled": True, "status": overall_status, "targets": target_results}
+
     def analyze(self, specs, recipe):
         from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
 
@@ -1639,6 +2220,8 @@ class UvVisPlugin(SpectroscopyPlugin):
             )
         if kinetics_records:
             self._summarize_kinetics(kinetics_records, kinetics_targets)
+        calibration_results = self._perform_calibration(processed_with_features, qc_rows, recipe)
+        self._last_calibration_results = calibration_results
         return processed_with_features, qc_rows
 
     def _build_audit_entries(
@@ -1676,6 +2259,20 @@ class UvVisPlugin(SpectroscopyPlugin):
             entries.append(f"Spectrum {sample_id}: ratios[{ratio_summary}] peaks[{peak_summary}]")
         if figures:
             entries.append(f"Generated plots: {', '.join(sorted(figures))}")
+        calibration = getattr(self, "_last_calibration_results", None)
+        if calibration and calibration.get("targets"):
+            for target in calibration.get("targets", []):
+                fit = target.get("fit") or {}
+                slope = fit.get("slope")
+                r_squared = fit.get("r_squared")
+                slope_str = f"{slope:.4f}" if isinstance(slope, (int, float)) and math.isfinite(slope) else "nan"
+                r2_str = f"{r_squared:.4f}" if isinstance(r_squared, (int, float)) and math.isfinite(r_squared) else "nan"
+                entries.append(
+                    f"Calibration {target.get('name', 'target')}: status={target.get('status', 'unknown')} "
+                    f"slope={slope_str} r2={r2_str}"
+                )
+        else:
+            entries.append("Calibration: not performed.")
         return entries
 
     def _render_processed_figure(self, spec: Spectrum):
@@ -1795,6 +2392,22 @@ class UvVisPlugin(SpectroscopyPlugin):
         figures, figure_objs = self._generate_figures(specs)
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
+        calibration_results = getattr(self, "_last_calibration_results", None)
+        if output_path:
+            resolved_path = str(output_path)
+            workbook_audit.append(f"Workbook written to {resolved_path}")
+            write_workbook(
+                resolved_path,
+                specs,
+                qc,
+                workbook_audit,
+                figures,
+                calibration_results,
+            )
+            audit_entries = workbook_audit
+        else:
+            audit_entries.append("No workbook path provided; workbook not written.")
+        return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=audit_entries)
         workbook_default = workbook_target if workbook_target else None
         recipe_target = self._coerce_export_path(
             export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar") or export_cfg.get("recipe"),

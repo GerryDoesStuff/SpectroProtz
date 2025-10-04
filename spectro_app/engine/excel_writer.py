@@ -129,7 +129,117 @@ def _write_dict_rows(ws, rows: List[Dict[str, Any]]):
         ws.append([_clean_value(row.get(header)) for header in headers])
 
 
-def write_workbook(out_path: str, processed, qc_table, audit, figures):
+def _write_calibration_sheet(ws, calibration: Dict[str, Any] | None) -> None:
+    targets = calibration.get("targets", []) if calibration else []
+    if not targets:
+        ws.append(["Section", "Details"])
+        ws.append(["Status", "No calibration performed"])
+        return
+
+    summary_header = [
+        "Target",
+        "Status",
+        "Slope",
+        "Intercept",
+        "R^2",
+        "Residual Std",
+        "LOD",
+        "LOQ",
+        "Points",
+    ]
+    ws.append(summary_header)
+    for target in targets:
+        fit = target.get("fit") or {}
+        ws.append(
+            [
+                _clean_value(target.get("name")),
+                _clean_value(target.get("status")),
+                _clean_value(fit.get("slope")),
+                _clean_value(fit.get("intercept")),
+                _clean_value(fit.get("r_squared")),
+                _clean_value(fit.get("residual_std")),
+                _clean_value(fit.get("lod")),
+                _clean_value(fit.get("loq")),
+                _clean_value(fit.get("points")),
+            ]
+        )
+
+    for target in targets:
+        ws.append([])
+        ws.append([f"Target: {target.get('name')}"])
+        for error in target.get("errors", []):
+            ws.append(["Error", _clean_value(error)])
+        for warning in target.get("warnings", []):
+            ws.append(["Warning", _clean_value(warning)])
+
+        standards = target.get("standards") or []
+        if standards:
+            ws.append(["Standards"])
+            std_header = [
+                "Sample ID",
+                "Concentration",
+                "Response (A/cm)",
+                "Raw Absorbance",
+                "Predicted Response",
+                "Residual",
+                "Included",
+                "Replicates",
+                "Pathlength (cm)",
+            ]
+            ws.append(std_header)
+            for entry in standards:
+                ws.append(
+                    [
+                        _clean_value(entry.get("sample_id")),
+                        _clean_value(entry.get("concentration")),
+                        _clean_value(entry.get("response")),
+                        _clean_value(entry.get("raw_absorbance")),
+                        _clean_value(entry.get("predicted_response")),
+                        _clean_value(entry.get("residual")),
+                        _clean_value(entry.get("included")),
+                        _clean_value(entry.get("replicates")),
+                        _clean_value(entry.get("pathlength_cm")),
+                    ]
+                )
+        else:
+            ws.append(["Standards", "None"])
+
+        unknowns = target.get("unknowns") or []
+        if unknowns:
+            ws.append(["Unknowns"])
+            unk_header = [
+                "Sample ID",
+                "Response (A/cm)",
+                "Raw Absorbance",
+                "Predicted Concentration",
+                "Status",
+                "Within Range",
+                "LOD/LOQ Flag",
+                "Replicates",
+                "Pathlength (cm)",
+                "Dilution Factor",
+            ]
+            ws.append(unk_header)
+            for entry in unknowns:
+                ws.append(
+                    [
+                        _clean_value(entry.get("sample_id")),
+                        _clean_value(entry.get("response")),
+                        _clean_value(entry.get("raw_absorbance")),
+                        _clean_value(entry.get("predicted_concentration")),
+                        _clean_value(entry.get("status")),
+                        _clean_value(entry.get("within_range")),
+                        _clean_value(entry.get("lod_flag")),
+                        _clean_value(entry.get("replicates")),
+                        _clean_value(entry.get("pathlength_cm")),
+                        _clean_value(entry.get("dilution_factor")),
+                    ]
+                )
+        else:
+            ws.append(["Unknowns", "None"])
+
+
+def write_workbook(out_path: str, processed, qc_table, audit, figures, calibration=None):
     workbook_path = Path(out_path)
     _ensure_parent(workbook_path)
 
@@ -155,8 +265,7 @@ def write_workbook(out_path: str, processed, qc_table, audit, figures):
     _write_dict_rows(ws_qc, _qc_rows(qc_table))
 
     ws_calibration = wb.create_sheet("Calibration")
-    ws_calibration.append(["Section", "Details"])
-    ws_calibration.append(["Status", "No calibration performed"])
+    _write_calibration_sheet(ws_calibration, calibration)
 
     ws_audit = wb.create_sheet("Audit_Log")
     ws_audit.append(["Index", "Entry"])
