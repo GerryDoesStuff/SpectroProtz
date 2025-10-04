@@ -184,7 +184,10 @@ class UvVisPlugin(SpectroscopyPlugin):
         return domain
 
     def detect(self, paths):
-        return any(str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".txt")) for p in paths)
+        return any(
+            str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".xls", ".txt"))
+            for p in paths
+        )
 
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
         spectra: List[Spectrum] = []
