@@ -189,22 +189,37 @@ class UvVisPlugin(SpectroscopyPlugin):
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
         spectra: List[Spectrum] = []
         path_objects = [Path(p) for p in paths]
-        manifest_index, manifest_files = self._build_manifest_index(path_objects)
+        manifest_files: Set[Path] = set()
+        manifest_index: UvVisPlugin._ManifestIndex | None = None
 
-        for path in path_objects:
-            if path.resolve() in manifest_files:
-                continue
+        if self.enable_manifest:
+            manifest_index, manifest_files = self._build_manifest_index(path_objects)
+
         manifest_entries: List[Dict[str, object]] = []
         data_paths: List[Path] = []
+        has_non_manifest_candidate = any(
+            not self._is_manifest_file(path) for path in path_objects
+        )
 
         for path_str in paths:
             path = Path(path_str)
-            if self.enable_manifest and self._is_manifest_file(path):
+            is_manifest = self._is_manifest_file(path)
+            if is_manifest and self.enable_manifest:
                 manifest_entries.extend(self._parse_manifest_file(path))
-            else:
-                data_paths.append(path)
+                continue
+            if (
+                not self.enable_manifest
+                and is_manifest
+                and has_non_manifest_candidate
+            ):
+                continue
+            data_paths.append(path)
 
-        manifest_lookup = self._build_manifest_lookup(manifest_entries) if self.enable_manifest else {}
+        manifest_lookup = (
+            self._build_manifest_lookup(manifest_entries)
+            if self.enable_manifest
+            else {}
+        )
 
         for path in data_paths:
             suffix = path.suffix.lower()
@@ -232,7 +247,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta = dict(record.get("meta", {}))
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
-                if manifest_index:
+                if self.enable_manifest and manifest_index:
                     updates = self._lookup_manifest_index(manifest_index, path, meta)
                     if updates:
                         for key, value in updates.items():
@@ -249,8 +264,10 @@ class UvVisPlugin(SpectroscopyPlugin):
                                 and meta.get("blank_id") == meta.get("channel")
                             ):
                                 meta["blank_id"] = meta.get("sample_id")
-                if self.enable_manifest:
-                    manifest_meta = self._lookup_manifest_entries(manifest_lookup, path, meta)
+                if self.enable_manifest and manifest_lookup:
+                    manifest_meta = self._lookup_manifest_entries(
+                        manifest_lookup, path, meta
+                    )
                     if manifest_meta:
                         meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
