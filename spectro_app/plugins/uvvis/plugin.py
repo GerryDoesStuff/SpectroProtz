@@ -987,6 +987,20 @@ class UvVisPlugin(SpectroscopyPlugin):
                     continue
         return None
 
+    @staticmethod
+    def _parse_specific_timestamp(meta: Dict[str, object], key: str) -> datetime | None:
+        if not key:
+            return None
+        value = meta.get(key)
+        if isinstance(value, datetime):
+            return value
+        if value is None:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+
     def _build_missing_blank_audit(self, sample: Spectrum, blank_id: object) -> Dict[str, object]:
         sample_time = self._parse_timestamp(sample.meta)
         sample_identifier = self._safe_sample_id(sample, "sample")
@@ -1190,6 +1204,282 @@ class UvVisPlugin(SpectroscopyPlugin):
             })
         return peak_rows
 
+    def _compute_isosbestic_checks(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        configs: Iterable[Dict[str, object]] | Iterable[object],
+    ) -> List[Dict[str, object]]:
+        wl = np.asarray(wl, dtype=float)
+        intensity = np.asarray(intensity, dtype=float)
+        results: List[Dict[str, object]] = []
+        if wl.size < 2 or intensity.size < 2:
+            return results
+        for idx, cfg in enumerate(configs or []):
+            if isinstance(cfg, dict):
+                name = str(cfg.get("name") or f"isosbestic_{idx + 1}")
+                wavelengths = cfg.get("wavelengths") or cfg.get("pair") or cfg.get("window")
+                tolerance = cfg.get("tolerance")
+            else:
+                name = f"isosbestic_{idx + 1}"
+                wavelengths = cfg
+                tolerance = None
+            wl_pair: Tuple[float, float] | None = None
+            if isinstance(wavelengths, (list, tuple, np.ndarray)) and len(wavelengths) >= 2:
+                lo, hi = float(wavelengths[0]), float(wavelengths[1])
+                if lo == hi:
+                    hi = lo + 1e-6
+                wl_pair = (min(lo, hi), max(lo, hi))
+            if wl_pair is None:
+                results.append({
+                    "name": name,
+                    "wavelengths": None,
+                    "crossing_detected": False,
+                    "min_abs_deviation": float("nan"),
+                    "crossing_wavelength": None,
+                    "tolerance": float(tolerance) if tolerance is not None else None,
+                    "within_tolerance": None,
+                })
+                continue
+            lo, hi = wl_pair
+            interp_lo = float(np.interp(lo, wl, intensity, left=np.nan, right=np.nan))
+            interp_hi = float(np.interp(hi, wl, intensity, left=np.nan, right=np.nan))
+            mask = (wl >= lo) & (wl <= hi)
+            if mask.sum() < 2:
+                results.append({
+                    "name": name,
+                    "wavelengths": [lo, hi],
+                    "crossing_detected": False,
+                    "min_abs_deviation": float("nan"),
+                    "crossing_wavelength": None,
+                    "tolerance": float(tolerance) if tolerance is not None else None,
+                    "within_tolerance": None,
+                    "endpoints": [interp_lo, interp_hi],
+                })
+                continue
+            segment_wl = wl[mask]
+            segment_intensity = intensity[mask]
+            line_baseline = np.interp(segment_wl, [lo, hi], [interp_lo, interp_hi])
+            deviation = np.asarray(segment_intensity - line_baseline, dtype=float)
+            finite_mask = np.isfinite(deviation)
+            crossing_detected = False
+            crossing_wavelength: float | None = None
+            min_abs_deviation = float("nan")
+            within_tolerance: bool | None = None
+            if np.any(finite_mask):
+                finite_dev = deviation[finite_mask]
+                min_abs_deviation = float(np.nanmin(np.abs(finite_dev)))
+                if finite_dev.size:
+                    # Determine if the deviation crosses zero within the window.
+                    crossing_detected = bool(
+                        np.any(np.diff(np.signbit(finite_dev)) != 0)
+                        or np.any(finite_dev == 0.0)
+                    )
+                if crossing_detected:
+                    # Find the first zero crossing for reporting.
+                    finite_wl = segment_wl[finite_mask]
+                    sign_changes = np.where(np.signbit(finite_dev[:-1]) != np.signbit(finite_dev[1:]))[0]
+                    if sign_changes.size:
+                        idx_change = sign_changes[0]
+                        x0 = float(finite_wl[idx_change])
+                        x1 = float(finite_wl[idx_change + 1])
+                        y0 = float(finite_dev[idx_change])
+                        y1 = float(finite_dev[idx_change + 1])
+                        if np.isfinite(y0) and np.isfinite(y1) and y1 != y0:
+                            crossing_wavelength = x0 + (x1 - x0) * (-y0) / (y1 - y0)
+                        else:
+                            crossing_wavelength = x0
+                    else:
+                        zero_indices = np.where(finite_dev == 0.0)[0]
+                        if zero_indices.size:
+                            crossing_wavelength = float(finite_wl[zero_indices[0]])
+                if tolerance is not None and np.isfinite(min_abs_deviation):
+                    within_tolerance = bool(min_abs_deviation <= float(tolerance))
+            result = {
+                "name": name,
+                "wavelengths": [lo, hi],
+                "crossing_detected": crossing_detected,
+                "min_abs_deviation": min_abs_deviation,
+                "crossing_wavelength": crossing_wavelength,
+                "tolerance": float(tolerance) if tolerance is not None else None,
+                "within_tolerance": within_tolerance,
+                "endpoints": [interp_lo, interp_hi],
+            }
+            results.append(result)
+        return results
+
+    @staticmethod
+    def _normalize_kinetics_targets(config: object) -> List[Dict[str, float]]:
+        if not config:
+            return []
+        if isinstance(config, dict):
+            raw_targets = config.get("targets") or config.get("wavelengths") or []
+        else:
+            raw_targets = config
+        targets: List[Dict[str, float]] = []
+        for idx, entry in enumerate(raw_targets or []):
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or f"target_{idx + 1}")
+                wavelength = entry.get("wavelength")
+                if wavelength is None:
+                    wavelength = entry.get("lambda") or entry.get("center")
+                if wavelength is None:
+                    continue
+                bandwidth = float(entry.get("bandwidth", entry.get("width", 2.0)))
+                targets.append(
+                    {
+                        "name": name,
+                        "wavelength": float(wavelength),
+                        "bandwidth": max(float(bandwidth), 0.0),
+                    }
+                )
+            else:
+                try:
+                    wavelength = float(entry)
+                except (TypeError, ValueError):
+                    continue
+                targets.append(
+                    {
+                        "name": f"target_{idx + 1}",
+                        "wavelength": float(wavelength),
+                        "bandwidth": 2.0,
+                    }
+                )
+        return targets
+
+    def _compute_kinetics_values(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        targets: List[Dict[str, float]],
+    ) -> Dict[str, float]:
+        if not targets:
+            return {}
+        values: Dict[str, float] = {}
+        for target in targets:
+            values[target["name"]] = self._compute_band_value(
+                wl,
+                intensity,
+                target["wavelength"],
+                target.get("bandwidth", 0.0),
+            )
+        return values
+
+    def _summarize_kinetics(
+        self,
+        records: List[Dict[str, object]],
+        targets: List[Dict[str, float]],
+    ) -> Dict[str, Dict[str, object]]:
+        summaries: Dict[str, Dict[str, object]] = {}
+        if not records:
+            return summaries
+        grouped: Dict[str, List[Dict[str, object]]] = {}
+        for record in records:
+            sample_id = record.get("sample_id")
+            if sample_id is None:
+                continue
+            grouped.setdefault(str(sample_id), []).append(record)
+        for sample_id, group in grouped.items():
+            valid = [rec for rec in group if isinstance(rec.get("timestamp"), datetime)]
+            valid.sort(key=lambda rec: rec.get("timestamp"))
+            if valid:
+                anchor = valid[0]["timestamp"]
+            else:
+                anchor = None
+            for rec in valid:
+                timestamp = rec.get("timestamp")
+                assert isinstance(timestamp, datetime)
+                if anchor:
+                    delta = timestamp - anchor
+                    relative = delta.total_seconds() / 60.0
+                else:
+                    relative = 0.0
+                rec["relative_minutes"] = relative
+                row_entry = rec.get("row_entry")
+                feature_entry = rec.get("feature_entry")
+                if isinstance(row_entry, dict):
+                    row_entry["relative_minutes"] = float(relative)
+                if isinstance(feature_entry, dict):
+                    feature_entry["relative_minutes"] = float(relative)
+            # For entries without timestamps, explicitly set relative minutes to None.
+            for rec in group:
+                if "relative_minutes" not in rec:
+                    row_entry = rec.get("row_entry")
+                    feature_entry = rec.get("feature_entry")
+                    if isinstance(row_entry, dict):
+                        row_entry["relative_minutes"] = None
+                    if isinstance(feature_entry, dict):
+                        feature_entry["relative_minutes"] = None
+            if len(valid) < 2:
+                for rec in group:
+                    feature_entry = rec.get("feature_entry")
+                    if isinstance(feature_entry, dict):
+                        feature_entry["summary"] = None
+                continue
+            times = np.array([rec["relative_minutes"] for rec in valid], dtype=float)
+            series: List[Dict[str, object]] = []
+            group_sorted = sorted(
+                group,
+                key=lambda rec: rec.get("timestamp") or datetime.min,
+            )
+            for rec in group_sorted:
+                timestamp = rec.get("timestamp")
+                iso = timestamp.isoformat() if isinstance(timestamp, datetime) else None
+                relative = rec.get("relative_minutes")
+                series.append(
+                    {
+                        "timestamp": iso,
+                        "relative_minutes": float(relative) if relative is not None else None,
+                        "values": dict(rec.get("values", {})),
+                    }
+                )
+            target_metrics: Dict[str, Dict[str, object]] = {}
+            for target in targets:
+                name = target["name"]
+                values_arr = np.array(
+                    [rec.get("values", {}).get(name, float("nan")) for rec in valid],
+                    dtype=float,
+                )
+                mask = np.isfinite(times) & np.isfinite(values_arr)
+                n_points = int(mask.sum())
+                first_val = float(values_arr[mask][0]) if n_points else float("nan")
+                last_val = float(values_arr[mask][-1]) if n_points else float("nan")
+                delta_val = float(last_val - first_val) if n_points else float("nan")
+                if n_points >= 2:
+                    slope, _ = np.polyfit(times[mask], values_arr[mask], 1)
+                    slope_val = float(slope)
+                    corr = np.corrcoef(times[mask], values_arr[mask])
+                    r_value = float(corr[0, 1]) if corr.size >= 4 else float("nan")
+                else:
+                    slope_val = float("nan")
+                    r_value = float("nan")
+                target_metrics[name] = {
+                    "wavelength": float(target["wavelength"]),
+                    "first": first_val,
+                    "last": last_val,
+                    "delta": delta_val,
+                    "slope_per_min": slope_val,
+                    "r_value": r_value,
+                    "points": n_points,
+                }
+            elapsed = float(times[-1]) if times.size else float("nan")
+            summary = {
+                "sample_id": sample_id,
+                "n_points": len(valid),
+                "elapsed_minutes": elapsed,
+                "targets": target_metrics,
+                "series": series,
+            }
+            for rec in group:
+                feature_entry = rec.get("feature_entry")
+                if isinstance(feature_entry, dict):
+                    feature_entry["summary"] = summary
+                row = rec.get("row")
+                if isinstance(row, dict):
+                    row["kinetics_summary"] = summary
+            summaries[sample_id] = summary
+        return summaries
+
     def analyze(self, specs, recipe):
         from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
 
@@ -1208,10 +1498,19 @@ class UvVisPlugin(SpectroscopyPlugin):
                 {"name": "Area_260_280", "min": 260.0, "max": 280.0},
             ]
         derivative_enabled = feature_cfg.get("derivatives", True)
+        isosbestic_cfg = feature_cfg.get("isosbestic") or feature_cfg.get("isosbestic_checks") or []
+        kinetics_cfg_raw = feature_cfg.get("kinetics") or {}
+        kinetics_targets = self._normalize_kinetics_targets(kinetics_cfg_raw)
+        kinetics_time_field: str | None = None
+        if isinstance(kinetics_cfg_raw, dict):
+            raw_field = kinetics_cfg_raw.get("time_key") or kinetics_cfg_raw.get("timestamp_field")
+            if raw_field:
+                kinetics_time_field = str(raw_field)
 
         qc_rows = []
         drift_map = compute_uvvis_drift_map(specs, recipe)
         processed_with_features: List[Spectrum] = []
+        kinetics_records: List[Dict[str, object]] = []
         for idx, spec in enumerate(specs):
             metrics = compute_uvvis_qc(spec, recipe, drift_map.get(id(spec)))
             saturation = metrics["saturation"]
@@ -1226,6 +1525,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
             integrals = self._compute_integrals(wl, intensity, integral_cfg)
             peaks = self._compute_peak_metrics(wl, intensity, peak_cfg)
+            isosbestic_checks = self._compute_isosbestic_checks(wl, intensity, isosbestic_cfg)
+            timestamp = self._parse_timestamp(spec.meta)
+            if kinetics_time_field:
+                specific = self._parse_specific_timestamp(spec.meta, kinetics_time_field)
+                if specific:
+                    timestamp = specific
+            kinetics_values = self._compute_kinetics_values(wl, intensity, kinetics_targets)
             derivative_stats = {
                 name: {
                     "min": float(np.nanmin(values)) if values.size else float("nan"),
@@ -1272,6 +1578,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "integrals": integrals,
                 "peak_metrics": peaks,
                 "derivative_stats": derivative_stats,
+                "isosbestic": isosbestic_checks,
             }
             qc_rows.append(row)
             meta = dict(spec.meta)
@@ -1281,6 +1588,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "integrals": integrals,
                 "peaks": peaks,
                 "derivative_stats": derivative_stats,
+                "isosbestic": isosbestic_checks,
             })
             existing_channels = {
                 key: np.asarray(val, dtype=float)
@@ -1291,6 +1599,17 @@ class UvVisPlugin(SpectroscopyPlugin):
                 existing_channels[name] = np.asarray(arr, dtype=float)
             if existing_channels:
                 meta["channels"] = existing_channels
+            sample_id_value = row["sample_id"]
+            sample_label = str(sample_id_value) if sample_id_value is not None else None
+            if sample_label is not None:
+                row["sample_id"] = sample_label
+            kinetics_entry_row = {
+                "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
+                "relative_minutes": None,
+                "values": {name: float(val) for name, val in kinetics_values.items()},
+            }
+            row["kinetics"] = kinetics_entry_row
+            row["kinetics_summary"] = None
             processed_with_features.append(
                 Spectrum(
                     wavelength=spec.wavelength.copy(),
@@ -1298,6 +1617,25 @@ class UvVisPlugin(SpectroscopyPlugin):
                     meta=meta,
                 )
             )
+            feature_kinetics = {
+                "timestamp": kinetics_entry_row["timestamp"],
+                "relative_minutes": None,
+                "values": dict(kinetics_entry_row["values"]),
+                "summary": None,
+            }
+            meta["features"]["kinetics"] = feature_kinetics
+            kinetics_records.append(
+                {
+                    "sample_id": sample_label,
+                    "timestamp": timestamp,
+                    "values": dict(kinetics_entry_row["values"]),
+                    "row": row,
+                    "row_entry": kinetics_entry_row,
+                    "feature_entry": feature_kinetics,
+                }
+            )
+        if kinetics_records:
+            self._summarize_kinetics(kinetics_records, kinetics_targets)
         return processed_with_features, qc_rows
 
     def _build_audit_entries(
