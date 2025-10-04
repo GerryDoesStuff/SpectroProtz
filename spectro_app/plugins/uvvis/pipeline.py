@@ -917,6 +917,112 @@ def replicate_key(spec: Spectrum) -> Tuple[str, str]:
     return role, str(ident)
 
 
+def _replicate_feature_matrix(
+    wavelength: np.ndarray,
+    stack: np.ndarray,
+    valid_mask: np.ndarray,
+) -> np.ndarray:
+    """Derive a compact feature matrix characterising replicate spectra."""
+
+    features: List[List[float]] = []
+    wl = np.asarray(wavelength, dtype=float)
+    for row, mask in zip(stack, valid_mask):
+        row = np.asarray(row, dtype=float)
+        mask = np.asarray(mask, dtype=bool)
+        if not mask.any():
+            features.append([1.0, 0.0, 0.0, 0.0, 0.0])
+            continue
+
+        finite_row = row[mask]
+        finite_wl = wl[mask]
+        mean_val = float(np.mean(finite_row))
+        std_val = float(np.std(finite_row))
+        if finite_row.size >= 2:
+            span = float(finite_wl[-1] - finite_wl[0])
+            slope_val = float((finite_row[-1] - finite_row[0]) / span) if span else 0.0
+            energy_val = float(np.mean(np.abs(np.diff(finite_row))))
+        else:
+            slope_val = 0.0
+            energy_val = 0.0
+        area_val = (
+            float(np.trapezoid(finite_row, finite_wl)) if finite_row.size >= 2 else mean_val
+        )
+        features.append([1.0, mean_val, std_val, slope_val, energy_val, area_val])
+
+    matrix = np.asarray(features, dtype=float)
+    n_obs = matrix.shape[0]
+    if n_obs > 1 and matrix.shape[1] >= n_obs:
+        matrix = matrix[:, : max(1, n_obs - 1)]
+    if matrix.shape[1] > 1:
+        others = matrix[:, 1:]
+        other_mean = np.mean(others, axis=0)
+        other_std = np.std(others, axis=0)
+        safe_std = np.where(other_std < 1e-12, 1.0, other_std)
+        matrix[:, 1:] = (others - other_mean) / safe_std
+    return matrix
+
+
+def _compute_cooksd_scores(
+    wavelength: np.ndarray, stack: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return Cook's distance scores and leverage for each replicate."""
+
+    if stack.size == 0:
+        return np.zeros(0, dtype=float), np.zeros(0, dtype=float)
+
+    valid_mask = np.isfinite(stack)
+    n_obs = stack.shape[0]
+    if n_obs == 0:
+        return np.zeros(0, dtype=float), np.zeros(0, dtype=float)
+
+    with np.errstate(invalid="ignore"):
+        column_means = np.nanmean(stack, axis=0)
+    column_means = np.where(np.isfinite(column_means), column_means, 0.0)
+    filled = np.where(valid_mask, stack, column_means)
+
+    feature_matrix = _replicate_feature_matrix(wavelength, filled, valid_mask)
+    X = np.asarray(feature_matrix, dtype=float)
+    if X.ndim != 2 or X.shape[0] != n_obs:
+        return np.zeros(n_obs, dtype=float), np.zeros(n_obs, dtype=float)
+
+    XtX = X.T @ X
+    XtX_inv = np.linalg.pinv(XtX)
+    hat = X @ XtX_inv @ X.T
+    leverage = np.clip(np.diag(hat).real, 0.0, 1.0)
+
+    rank = int(np.linalg.matrix_rank(X))
+    rank = max(rank, 1)
+
+    # Solve the multivariate least-squares system using the filled values.
+    coeffs, _, _, _ = np.linalg.lstsq(X, filled, rcond=None)
+    fitted = X @ coeffs
+    residual = filled - fitted
+    residual[~valid_mask] = 0.0
+    residual_sq = residual**2
+    rss_per_obs = residual_sq.sum(axis=1)
+    sse_total = float(residual_sq.sum())
+
+    effective_q = int(np.sum(valid_mask) / max(n_obs, 1))
+    effective_q = max(effective_q, 1)
+    dof = max(n_obs - rank, 1)
+    mse = sse_total / (dof * effective_q)
+
+    scores = np.zeros(n_obs, dtype=float)
+    if mse <= 0 or not np.isfinite(mse):
+        return scores, leverage
+
+    denom = (1.0 - leverage) ** 2
+    safe = denom > 1e-12
+    p_eff = max(rank, 1)
+
+    scores[safe] = (
+        rss_per_obs[safe] / (p_eff * mse)
+    ) * (leverage[safe] / denom[safe])
+    scores[~safe] = np.inf
+    scores = np.where(np.isfinite(scores), scores, np.inf)
+    return scores, leverage
+
+
 def average_replicates(
     specs: Sequence[Spectrum],
     *,
@@ -998,20 +1104,31 @@ def average_replicates(
 
             stack = np.vstack([np.asarray(m.intensity, dtype=float) for m in members])
 
+            method_aliases = {
+                "median_absolute_deviation": "mad",
+                "cook": "cooksd",
+                "cookd": "cooksd",
+                "cooksd": "cooksd",
+            }
+            resolved_method = method_aliases.get(outlier_method, outlier_method)
             scores = np.zeros(len(members), dtype=float)
             excluded_mask = np.zeros(len(members), dtype=bool)
+            leverage = np.full(len(members), float("nan"))
             if outlier_enabled and outlier_threshold > 0 and len(members) >= 2:
-                if outlier_method not in {"mad", "median_absolute_deviation"}:
-                    raise ValueError(f"Unsupported outlier method: {outlier_method}")
+                if resolved_method == "mad":
+                    residual = np.abs(stack - np.nanmedian(stack, axis=0))
+                    metrics = np.nanmedian(residual, axis=1)
+                    median_metric = np.nanmedian(metrics)
+                    mad_metric = np.nanmedian(np.abs(metrics - median_metric))
 
-                residual = np.abs(stack - np.nanmedian(stack, axis=0))
-                metrics = np.nanmedian(residual, axis=1)
-                median_metric = np.nanmedian(metrics)
-                mad_metric = np.nanmedian(np.abs(metrics - median_metric))
-
-                if np.isfinite(mad_metric) and mad_metric > 0:
-                    scores = 0.6745 * np.abs(metrics - median_metric) / mad_metric
+                    if np.isfinite(mad_metric) and mad_metric > 0:
+                        scores = 0.6745 * np.abs(metrics - median_metric) / mad_metric
+                        excluded_mask = scores > outlier_threshold
+                elif resolved_method == "cooksd":
+                    scores, leverage = _compute_cooksd_scores(ref_wl, stack)
                     excluded_mask = scores > outlier_threshold
+                else:
+                    raise ValueError(f"Unsupported outlier method: {outlier_method}")
 
             if excluded_mask.all():
                 excluded_mask[:] = False
@@ -1027,6 +1144,21 @@ def average_replicates(
             meta["replicate_excluded"] = [
                 src for src, flag in zip(sources, excluded_mask) if flag and src is not None
             ]
+            if len(members) > 1:
+                meta["replicate_outlier_enabled"] = bool(
+                    outlier_enabled and outlier_threshold > 0
+                )
+                meta["replicate_outlier_method"] = resolved_method
+                meta["replicate_outlier_threshold"] = outlier_threshold
+                meta["replicate_outlier_scores"] = [
+                    float(score) if np.isfinite(score) else float("nan")
+                    for score in scores
+                ]
+                if np.any(np.isfinite(leverage)):
+                    meta["replicate_outlier_leverage"] = [
+                        float(val) if np.isfinite(val) else float("nan")
+                        for val in leverage
+                    ]
             meta["replicates"] = [
                 {
                     "wavelength": np.asarray(member.wavelength, dtype=float).tolist(),
@@ -1034,6 +1166,7 @@ def average_replicates(
                     "meta": dict(member.meta),
                     "excluded": bool(excluded_mask[idx]),
                     "score": float(scores[idx]) if np.isfinite(scores[idx]) else float("nan"),
+                    "leverage": float(leverage[idx]) if np.isfinite(leverage[idx]) else None,
                 }
                 for idx, member in enumerate(members)
             ]
