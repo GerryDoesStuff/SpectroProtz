@@ -2434,6 +2434,22 @@ class UvVisPlugin(SpectroscopyPlugin):
             tokens.append(f"Input {sample_id} source_hash=sha256:{digest}")
         return tokens
 
+    @staticmethod
+    def _sanitise_figure_name(*parts: str, ext: str = "png") -> str:
+        tokens: List[str] = []
+        for part in parts:
+            if part is None:
+                continue
+            text = str(part)
+            cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in text)
+            cleaned = cleaned.strip("_")
+            if cleaned:
+                tokens.append(cleaned)
+        if not tokens:
+            tokens.append("figure")
+        base = "_".join(tokens)
+        return f"{base}.{ext}"
+
     def _render_processed_figure(self, spec: Spectrum):
         wl = np.asarray(spec.wavelength, dtype=float)
         intensity = np.asarray(spec.intensity, dtype=float)
@@ -2466,19 +2482,230 @@ class UvVisPlugin(SpectroscopyPlugin):
         fig.tight_layout()
         return sample_id, fig
 
-    def _generate_figures(self, specs: List[Spectrum]) -> Tuple[Dict[str, bytes], List[Tuple[str, Figure]]]:
+    def _render_join_overlap_figures(
+        self,
+        spec: Spectrum,
+        qc_row: Dict[str, object] | None = None,
+    ) -> List[Tuple[str, Figure]]:
+        join_indices: Tuple[int, ...] = tuple()
+        if qc_row and isinstance(qc_row.get("join_indices"), (list, tuple)):
+            join_indices = tuple(
+                int(idx)
+                for idx in qc_row.get("join_indices", [])
+                if isinstance(idx, (int, float))
+            )
+        elif isinstance(spec.meta.get("join_indices"), (list, tuple)):
+            join_indices = tuple(int(idx) for idx in spec.meta.get("join_indices", []))
+
+        if not join_indices:
+            join_count = qc_row.get("join_count") if qc_row else None
+            if not join_count:
+                return []
+
+        channels = spec.meta.get("channels") or {}
+        raw_channel = channels.get("raw")
+        joined_channel = channels.get("joined")
+        if raw_channel is None or joined_channel is None:
+            return []
+
+        wl = np.asarray(spec.wavelength, dtype=float)
+        raw_vals = np.asarray(raw_channel, dtype=float)
+        joined_vals = np.asarray(joined_channel, dtype=float)
+
+        if wl.size == 0 or raw_vals.shape != wl.shape or joined_vals.shape != wl.shape:
+            return []
+
+        if not join_indices:
+            diff = np.abs(raw_vals - joined_vals)
+            if not np.any(np.isfinite(diff)):
+                return []
+            candidate = int(np.nanargmax(diff)) if diff.size else None
+            join_indices = (candidate,) if candidate is not None else tuple()
+        if not join_indices:
+            return []
+
+        figures: List[Tuple[str, Figure]] = []
+        sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
+        n = wl.size
+        for order, join_idx in enumerate(join_indices, start=1):
+            idx = int(join_idx)
+            if idx <= 0 or idx >= n:
+                continue
+            window = max(10, min(80, n // 10))
+            start = max(0, idx - window)
+            stop = min(n, idx + window)
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(wl[start:stop], raw_vals[start:stop], label="Before join", color="tab:gray", linewidth=1.2)
+            ax.plot(
+                wl[start:stop],
+                joined_vals[start:stop],
+                label="After correction",
+                color="tab:blue",
+                linewidth=1.2,
+            )
+            ax.axvline(wl[min(idx, n - 1)], color="tab:red", linestyle="--", alpha=0.5)
+            ax.set_xlabel(self.xlabel)
+            ax.set_ylabel("Intensity")
+            ax.set_title(f"Join correction around {wl[min(idx, n - 1)]:.1f} nm")
+            ax.grid(True, alpha=0.2)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            figures.append((self._sanitise_figure_name(sample_id, f"join_{order}"), fig))
+        return figures
+
+    def _render_calibration_figures(self) -> List[Tuple[str, Figure]]:
+        calibration = getattr(self, "_last_calibration_results", None)
+        targets = calibration.get("targets", []) if calibration else []
+        figures: List[Tuple[str, Figure]] = []
+        for target in targets:
+            standards = target.get("standards") or []
+            if not standards:
+                continue
+            concentrations = np.array(
+                [point.get("concentration", float("nan")) for point in standards],
+                dtype=float,
+            )
+            responses = np.array([point.get("response", float("nan")) for point in standards], dtype=float)
+            included_mask = np.array([bool(point.get("included", True)) for point in standards], dtype=bool)
+            residuals = np.array([point.get("residual", float("nan")) for point in standards], dtype=float)
+            if not np.any(np.isfinite(concentrations)) or not np.any(np.isfinite(responses)):
+                continue
+
+            fig, (ax_fit, ax_resid) = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+            inc_x = concentrations[included_mask]
+            inc_y = responses[included_mask]
+            exc_x = concentrations[~included_mask]
+            exc_y = responses[~included_mask]
+            if inc_x.size:
+                ax_fit.scatter(inc_x, inc_y, label="Included", color="tab:blue")
+            if exc_x.size:
+                ax_fit.scatter(exc_x, exc_y, label="Excluded", color="tab:orange", marker="x")
+
+            fit = target.get("fit") or {}
+            slope = fit.get("slope")
+            intercept = fit.get("intercept")
+            if (
+                isinstance(slope, (int, float))
+                and isinstance(intercept, (int, float))
+                and math.isfinite(slope)
+                and math.isfinite(intercept)
+            ):
+                x_min = float(np.nanmin(concentrations))
+                x_max = float(np.nanmax(concentrations))
+                x_span = np.linspace(x_min, x_max, 100)
+                ax_fit.plot(x_span, slope * x_span + intercept, color="tab:green", label="Fit")
+                r_squared = fit.get("r_squared", float("nan"))
+                ax_fit.text(
+                    0.02,
+                    0.95,
+                    f"Slope: {slope:.4f}\nIntercept: {intercept:.4f}\nR$^2$: {r_squared:.4f}",
+                    transform=ax_fit.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=9,
+                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.6},
+                )
+            ax_fit.set_ylabel("Response (A/cm)")
+            ax_fit.set_title(f"Calibration fit: {target.get('name', 'target')}")
+            ax_fit.grid(True, alpha=0.2)
+            ax_fit.legend(loc="best")
+
+            if np.any(np.isfinite(residuals)):
+                ax_resid.axhline(0.0, color="tab:gray", linestyle="--", linewidth=1.0)
+                ax_resid.scatter(concentrations[included_mask], residuals[included_mask], color="tab:blue")
+                if exc_x.size:
+                    ax_resid.scatter(concentrations[~included_mask], residuals[~included_mask], color="tab:orange", marker="x")
+            ax_resid.set_xlabel("Concentration")
+            ax_resid.set_ylabel("Residual (A/cm)")
+            ax_resid.grid(True, alpha=0.2)
+
+            fig.tight_layout()
+            figures.append((self._sanitise_figure_name("calibration", str(target.get("name", "target"))), fig))
+        return figures
+
+    def _render_qc_summary_figures(self, qc_rows: Sequence[Dict[str, object]] | None) -> List[Tuple[str, Figure]]:
+        if not qc_rows:
+            return []
+        noise_values = np.array(
+            [row.get("noise_rsd", float("nan")) for row in qc_rows],
+            dtype=float,
+        )
+        finite_mask = np.isfinite(noise_values)
+        if not np.any(finite_mask):
+            return []
+        sample_labels = [
+            str(row.get("sample_id") or row.get("id") or idx)
+            for idx, row in enumerate(qc_rows)
+        ]
+        join_counts = np.array([row.get("join_count", 0) or 0 for row in qc_rows], dtype=float)
+        x = np.arange(len(sample_labels))
+        fig, ax = plt.subplots(figsize=(max(6, len(sample_labels) * 0.6), 4))
+        scatter = ax.scatter(
+            x[finite_mask],
+            noise_values[finite_mask],
+            c=join_counts[finite_mask],
+            cmap="viridis",
+            s=60,
+            edgecolors="black",
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(sample_labels, rotation=45, ha="right")
+        ax.set_ylabel("Noise RSD (%)")
+        ax.set_xlabel("Sample")
+        ax.set_title("QC summary: noise by sample")
+        ax.grid(True, alpha=0.2)
+        cbar = fig.colorbar(scatter, ax=ax)
+        cbar.set_label("Join count")
+        fig.tight_layout()
+        return [(self._sanitise_figure_name("qc", "summary", "noise"), fig)]
+
+    def _generate_figures(
+        self,
+        specs: List[Spectrum],
+        qc_rows: Sequence[Dict[str, object]] | None = None,
+    ) -> Tuple[Dict[str, bytes], List[Tuple[str, Figure]]]:
         figures: Dict[str, bytes] = {}
         figure_objs: List[Tuple[str, Figure]] = []
+        qc_lookup: Dict[int, Dict[str, object]] = {}
+        if qc_rows:
+            for spec, qc_row in zip(specs, qc_rows):
+                if isinstance(qc_row, dict):
+                    qc_lookup[id(spec)] = qc_row
+
         for spec in specs:
             rendered = self._render_processed_figure(spec)
             if not rendered:
                 continue
             sample_id, fig = rendered
+            filename = self._sanitise_figure_name(sample_id, "processed")
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=150)
             buf.seek(0)
-            figures[f"{sample_id}_processed.png"] = buf.read()
-            figure_objs.append((sample_id, fig))
+            figures[filename] = buf.read()
+            figure_objs.append((filename, fig))
+
+            qc_row = qc_lookup.get(id(spec))
+            for name, join_fig in self._render_join_overlap_figures(spec, qc_row):
+                buf = io.BytesIO()
+                join_fig.savefig(buf, format="png", dpi=150)
+                buf.seek(0)
+                figures[name] = buf.read()
+                figure_objs.append((name, join_fig))
+
+        for name, cal_fig in self._render_calibration_figures():
+            buf = io.BytesIO()
+            cal_fig.savefig(buf, format="png", dpi=150)
+            buf.seek(0)
+            figures[name] = buf.read()
+            figure_objs.append((name, cal_fig))
+
+        for name, qc_fig in self._render_qc_summary_figures(qc_rows):
+            buf = io.BytesIO()
+            qc_fig.savefig(buf, format="png", dpi=150)
+            buf.seek(0)
+            figures[name] = buf.read()
+            figure_objs.append((name, qc_fig))
+
         return figures, figure_objs
 
     @staticmethod
@@ -2552,7 +2779,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     def export(self, specs, qc, recipe):
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
         workbook_target = self._coerce_export_path(export_cfg.get("path") or export_cfg.get("workbook"))
-        figures, figure_objs = self._generate_figures(specs)
+        figures, figure_objs = self._generate_figures(specs, qc)
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
         calibration_results = getattr(self, "_last_calibration_results", None)
