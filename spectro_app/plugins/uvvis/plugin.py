@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
 import io
 import math
 import json
@@ -2673,14 +2674,44 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def _input_source_hash_tokens(self, specs: List[Spectrum]) -> List[str]:
         tokens: List[str] = []
+        hash_cache: Dict[str, str] = {}
+        failure_cache: Dict[str, str] = {}
         for spec in specs:
             source = spec.meta.get("source_file")
             if not source:
                 continue
-            source_str = str(source)
-            digest = hashlib.sha256(source_str.encode("utf-8")).hexdigest()
-            sample_id = self._safe_sample_id(spec, source_str)
-            tokens.append(f"Input {sample_id} source_hash=sha256:{digest}")
+            try:
+                source_path_str = os.fspath(source)
+            except TypeError:
+                source_path_str = str(source)
+            sample_id = self._safe_sample_id(spec, source_path_str)
+
+            if source_path_str in hash_cache:
+                digest = hash_cache[source_path_str]
+                tokens.append(f"Input {sample_id} source_hash=sha256:{digest}")
+                continue
+            if source_path_str in failure_cache:
+                reason = failure_cache[source_path_str]
+                tokens.append(f"Input {sample_id} source_hash_error={reason}")
+                continue
+
+            path = Path(source_path_str)
+            try:
+                payload = path.read_bytes()
+            except FileNotFoundError:
+                reason = "file_not_found"
+            except PermissionError:
+                reason = "permission_denied"
+            except OSError as exc:  # pragma: no cover - fallback for unexpected errors
+                reason = f"read_failed:{exc.__class__.__name__}"
+            else:
+                digest = hashlib.sha256(payload).hexdigest()
+                hash_cache[source_path_str] = digest
+                tokens.append(f"Input {sample_id} source_hash=sha256:{digest}")
+                continue
+
+            failure_cache[source_path_str] = reason
+            tokens.append(f"Input {sample_id} source_hash_error={reason}")
         return tokens
 
     @staticmethod

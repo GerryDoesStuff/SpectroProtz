@@ -393,7 +393,8 @@ def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
     source_path = tmp_path / "sample_source.csv"
-    source_path.write_text("wavelength,intensity\n")
+    source_bytes = b"wavelength,intensity\n1,2\n"
+    source_path.write_bytes(source_bytes)
     spec.meta["source_file"] = str(source_path)
     recipe = {"export": {"path": str(tmp_path / "audit.xlsx")}}
 
@@ -413,8 +414,51 @@ def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     runtime_token = f"{package_label}=={version}"
     assert any(runtime_token in entry for entry in audit_entries)
 
-    digest = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(source_bytes).hexdigest()
     assert any(digest in entry for entry in audit_entries)
+
+
+def test_uvvis_audit_distinguishes_source_file_digests(tmp_path):
+    plugin = UvVisPlugin()
+    spec_a = _mock_spectrum()
+    spec_b = _mock_spectrum()
+    spec_b.meta = dict(spec_b.meta)
+    spec_b.meta["sample_id"] = "Sample-2"
+
+    file_a = tmp_path / "source_a.csv"
+    file_b = tmp_path / "source_b.csv"
+    bytes_a = b"alpha,1\n"
+    bytes_b = b"beta,2\n"
+    file_a.write_bytes(bytes_a)
+    file_b.write_bytes(bytes_b)
+    spec_a.meta["source_file"] = str(file_a)
+    spec_b.meta["source_file"] = str(file_b)
+
+    recipe = {"export": {"path": str(tmp_path / "audit.xlsx")}}
+
+    processed, qc_rows = plugin.analyze([spec_a, spec_b], recipe)
+    audit_entries = plugin._build_audit_entries(processed, qc_rows, recipe, figures={})
+
+    digest_a = hashlib.sha256(bytes_a).hexdigest()
+    digest_b = hashlib.sha256(bytes_b).hexdigest()
+
+    joined = "\n".join(audit_entries)
+    assert f"sha256:{digest_a}" in joined
+    assert f"sha256:{digest_b}" in joined
+
+
+def test_uvvis_audit_reports_missing_source_file(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    missing_path = tmp_path / "missing_source.csv"
+    spec.meta["source_file"] = str(missing_path)
+    recipe = {"export": {"path": str(tmp_path / "audit.xlsx")}}
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    audit_entries = plugin._build_audit_entries(processed, qc_rows, recipe, figures={})
+
+    joined = "\n".join(audit_entries)
+    assert "source_hash_error=file_not_found" in joined
 def test_uvvis_export_with_workbook_path_creates_sidecar_and_pdf(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
