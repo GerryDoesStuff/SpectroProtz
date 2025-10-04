@@ -2194,6 +2194,29 @@ class UvVisPlugin(SpectroscopyPlugin):
             spikes = metrics["spikes"]
             smoothing = metrics["smoothing"]
             drift = metrics["drift"]
+            roughness_metrics = metrics.get("roughness", {})
+            processed_roughness_raw = roughness_metrics.get("processed")
+            try:
+                processed_roughness = float(processed_roughness_raw)
+            except (TypeError, ValueError):
+                processed_roughness = float("nan")
+            channel_roughness_raw = roughness_metrics.get("channels")
+            channel_roughness: Dict[str, float] = {}
+            if isinstance(channel_roughness_raw, dict):
+                for name, value in channel_roughness_raw.items():
+                    try:
+                        channel_roughness[name] = float(value)
+                    except (TypeError, ValueError):
+                        channel_roughness[name] = float("nan")
+            roughness_delta: Dict[str, float] = {}
+            if np.isfinite(processed_roughness):
+                for name, value in channel_roughness.items():
+                    if np.isfinite(value):
+                        roughness_delta[name] = value - processed_roughness
+                    else:
+                        roughness_delta[name] = float("nan")
+            else:
+                roughness_delta = {name: float("nan") for name in channel_roughness}
             wl = np.asarray(spec.wavelength, dtype=float)
             intensity = np.asarray(spec.intensity, dtype=float)
             derivatives = self._compute_derivatives(wl, intensity, derivative_enabled)
@@ -2247,6 +2270,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "drift_span_minutes": drift.span_minutes,
                 "drift_timestamp": drift.timestamp.isoformat() if drift.timestamp else None,
                 "drift_window": drift.window,
+                "roughness": {"processed": processed_roughness, "channels": channel_roughness},
+                "roughness_delta": roughness_delta,
                 "flags": metrics["flags"],
                 "summary": metrics["summary"],
                 "band_ratios": band_ratios,
