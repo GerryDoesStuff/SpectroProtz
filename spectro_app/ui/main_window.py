@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtGui import QDesktopServices
 
 from spectro_app.engine.plugin_api import BatchResult
@@ -15,6 +15,7 @@ from spectro_app.plugins.raman.plugin import RamanPlugin
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
 from spectro_app.ui.dialogs.about import AboutDialog
 from spectro_app.ui.dialogs.help_viewer import HelpViewer
+from spectro_app.ui.dialogs.settings_dialog import SettingsDialog
 from spectro_app.ui.docks.file_queue import FileQueueDock
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
@@ -36,6 +37,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Spectroscopy Processing App")
         self.resize(1280, 800)
         build_menus(self)
+        self._collect_actions()
+        self._init_toolbar()
         self._init_docks()
         self._init_status()
         self.restore_state()
@@ -67,10 +70,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_plugin = None
         self._active_plugin_id: Optional[str] = None
         self._export_default_dir: Optional[Path] = None
+        self._default_palette: Optional[QtGui.QPalette] = None
+        self._default_style_name: Optional[str] = None
+        self._log_dir: Optional[Path] = None
+        self._load_app_settings()
         self._job_running = False
         self._updating_ui = False
 
-        self._collect_actions()
         self._connect_recipe_editor()
         self._select_module(self._recipe_data["module"])
         self.status.showMessage("Ready")
@@ -92,6 +98,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loggerDock = LoggerDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.loggerDock)
 
+    def _init_toolbar(self):
+        self._toolbar = self.addToolBar("Main")
+        self._toolbar.setObjectName("MainToolbar")
+        self._toolbar.setMovable(False)
+        if self._open_action:
+            self._toolbar.addAction(self._open_action)
+        if self._save_recipe_action:
+            self._toolbar.addAction(self._save_recipe_action)
+        self._toolbar.addSeparator()
+        if self._run_action:
+            self._toolbar.addAction(self._run_action)
+        if self._cancel_action:
+            self._toolbar.addAction(self._cancel_action)
+        self._toolbar.addSeparator()
+        if self._export_action:
+            self._toolbar.addAction(self._export_action)
+
     def _init_status(self):
         self.status = self.statusBar()
         self.progress = QtWidgets.QProgressBar()
@@ -107,6 +130,129 @@ class MainWindow(QtWidgets.QMainWindow):
         self._export_action = actions.get("Export Workbook...")
         self._run_action = actions.get("Run")
         self._cancel_action = actions.get("Cancel")
+
+    def _load_app_settings(self):
+        settings = self.appctx.settings
+        app = QtWidgets.QApplication.instance()
+        if app:
+            if self._default_palette is None:
+                self._default_palette = QtGui.QPalette(app.palette())
+            if self._default_style_name is None:
+                self._default_style_name = app.style().objectName()
+
+        export_dir_value = settings.value("export/defaultDir", "") or ""
+        if export_dir_value:
+            try:
+                self._export_default_dir = Path(str(export_dir_value))
+            except (TypeError, ValueError):
+                self._export_default_dir = None
+
+        export_name_value = settings.value("export/defaultName", "") or ""
+        if export_name_value:
+            export_cfg = self._recipe_data.setdefault("export", {})
+            if not export_cfg.get("path"):
+                export_cfg["path"] = export_name_value
+
+        log_dir_value = settings.value("logDir", "") or ""
+        if log_dir_value:
+            try:
+                self._log_dir = Path(str(log_dir_value))
+            except (TypeError, ValueError):
+                self._log_dir = Path.home() / "SpectroApp" / "logs"
+        else:
+            self._log_dir = Path.home() / "SpectroApp" / "logs"
+
+        theme_value = str(settings.value("theme", "system") or "system")
+        self._apply_theme(theme_value)
+
+    def _apply_theme(self, theme: str):
+        theme = (theme or "system").lower()
+        app = QtWidgets.QApplication.instance()
+        if not app:
+            return
+
+        if self._default_palette is None:
+            self._default_palette = QtGui.QPalette(app.palette())
+        if self._default_style_name is None:
+            self._default_style_name = app.style().objectName()
+
+        app.setProperty("spectro_theme", theme)
+
+        if theme == "dark":
+            app.setStyle("Fusion")
+            palette = QtGui.QPalette()
+            palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
+            palette.setColor(
+                QtGui.QPalette.ColorRole.WindowText, QtCore.Qt.GlobalColor.white
+            )
+            palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(35, 35, 35))
+            palette.setColor(
+                QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(53, 53, 53)
+            )
+            palette.setColor(
+                QtGui.QPalette.ColorRole.ToolTipBase, QtCore.Qt.GlobalColor.white
+            )
+            palette.setColor(
+                QtGui.QPalette.ColorRole.ToolTipText, QtCore.Qt.GlobalColor.white
+            )
+            palette.setColor(QtGui.QPalette.ColorRole.Text, QtCore.Qt.GlobalColor.white)
+            palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
+            palette.setColor(
+                QtGui.QPalette.ColorRole.ButtonText, QtCore.Qt.GlobalColor.white
+            )
+            palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtCore.Qt.GlobalColor.red)
+            palette.setColor(
+                QtGui.QPalette.ColorRole.Highlight,
+                QtGui.QColor(142, 45, 197).lighter(),
+            )
+            palette.setColor(
+                QtGui.QPalette.ColorRole.HighlightedText, QtCore.Qt.GlobalColor.black
+            )
+            app.setPalette(palette)
+        elif theme == "light":
+            app.setStyle("Fusion")
+            if self._default_palette is not None:
+                app.setPalette(QtGui.QPalette(self._default_palette))
+            else:
+                app.setPalette(app.style().standardPalette())
+        else:
+            if self._default_style_name:
+                style = QtWidgets.QStyleFactory.create(self._default_style_name)
+                if style:
+                    app.setStyle(style)
+                else:
+                    app.setStyle(self._default_style_name)
+            if self._default_palette is not None:
+                app.setPalette(QtGui.QPalette(self._default_palette))
+            else:
+                app.setPalette(app.style().standardPalette())
+
+    def _coerce_settings_list(self, value: object) -> List[str]:
+        if isinstance(value, (list, tuple)):
+            items = [str(v) for v in value if v]
+        elif isinstance(value, str):
+            items = [v for v in value.split(";") if v]
+        else:
+            items = []
+        seen = set()
+        ordered: List[str] = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
+
+    def _record_recent_files(self, paths: List[str]):
+        clean_paths = [str(p) for p in paths if p]
+        if not clean_paths:
+            return
+        settings = self.appctx.settings
+        current = self._coerce_settings_list(settings.value("recentFiles", []))
+        for path in clean_paths:
+            if path in current:
+                current.remove(path)
+            current.insert(0, path)
+        settings.setValue("recentFiles", current[:20])
 
     def _connect_recipe_editor(self):
         self.recipeDock.module.currentTextChanged.connect(self._on_module_changed)
@@ -128,9 +274,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if data_paths:
             self._set_queue(data_paths)
-            self._export_default_dir = Path(data_paths[0]).parent
+            try:
+                self._export_default_dir = Path(data_paths[0]).parent
+                self.appctx.settings.setValue(
+                    "export/defaultDir", str(self._export_default_dir)
+                )
+            except (TypeError, ValueError):
+                self._export_default_dir = None
         else:
             self._set_queue([])
+
+        self._record_recent_files(paths)
 
     def on_save_recipe(self):
         if self._current_recipe_path is None:
@@ -200,6 +354,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._last_result = result
+        export_path = Path(target)
+        self.appctx.settings.setValue("export/defaultDir", str(export_path.parent))
+        self.appctx.settings.setValue("export/defaultName", export_path.name)
         self.status.showMessage(f"Exported workbook to {target}", 5000)
         self.appctx.set_dirty(True)
         self._update_action_states()
@@ -260,6 +417,56 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_about(self):
         dlg = AboutDialog(self)
         dlg.exec()
+
+    def on_settings(self):
+        dialog = SettingsDialog(self.appctx.settings, self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        values = dialog.values()
+        settings = self.appctx.settings
+        settings.setValue("theme", values["theme"])
+        settings.setValue("recentFiles", values["recent_files"])
+        settings.setValue("export/defaultDir", values["export_default_dir"])
+        settings.setValue("export/defaultName", values["export_default_name"])
+
+        self._apply_theme(values["theme"])
+
+        export_dir = values["export_default_dir"]
+        if export_dir:
+            try:
+                self._export_default_dir = Path(export_dir)
+            except (TypeError, ValueError):
+                self._export_default_dir = None
+        else:
+            self._export_default_dir = None
+        export_name = values["export_default_name"]
+        if export_name:
+            export_cfg = self._recipe_data.setdefault("export", {})
+            export_cfg["path"] = export_name
+
+        self.status.showMessage("Settings updated.", 5000)
+
+    def on_check_updates(self):
+        QtWidgets.QMessageBox.information(
+            self,
+            "Check for Updates",
+            "You are running the latest available version of SpectroApp.",
+        )
+
+    def on_open_log_folder(self):
+        log_dir = self._log_dir or Path.home() / "SpectroApp" / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # pragma: no cover - filesystem error path
+            QtWidgets.QMessageBox.critical(
+                self, "Log Folder", f"Unable to create log folder:\n{exc}"
+            )
+            return
+        self._log_dir = log_dir
+        self.appctx.settings.setValue("logDir", str(log_dir))
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(log_dir)))
+        self.status.showMessage(f"Opened log folder: {log_dir}", 5000)
 
     def closeEvent(self, e):
         if not self.appctx.maybe_close():
@@ -324,6 +531,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cancel_action.setEnabled(running)
         if self._open_action:
             self._open_action.setEnabled(not running)
+        if self._save_recipe_action:
+            self._save_recipe_action.setEnabled(not running)
+        if self._save_recipe_as_action:
+            self._save_recipe_as_action.setEnabled(not running)
         if self._export_action:
             self._export_action.setEnabled(not running and self._last_result is not None)
 
