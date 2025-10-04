@@ -49,10 +49,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.runctl = RunController(self)
         self._connect_run_controller()
-        self.runctl.job_started.connect(self._on_job_started)
-        self.runctl.job_finished.connect(self._on_job_finished)
-        self.runctl.job_progress.connect(self._on_job_progress)
-        self.runctl.job_message.connect(self._on_job_message)
 
         self._plugin_registry = {
             plugin.id: plugin
@@ -548,11 +544,79 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"Opened log folder: {log_dir}", 5000)
 
     def closeEvent(self, e):
-        if not self.appctx.maybe_close():
-            e.ignore()
-            return
+        if self.appctx.is_job_running():
+            job_action = self._prompt_job_running_action()
+            if job_action == "cancel":
+                self.on_cancel()
+                e.ignore()
+                return
+            if job_action != "force":
+                e.ignore()
+                return
+            if self.runctl.cancel():
+                self.status.showMessage("Force stopping job...", 5000)
+            self._job_running = False
+            self.appctx.set_job_running(False)
+
+        if self.appctx.is_dirty():
+            dirty_action = self._prompt_unsaved_changes()
+            if dirty_action == "cancel":
+                e.ignore()
+                return
+            if dirty_action == "save":
+                self.on_save_recipe()
+                if self.appctx.is_dirty():
+                    e.ignore()
+                    return
+            elif dirty_action == "discard":
+                self.appctx.set_dirty(False)
+
         self.save_state()
         super().closeEvent(e)
+
+    def _prompt_job_running_action(self) -> str:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setWindowTitle("Job Running")
+        box.setText(
+            "A processing job is currently running. Choose an option to continue."
+        )
+        cancel_job = box.addButton(
+            "Cancel Job", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        )
+        force_stop = box.addButton(
+            "Force Stop", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        stay_open = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(stay_open)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == cancel_job:
+            return "cancel"
+        if clicked == force_stop:
+            return "force"
+        return "abort"
+
+    def _prompt_unsaved_changes(self) -> str:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved Changes")
+        box.setText(
+            "You have unsaved recipe changes. Do you want to save before exiting?"
+        )
+        save_btn = box.addButton("Save", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton(
+            "Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(save_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save_btn:
+            return "save"
+        if clicked == discard_btn:
+            return "discard"
+        return "cancel"
 
     def save_state(self):
         s = self.appctx.settings
@@ -570,36 +634,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_run_controller(self):
         self.runctl.job_started.connect(self._on_job_started)
         self.runctl.job_finished.connect(self._on_job_finished)
-
-    def _on_job_started(self):
-        self.previewDock.clear()
-        self.qcDock.clear()
-        self.loggerDock.clear()
-
-    def _on_job_finished(self, payload):
-        if isinstance(payload, Exception):
-            message = str(payload) or payload.__class__.__name__
-            self.previewDock.show_error(message)
-            self.loggerDock.append_line(f"Error: {message}")
-            return
-
-        if isinstance(payload, BatchResult):
-            self.previewDock.show_figures(payload.figures)
-            self.qcDock.show_qc_table(payload.qc_table)
-            if payload.audit:
-                self.loggerDock.stream_lines(payload.audit)
-            else:
-                self.loggerDock.append_line("No audit messages were produced.")
-            return
-
-        # Fallback for unexpected payloads
-        self.loggerDock.append_line(f"Received unexpected job result: {payload!r}")
-        g = s.value("geometry")
-        w = s.value("windowState")
-        if g:
-            self.restoreGeometry(g)
-        if w:
-            self.restoreState(w)
+        self.runctl.job_progress.connect(self._on_job_progress)
+        self.runctl.job_message.connect(self._on_job_message)
 
     def _update_action_states(self):
         running = self._job_running
@@ -826,6 +862,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._job_running = True
         self.appctx.set_job_running(True)
         self.progress.setRange(0, 0)
+        self.progress.setValue(0)
+        self.previewDock.clear()
+        self.qcDock.clear()
+        self.loggerDock.clear()
         self._update_action_states()
 
     def _on_job_progress(self, value: int):
@@ -841,18 +881,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx.set_job_running(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+
         if isinstance(result, Exception):
+            self._last_result = None
             if isinstance(result, RuntimeError) and str(result) == "Cancelled":
                 self.status.showMessage("Job cancelled.", 5000)
+                self.loggerDock.append_line("Job cancelled.")
             else:
+                message = str(result) or result.__class__.__name__
                 QtWidgets.QMessageBox.critical(
-                    self, "Processing Failed", str(result)
+                    self, "Processing Failed", message
                 )
                 self.status.showMessage("Processing failed.", 5000)
-            self._last_result = None
-        else:
+                self.previewDock.show_error(message)
+                self.loggerDock.append_line(f"Error: {message}")
+            self._update_action_states()
+            return
+
+        if isinstance(result, BatchResult):
             self._last_result = result
+            self.previewDock.show_figures(result.figures)
+            self.qcDock.show_qc_table(result.qc_table)
+            if result.audit:
+                self.loggerDock.stream_lines(result.audit)
+            else:
+                self.loggerDock.append_line("No audit messages were produced.")
             self.status.showMessage("Processing complete.", 5000)
+        else:
+            self._last_result = None
+            self.previewDock.show_error("Unexpected job result.")
+            self.loggerDock.append_line(
+                f"Received unexpected job result: {result!r}"
+            )
+            self.status.showMessage(
+                "Processing finished with unexpected result.", 5000
+            )
+
         self._update_action_states()
 
     def _write_recipe(self, path: Path):
