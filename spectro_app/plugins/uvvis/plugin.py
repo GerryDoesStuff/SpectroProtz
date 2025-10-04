@@ -477,10 +477,22 @@ class UvVisPlugin(SpectroscopyPlugin):
         skip_keys = {"file", "filename", "file_name", "data_file", "source_file", "path"}
         merged: Dict[str, object] = {}
         for entry in matches:
+            normalized_entry: Dict[str, object] = {}
             for key, value in entry.items():
-                if key in skip_keys:
-                    continue
+                norm_key = self._normalize_manifest_key(key)
+                normalized_entry[norm_key] = value
+
+            assignments = self._extract_manifest_assignments(normalized_entry)
+            for key, value in assignments.items():
                 merged[key] = value
+
+            for key, value in normalized_entry.items():
+                if key in skip_keys or key in assignments:
+                    continue
+                if key == "role" and isinstance(value, str):
+                    merged[key] = value.strip().lower()
+                else:
+                    merged[key] = value
         return merged
 
     # ------------------------------------------------------------------
