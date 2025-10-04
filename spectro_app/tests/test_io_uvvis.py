@@ -164,6 +164,47 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     assert blank_spec.meta["blank_id"] == "Blank-01"
     assert blank_spec.meta["replicate_id"] == "ref-blank"
     assert blank_spec.meta["group_id"] == "QC"
+
+
+def test_manifest_metadata_ignored_when_disabled(tmp_path):
+    generic_csv = """wavelength,Sample A,Sample B,Blank Control
+200,0.100,0.200,0.010
+205,0.105,0.205,0.011
+"""
+    data_path = tmp_path / "generic.csv"
+    data_path.write_text(generic_csv, encoding="utf-8")
+
+    manifest_csv = """file,channel,sample_id,blank_id,replicate,group,role
+generic.csv,Sample A,Treated-A,Blank-01,rep-1,Dose-Low,
+generic.csv,Sample B,Treated-B,Blank-01,rep-2,Dose-Low,
+generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
+"""
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(manifest_csv, encoding="utf-8")
+
+    enabled_plugin = UvVisPlugin(enable_manifest=True)
+    enabled_spectra = enabled_plugin.load([str(data_path), str(manifest_path)])
+
+    enabled_by_id = {spec.meta["sample_id"]: spec for spec in enabled_spectra}
+    assert "Treated-A" in enabled_by_id
+    assert enabled_by_id["Treated-A"].meta["replicate_id"] == "rep-1"
+
+    disabled_plugin = UvVisPlugin(enable_manifest=False)
+    disabled_spectra = disabled_plugin.load([str(data_path), str(manifest_path)])
+
+    assert len(disabled_spectra) == 3
+    disabled_by_id = {spec.meta["sample_id"]: spec for spec in disabled_spectra}
+
+    assert "Sample A" in disabled_by_id
+    sample_a = disabled_by_id["Sample A"]
+    assert sample_a.meta["blank_id"] == "Blank Control"
+    assert "replicate_id" not in sample_a.meta
+    assert "group_id" not in sample_a.meta
+
+    blank_spec = disabled_by_id["Blank Control"]
+    assert blank_spec.meta["role"] == "blank"
+    assert blank_spec.meta["blank_id"] == "Blank Control"
+    assert "replicate_id" not in blank_spec.meta
 def test_manifest_named_csv_when_disabled(tmp_path):
     content = """wavelength,Sample
 200,0.100
