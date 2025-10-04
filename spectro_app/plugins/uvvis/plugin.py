@@ -827,7 +827,18 @@ class UvVisPlugin(SpectroscopyPlugin):
                     window=join_cfg.get("window", 10),
                 )
                 if joins:
-                    processed = pipeline.correct_joins(processed, joins, window=join_cfg.get("window", 10))
+                    bounds = join_cfg.get("offset_bounds")
+                    if bounds is None:
+                        bounds = (
+                            join_cfg.get("min_offset"),
+                            join_cfg.get("max_offset"),
+                        )
+                    processed = pipeline.correct_joins(
+                        processed,
+                        joins,
+                        window=join_cfg.get("window", 10),
+                        offset_bounds=bounds if bounds is not None else None,
+                    )
             if despike_cfg.get("enabled"):
                 processed = pipeline.despike_spectrum(
                     processed,

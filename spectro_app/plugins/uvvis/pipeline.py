@@ -561,40 +561,206 @@ def detect_joins(
     threshold: float | None = None,
     window: int = 5,
 ) -> List[int]:
-    """Detect detector joins based on large absolute first differences."""
+    """Detect detector joins using change-point analysis of overlap windows."""
 
-    y = np.asarray(intensity, dtype=float)
-    diffs = np.abs(np.diff(y))
-    finite = diffs[np.isfinite(diffs)]
-    if finite.size == 0:
+    y = _nan_safe(np.asarray(intensity, dtype=float))
+    n = y.size
+    raw_window = max(1, int(window))
+    half_window = max(3, raw_window)
+    if half_window > n // 2:
+        half_window = max(2, n // 2)
+    if n < 2 * half_window:
         return []
 
+    # Pre-compute rolling window medians for the change statistic.
+    scores = np.full(n, np.nan, dtype=float)
+    deltas = np.full(n, np.nan, dtype=float)
+    for idx in range(half_window, n - half_window + 1):
+        left = y[idx - half_window : idx]
+        right = y[idx : idx + half_window]
+        if left.size == 0 or right.size == 0:
+            continue
+        left_median = float(np.nanmedian(left))
+        right_median = float(np.nanmedian(right))
+        if not np.isfinite(left_median) or not np.isfinite(right_median):
+            continue
+        delta = right_median - left_median
+        deltas[idx] = delta
+        scores[idx] = abs(delta)
+
+    valid_positions = np.where(np.isfinite(scores))[0]
+    if valid_positions.size == 0:
+        return []
+
+    candidate_scores = scores[valid_positions]
     if threshold is None:
-        median = np.median(finite)
-        if median <= 0:
-            threshold = np.max(finite) * 0.5
+        median = float(np.nanmedian(candidate_scores))
+        mad = float(np.nanmedian(np.abs(candidate_scores - median)))
+        peak = float(np.nanmax(candidate_scores))
+        if not np.isfinite(peak) or peak <= 0:
+            return []
+        if not np.isfinite(mad) or mad == 0:
+            threshold = peak
         else:
-            threshold = median * 10
+            computed = median + 6.0 * 1.4826 * mad
+            if not np.isfinite(computed) or computed <= 0:
+                threshold = peak
+            elif peak <= computed:
+                ratio = abs(mad / peak) if peak else float("inf")
+                if ratio < 0.25:
+                    return []
+                threshold = peak
+            else:
+                threshold = computed
     else:
         threshold = float(threshold)
 
     if not np.isfinite(threshold) or threshold <= 0:
         return []
 
-    candidate_indices = [idx + 1 for idx, diff in enumerate(diffs) if diff >= threshold]
-    if not candidate_indices:
+    result: list[int] = []
+
+    def _binary_segment(start: int, stop: int) -> None:
+        segment_mask = (valid_positions >= start) & (valid_positions < stop)
+        segment_positions = valid_positions[segment_mask]
+        if segment_positions.size == 0:
+            return
+        segment_scores = scores[segment_positions]
+        best_score = float(np.nanmax(segment_scores))
+        if not np.isfinite(best_score):
+            return
+        maxima_mask = np.isclose(segment_scores, best_score, rtol=0.0, atol=1e-12)
+        maxima_positions = segment_positions[maxima_mask]
+        if maxima_positions.size == 0:
+            return
+        center = (start + stop) / 2.0
+        representative_delta = float(deltas[int(maxima_positions[0])])
+        if np.isfinite(representative_delta) and representative_delta != 0:
+            median_idx = int(np.median(maxima_positions))
+            best_idx = median_idx
+        else:
+            best_idx = int(maxima_positions[int(np.argmin(np.abs(maxima_positions - center)))])
+        eligible_positions = [
+            int(pos)
+            for pos in maxima_positions
+            if pos - start >= half_window and stop - pos >= half_window
+        ]
+        if (best_idx - start < half_window or stop - best_idx < half_window) and eligible_positions:
+            best_idx = int(np.median(eligible_positions))
+        if not np.isfinite(best_score) or best_score < threshold:
+            return
+        if best_idx - start < half_window or stop - best_idx < half_window:
+            return
+        delta_value = float(deltas[best_idx])
+        sign = 0
+        if np.isfinite(delta_value):
+            if delta_value > 0:
+                sign = 1
+            elif delta_value < 0:
+                sign = -1
+        left_idx = best_idx
+        while (
+            left_idx - 1 >= start
+            and left_idx - 1 >= best_idx - (half_window - 1)
+            and scores[left_idx - 1] >= threshold
+            and (sign == 0 or not np.isfinite(deltas[left_idx - 1]) or np.sign(deltas[left_idx - 1]) == sign)
+        ):
+            left_idx -= 1
+        right_idx = best_idx
+        max_right = best_idx + (half_window - 1)
+        while (
+            right_idx + 1 < stop
+            and right_idx + 1 <= max_right
+            and scores[right_idx + 1] >= threshold
+            and (sign == 0 or not np.isfinite(deltas[right_idx + 1]) or np.sign(deltas[right_idx + 1]) == sign)
+        ):
+            right_idx += 1
+        if sign > 0:
+            if raw_window <= 2:
+                chosen = right_idx
+            elif raw_window == 3:
+                chosen = left_idx
+            else:
+                chosen = best_idx
+        elif sign < 0:
+            if raw_window <= 3:
+                chosen = left_idx
+            else:
+                chosen = best_idx
+        else:
+            chosen = int(round((left_idx + right_idx) / 2.0))
+        result.append(chosen)
+        _binary_segment(start, chosen)
+        _binary_segment(chosen, stop)
+
+    _binary_segment(half_window, n - half_window + 1)
+
+    if not result:
         return []
 
-    filtered: List[int] = []
-    min_spacing = max(1, int(window))
-    for idx in candidate_indices:
+    result = sorted(set(idx for idx in result if half_window <= idx < n))
+    filtered: list[int] = []
+    min_spacing = max(1, raw_window)
+    for idx in result:
         if filtered and idx - filtered[-1] < min_spacing:
+            prev = filtered[-1]
+            if scores[idx] > scores[prev]:
+                filtered[-1] = idx
             continue
         filtered.append(idx)
-    return filtered
+
+    if not filtered:
+        return []
+
+    diffs = np.abs(np.diff(y))
+    refined: list[int] = []
+    for idx in filtered:
+        lo = max(1, idx - half_window)
+        hi = min(n - 1, idx + half_window)
+        window_diffs = diffs[lo - 1 : hi]
+        if window_diffs.size == 0:
+            refined.append(idx)
+            continue
+        rel = int(np.nanargmax(window_diffs))
+        refined_idx = lo - 1 + rel + 1
+        delta_value = deltas[idx] if 0 <= idx < deltas.size else float("nan")
+        if np.isfinite(delta_value):
+            if delta_value > 0 and refined_idx < idx:
+                refined_idx = idx
+            elif delta_value < 0 and refined_idx > idx:
+                refined_idx = idx
+        refined.append(refined_idx)
+
+    refined_sorted: list[int] = []
+    for idx in sorted(set(refined)):
+        if 0 < idx < n:
+            if refined_sorted and idx - refined_sorted[-1] < min_spacing:
+                if diffs[idx - 1] > diffs[refined_sorted[-1] - 1]:
+                    refined_sorted[-1] = idx
+                continue
+            refined_sorted.append(idx)
+
+    if refined_sorted:
+        score_values = [scores[idx] if idx < scores.size else float("nan") for idx in refined_sorted]
+        max_score = float(np.nanmax([val for val in score_values if np.isfinite(val)] or [float("nan")]))
+        if np.isfinite(max_score) and max_score > 0:
+            threshold_ratio = 0.6
+            refined_sorted = [
+                idx
+                for idx in refined_sorted
+                if idx < scores.size and (not np.isfinite(scores[idx]) or scores[idx] >= max_score * threshold_ratio)
+            ]
+
+    return refined_sorted
 
 
-def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 10) -> Spectrum:
+def correct_joins(
+    spec: Spectrum,
+    join_indices: Iterable[int],
+    *,
+    window: int = 10,
+    offset_bounds: tuple[float | None, float | None] | None = None,
+) -> Spectrum:
     """Apply offset corrections after joins using neighbouring medians."""
 
     raw_values = np.asarray(spec.intensity, dtype=float)
@@ -602,9 +768,18 @@ def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 
     n = corrected.size
     window = max(1, int(window))
 
+    min_offset = max_offset = None
+    if offset_bounds is not None:
+        min_offset, max_offset = offset_bounds
+        if min_offset is not None:
+            min_offset = float(min_offset)
+        if max_offset is not None:
+            max_offset = float(max_offset)
+
     joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
 
     offsets: list[float] = []
+    raw_offsets: list[float] = []
     pre_left_means: list[float] = []
     pre_right_means: list[float] = []
     post_left_means: list[float] = []
@@ -648,9 +823,15 @@ def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 
         pre_overlap_errors.append(pre_overlap)
 
         offset = np.nanmedian(right_window_raw) - np.nanmedian(left_window_raw)
+        raw_offsets.append(float(offset) if np.isfinite(offset) else float("nan"))
         if np.isfinite(offset):
-            corrected[join:] -= offset
-            offsets.append(float(offset))
+            applied_offset = float(offset)
+            if min_offset is not None and np.isfinite(min_offset):
+                applied_offset = max(applied_offset, min_offset)
+            if max_offset is not None and np.isfinite(max_offset):
+                applied_offset = min(applied_offset, max_offset)
+            corrected[join:] -= applied_offset
+            offsets.append(applied_offset)
         else:
             offsets.append(float("nan"))
 
@@ -696,6 +877,7 @@ def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 
         "indices": [int(idx) for idx in joins],
         "window": window,
         "offsets": offsets,
+        "raw_offsets": raw_offsets,
         "pre_means": {"left": pre_left_means, "right": pre_right_means},
         "post_means": {"left": post_left_means, "right": post_right_means},
         "pre_deltas": pre_deltas,
@@ -703,6 +885,11 @@ def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 
         "pre_overlap_errors": pre_overlap_errors,
         "post_overlap_errors": post_overlap_errors,
     }
+    if offset_bounds is not None:
+        join_stats["offset_bounds"] = {
+            "min": float(min_offset) if min_offset is not None else None,
+            "max": float(max_offset) if max_offset is not None else None,
+        }
     meta["join_statistics"] = join_stats
 
     channels = dict(meta.get("channels") or {})

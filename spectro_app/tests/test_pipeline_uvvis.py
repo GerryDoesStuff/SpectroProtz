@@ -521,6 +521,42 @@ def test_join_detection_and_correction():
     assert abs(left_mean - right_mean) < 1e-6
 
 
+def test_detect_joins_handles_gradual_spectra():
+    wl = np.linspace(400, 600, 51)
+    intensity = np.sin(wl / 40.0) * 0.01 + np.linspace(0, 0.2, wl.size)
+
+    joins = pipeline.detect_joins(wl, intensity, window=5)
+
+    assert joins == []
+
+
+def test_detect_joins_change_point_localises_join():
+    wl = np.linspace(350, 650, 61)
+    baseline = 0.002 * (wl - 350)
+    intensity = baseline.copy()
+    intensity[30:] += 4.5
+
+    joins = pipeline.detect_joins(wl, intensity, window=5)
+
+    assert joins == [30]
+
+
+def test_correct_joins_clamps_offsets_with_bounds():
+    wl = np.linspace(400, 500, 21)
+    intensity = np.concatenate([np.zeros(10), np.ones(11) * 10.0])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    bounded = pipeline.correct_joins(spec, [10], window=3, offset_bounds=(-1.0, 1.0))
+
+    assert np.allclose(bounded.intensity[:10], 0.0, atol=1e-8)
+    assert np.allclose(bounded.intensity[10:], 9.0, atol=1e-8)
+
+    stats = bounded.meta.get("join_statistics") or {}
+    assert stats.get("offsets") and stats.get("offsets")[0] == pytest.approx(1.0)
+    assert stats.get("raw_offsets") and stats.get("raw_offsets")[0] == pytest.approx(10.0)
+    assert stats.get("offset_bounds") == {"min": -1.0, "max": 1.0}
+
+
 def test_despike_and_smooth_operations():
     wl = np.linspace(400, 500, 51)
     intensity = np.sin(wl / 20.0)
