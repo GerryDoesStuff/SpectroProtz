@@ -31,6 +31,30 @@ def test_coerce_domain_interpolates_and_sorts():
     assert domain_meta["requested_max_nm"] == pytest.approx(500.0)
     assert domain_meta["output_min_nm"] == pytest.approx(400.0)
     assert domain_meta["output_max_nm"] == pytest.approx(500.0)
+    channels = coerced.meta.get("channels")
+    assert channels is not None
+    assert np.allclose(channels["original_wavelength"], sorted_wl)
+    assert np.allclose(channels["original_intensity"], sorted_intensity)
+
+
+def test_coerce_domain_resample_num_preserves_original_grid_metadata():
+    spec = Spectrum(
+        wavelength=np.array([410.0, 430.0, 470.0, 450.0]),
+        intensity=np.array([2.0, 4.0, 8.0, 6.0]),
+        meta={"channels": {"some_existing": np.array([1, 2, 3])}},
+    )
+    domain = {"min": 410.0, "max": 470.0, "num": 7}
+    coerced = pipeline.coerce_domain(spec, domain)
+    assert coerced.wavelength.size == 7
+    assert np.all(coerced.wavelength[:-1] < coerced.wavelength[1:])
+
+    sorted_wl = np.array([410.0, 430.0, 450.0, 470.0])
+    sorted_intensity = np.array([2.0, 4.0, 6.0, 8.0])
+    channels = coerced.meta.get("channels")
+    assert channels is not None
+    assert "some_existing" in channels
+    assert np.allclose(channels["original_wavelength"], sorted_wl)
+    assert np.allclose(channels["original_intensity"], sorted_intensity)
 
 
 def test_coerce_domain_averages_duplicate_wavelengths_before_clipping():
