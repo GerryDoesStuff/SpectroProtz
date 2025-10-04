@@ -10,11 +10,13 @@ configuration, allowing downstream validation to accept the relaxed policy.
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import math
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
@@ -2325,6 +2327,8 @@ class UvVisPlugin(SpectroscopyPlugin):
             f"Spectra processed: {len(specs)}",
             f"QC rows: {len(qc)}",
         ]
+        entries.extend(self._runtime_audit_tokens())
+        entries.extend(self._input_source_hash_tokens(specs))
         if recipe:
             entries.append(f"Recipe keys: {sorted(recipe.keys())}")
         for spec, qc_row in zip(specs, qc):
@@ -2363,6 +2367,33 @@ class UvVisPlugin(SpectroscopyPlugin):
         else:
             entries.append("Calibration: not performed.")
         return entries
+
+    def _runtime_audit_tokens(self) -> List[str]:
+        tokens: List[str] = []
+        package_label = "spectro-app"
+        version = "unknown"
+        for candidate in ("spectro-app", "spectro_app"):
+            try:
+                version = metadata.version(candidate)
+            except metadata.PackageNotFoundError:
+                continue
+            else:
+                package_label = candidate
+                break
+        tokens.append(f"Runtime library {package_label}=={version}")
+        return tokens
+
+    def _input_source_hash_tokens(self, specs: List[Spectrum]) -> List[str]:
+        tokens: List[str] = []
+        for spec in specs:
+            source = spec.meta.get("source_file")
+            if not source:
+                continue
+            source_str = str(source)
+            digest = hashlib.sha256(source_str.encode("utf-8")).hexdigest()
+            sample_id = self._safe_sample_id(spec, source_str)
+            tokens.append(f"Input {sample_id} source_hash=sha256:{digest}")
+        return tokens
 
     def _render_processed_figure(self, spec: Spectrum):
         wl = np.asarray(spec.wavelength, dtype=float)
