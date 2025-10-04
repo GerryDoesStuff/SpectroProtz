@@ -44,6 +44,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._collect_actions()
         self._init_toolbar()
         self._init_docks()
+        self._default_geometry: Optional[QtCore.QByteArray] = QtCore.QByteArray(
+            self.saveGeometry()
+        )
+        self._default_layout_state: Optional[QtCore.QByteArray] = QtCore.QByteArray(
+            self.saveState()
+        )
         self._init_status()
         self.restore_state()
 
@@ -433,7 +439,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_action_states()
 
     def on_reset_layout(self):
-        self.restoreState(self.saveState())
+        default_geometry = getattr(self, "_default_geometry", None)
+        restored_geometry = False
+        if default_geometry:
+            try:
+                self.restoreGeometry(QtCore.QByteArray(default_geometry))
+                restored_geometry = True
+            except Exception:
+                pass
+
+        default_state = getattr(self, "_default_layout_state", None)
+        restored_state = False
+        if default_state:
+            try:
+                self.restoreState(QtCore.QByteArray(default_state))
+                restored_state = True
+            except Exception:
+                pass
+
+        if not (restored_geometry or restored_state):
+            self.restore_state()
 
     def on_run(self):
         if self._job_running:
