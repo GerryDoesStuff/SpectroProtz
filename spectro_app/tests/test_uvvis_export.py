@@ -1,6 +1,7 @@
 import numpy as np
 from pathlib import Path
 
+import pytest
 from openpyxl import load_workbook
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -17,6 +18,16 @@ def _mock_spectrum():
         wavelength=wl,
         intensity=intensity,
         meta={"sample_id": "Sample-1", "role": "sample", "mode": "absorbance"},
+    )
+
+
+def _calibration_spectrum(sample_id: str, absorbance: float, *, role: str = "sample") -> Spectrum:
+    wl = np.linspace(240.0, 280.0, 201)
+    intensity = np.full_like(wl, absorbance, dtype=float)
+    return Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"sample_id": sample_id, "role": role, "mode": "absorbance", "pathlength_cm": 1.0},
     )
 
 
@@ -92,3 +103,135 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
 
     assert result.figures, "Export should include generated plots"
     assert any("Workbook written" in entry for entry in result.audit)
+
+
+def test_uvvis_calibration_success(tmp_path):
+    plugin = UvVisPlugin()
+    slope = 0.12
+    intercept = 0.02
+    standards = [("Std-0", 0.0), ("Std-1", 5.0), ("Std-2", 10.0)]
+    unknowns = [("Sample-1", 7.5)]
+
+    spectra = [
+        _calibration_spectrum(sample_id, intercept + slope * conc, role="standard")
+        for sample_id, conc in standards
+    ]
+    spectra.extend(
+        _calibration_spectrum(sample_id, intercept + slope * conc, role="sample")
+        for sample_id, conc in unknowns
+    )
+
+    recipe = {
+        "calibration": {
+            "targets": [
+                {
+                    "name": "Analyte",
+                    "wavelength": 260.0,
+                    "standards": [
+                        {"sample_id": sample_id, "concentration": conc}
+                        for sample_id, conc in standards
+                    ],
+                    "unknowns": [{"sample_id": sample_id} for sample_id, _ in unknowns],
+                }
+            ],
+        },
+        "export": {"path": str(tmp_path / "calibration_ok.xlsx")},
+    }
+
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    results = plugin.last_calibration_results
+
+    assert results and results["status"] == "ok"
+    target = results["targets"][0]
+    assert pytest.approx(target["fit"]["slope"], rel=1e-6) == slope
+    unknown_entry = next(entry for entry in target["unknowns"] if entry["sample_id"] == "Sample-1")
+    assert unknown_entry["status"] == "ok"
+    assert unknown_entry["predicted_concentration"] == pytest.approx(7.5, rel=1e-4)
+
+    qc_unknown = next(row for row in qc_rows if row["sample_id"] == "Sample-1")
+    qc_calibration = qc_unknown.get("calibration", {}).get("Analyte")
+    assert qc_calibration
+    assert qc_calibration["predicted_concentration"] == pytest.approx(7.5, rel=1e-4)
+
+    result = plugin.export(processed, qc_rows, recipe)
+    workbook_path = Path(recipe["export"]["path"])
+    assert workbook_path.exists()
+    wb = load_workbook(workbook_path)
+    ws_calibration = wb["Calibration"]
+    rows = list(ws_calibration.iter_rows(values_only=True))
+    assert any(row[0] == "Analyte" for row in rows if row and row[0])
+    assert any("Sample-1" in row for row in rows if row)
+    assert any("Calibration Analyte" in entry for entry in result.audit)
+
+
+def test_uvvis_calibration_insufficient_standards():
+    plugin = UvVisPlugin()
+    spectra = [
+        _calibration_spectrum("Std-0", 0.05, role="standard"),
+        _calibration_spectrum("Sample-1", 0.18, role="sample"),
+    ]
+
+    recipe = {
+        "calibration": {
+            "targets": [
+                {
+                    "name": "Analyte",
+                    "wavelength": 260.0,
+                    "standards": [{"sample_id": "Std-0", "concentration": 0.0}],
+                    "unknowns": [{"sample_id": "Sample-1"}],
+                }
+            ]
+        }
+    }
+
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    results = plugin.last_calibration_results
+    assert results and results["targets"][0]["status"] == "failed"
+    errors = " ".join(results["targets"][0]["errors"])
+    assert "At least two" in errors
+
+    qc_unknown = next(row for row in qc_rows if row["sample_id"] == "Sample-1")
+    calibration_meta = qc_unknown.get("calibration", {}).get("Analyte")
+    assert calibration_meta["status"] == "no_model"
+
+
+def test_uvvis_calibration_poor_regression():
+    plugin = UvVisPlugin()
+    standards = [
+        ("Std-0", 0.0, 0.02),
+        ("Std-1", 5.0, 0.6),
+        ("Std-2", 10.0, 0.25),
+    ]
+    unknown = ("Sample-1", 7.0, 0.31)
+
+    spectra = [
+        _calibration_spectrum(sample_id, absorbance, role="standard")
+        for sample_id, _, absorbance in standards
+    ]
+    spectra.append(_calibration_spectrum(unknown[0], unknown[2], role="sample"))
+
+    recipe = {
+        "calibration": {
+            "r2_threshold": 0.995,
+            "targets": [
+                {
+                    "name": "Analyte",
+                    "wavelength": 260.0,
+                    "standards": [
+                        {"sample_id": sample_id, "concentration": conc}
+                        for sample_id, conc, _ in standards
+                    ],
+                    "unknowns": [{"sample_id": unknown[0]}],
+                }
+            ],
+        }
+    }
+
+    _, qc_rows = plugin.analyze(spectra, recipe)
+    results = plugin.last_calibration_results
+    assert results and results["targets"][0]["status"] == "failed"
+    assert any("R^2" in error for error in results["targets"][0]["errors"])
+
+    qc_unknown = next(row for row in qc_rows if row["sample_id"] == unknown[0])
+    calibration_meta = qc_unknown.get("calibration", {}).get("Analyte")
+    assert calibration_meta["status"] == "no_model"
