@@ -39,6 +39,16 @@ class NoiseResult:
 
 
 @dataclass
+class RollingNoiseResult:
+    enabled: bool
+    window_points: int
+    step_points: int
+    windows: int
+    max_rsd: float
+    median_rsd: float
+
+
+@dataclass
 class JoinResult:
     count: int
     max_offset: float
@@ -192,6 +202,73 @@ def compute_quiet_window_noise(
         rsd = float(np.nanstd(window_values, ddof=1) / denominator * 100.0)
 
     return NoiseResult(rsd=rsd, window=(q_min, q_max), used_points=int(mask.sum()))
+
+
+def compute_rolling_rsd(spec: Spectrum, rolling_cfg: Dict[str, Any] | None) -> RollingNoiseResult:
+    rolling_cfg = rolling_cfg or {}
+    window = int(rolling_cfg.get("window", 0) or 0)
+    step = int(rolling_cfg.get("step", 1) or 1)
+
+    if window <= 1 or step <= 0:
+        return RollingNoiseResult(
+            enabled=bool(rolling_cfg),
+            window_points=max(window, 0),
+            step_points=max(step, 1),
+            windows=0,
+            max_rsd=float("nan"),
+            median_rsd=float("nan"),
+        )
+
+    intensity = np.asarray(spec.intensity, dtype=float)
+    finite_mask = np.isfinite(intensity)
+    if not np.any(finite_mask):
+        return RollingNoiseResult(
+            enabled=True,
+            window_points=window,
+            step_points=step,
+            windows=0,
+            max_rsd=float("nan"),
+            median_rsd=float("nan"),
+        )
+
+    rsd_values: List[float] = []
+    total_points = intensity.size
+    for start in range(0, total_points - window + 1, step):
+        window_values = intensity[start : start + window]
+        finite = window_values[np.isfinite(window_values)]
+        if finite.size < 3:
+            continue
+        denominator = float(np.nanmean(np.abs(finite)))
+        if not np.isfinite(denominator) or abs(denominator) < 1e-12:
+            continue
+        if finite.size < 2:
+            continue
+        rsd = float(np.nanstd(finite, ddof=1) / denominator * 100.0)
+        if np.isfinite(rsd):
+            rsd_values.append(rsd)
+
+    if not rsd_values:
+        return RollingNoiseResult(
+            enabled=True,
+            window_points=window,
+            step_points=step,
+            windows=0,
+            max_rsd=float("nan"),
+            median_rsd=float("nan"),
+        )
+
+    rsd_array = np.array(rsd_values, dtype=float)
+    max_rsd = float(np.nanmax(rsd_array)) if rsd_array.size else float("nan")
+    median_rsd = float(np.nanmedian(rsd_array)) if rsd_array.size else float("nan")
+
+    return RollingNoiseResult(
+        enabled=True,
+        window_points=window,
+        step_points=step,
+        windows=len(rsd_values),
+        max_rsd=max_rsd,
+        median_rsd=median_rsd,
+    )
 
 
 def compute_join_diagnostics(
@@ -517,6 +594,7 @@ def summarise_uvvis_metrics(metrics: Dict[str, Any]) -> str:
     parts: List[str] = []
     saturation: SaturationResult = metrics["saturation"]
     noise: NoiseResult = metrics["noise"]
+    rolling: RollingNoiseResult = metrics.get("rolling_noise")
     join: JoinResult = metrics["join"]
     spikes: SpikeResult = metrics["spikes"]
     smoothing: SmoothingGuardResult = metrics["smoothing"]
@@ -526,6 +604,8 @@ def summarise_uvvis_metrics(metrics: Dict[str, Any]) -> str:
     if saturation.flag:
         parts.append("Saturation detected")
     parts.append(f"Noise RSD {noise.rsd:.2f}%" if np.isfinite(noise.rsd) else "Noise RSD n/a")
+    if rolling and rolling.enabled and rolling.windows and np.isfinite(rolling.max_rsd):
+        parts.append(f"Rolling noise max {rolling.max_rsd:.2f}%")
     if join.count:
         parts.append(f"Joins {join.count} (max offset {join.max_offset:.3g})")
     if spikes.count:
@@ -550,6 +630,7 @@ def compute_uvvis_qc(
     qc_cfg = recipe.get("qc", {})
     saturation = compute_saturation(spec)
     noise = compute_quiet_window_noise(spec, qc_cfg.get("quiet_window"))
+    rolling_noise = compute_rolling_rsd(spec, qc_cfg.get("rolling_rsd"))
     join = compute_join_diagnostics(spec, recipe.get("join"))
     spikes = count_spikes(spec, recipe.get("despike"))
     smoothing = smoothing_guard(spec, recipe.get("smoothing"))
@@ -595,6 +676,9 @@ def compute_uvvis_qc(
     noise_limit = float(qc_cfg.get("noise_rsd_limit", 5.0))
     join_limit = float(qc_cfg.get("join_offset_limit", recipe.get("join", {}).get("threshold", 0.0) or 0.5))
     spike_limit = int(qc_cfg.get("spike_limit", 0))
+    rolling_cfg = qc_cfg.get("rolling_rsd") or {}
+    rolling_limit = rolling_cfg.get("limit")
+    rolling_limit_val = float(rolling_limit) if rolling_limit is not None else None
     negative_tolerance = float(qc_cfg.get("negative_intensity_tolerance", 0.0))
     if negative_tolerance < 0:
         negative_tolerance = 0.0
@@ -605,6 +689,14 @@ def compute_uvvis_qc(
         flags.append("saturation")
     if np.isfinite(noise.rsd) and noise.rsd > noise_limit:
         flags.append("noise")
+    if (
+        rolling_noise.enabled
+        and rolling_noise.windows
+        and rolling_limit_val is not None
+        and np.isfinite(rolling_noise.max_rsd)
+        and rolling_noise.max_rsd > rolling_limit_val
+    ):
+        flags.append("rolling_noise")
     if join.count and abs(join.max_offset) > join_limit:
         flags.append("join_offset")
     if spikes.count > spike_limit:
@@ -620,6 +712,7 @@ def compute_uvvis_qc(
         {
             "saturation": saturation,
             "noise": noise,
+            "rolling_noise": rolling_noise,
             "join": join,
             "spikes": spikes,
             "smoothing": smoothing,
@@ -632,6 +725,7 @@ def compute_uvvis_qc(
         "mode": _infer_mode(spec),
         "saturation": saturation,
         "noise": noise,
+        "rolling_noise": rolling_noise,
         "join": join,
         "spikes": spikes,
         "smoothing": smoothing,

@@ -2191,6 +2191,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             saturation = metrics["saturation"]
             join = metrics["join"]
             noise = metrics["noise"]
+            rolling_noise = metrics["rolling_noise"]
             spikes = metrics["spikes"]
             smoothing = metrics["smoothing"]
             drift = metrics["drift"]
@@ -2251,6 +2252,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "noise_rsd": noise.rsd,
                 "noise_window": noise.window,
                 "noise_points": noise.used_points,
+                "rolling_noise_enabled": rolling_noise.enabled,
+                "rolling_noise_window_points": rolling_noise.window_points,
+                "rolling_noise_step_points": rolling_noise.step_points,
+                "rolling_noise_windows": rolling_noise.windows,
+                "rolling_noise_max_rsd": rolling_noise.max_rsd,
+                "rolling_noise_median_rsd": rolling_noise.median_rsd,
                 "negative_intensity_flag": negative.flag,
                 "negative_intensity_fraction": negative.processed_fraction,
                 "negative_intensity_count": negative.processed_count,

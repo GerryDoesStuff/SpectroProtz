@@ -96,6 +96,39 @@ def test_uvvis_qc_reports_roughness_for_stage_channels():
     assert delta["raw"] > 0.0
 
 
+def test_uvvis_rolling_noise_disabled_without_recipe():
+    wl = np.linspace(200.0, 210.0, 21)
+    intensity = np.ones_like(wl)
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"sample_id": "R0", "role": "sample"})
+
+    _, qc_rows = UvVisPlugin().analyze([spec], {})
+
+    row = qc_rows[0]
+    assert row["rolling_noise_enabled"] is False
+    assert row["rolling_noise_windows"] == 0
+    assert np.isnan(row["rolling_noise_max_rsd"])
+    assert "rolling_noise" not in row["flags"]
+
+
+def test_uvvis_rolling_noise_flags_exceeding_limit():
+    wl = np.linspace(200.0, 300.0, 201)
+    intensity = np.ones_like(wl)
+    intensity[80:120] = np.tile([0.2, 2.0], 20)
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"sample_id": "R1", "role": "sample"})
+
+    recipe = {"qc": {"rolling_rsd": {"window": 20, "step": 5, "limit": 10.0}}}
+
+    _, qc_rows = UvVisPlugin().analyze([spec], recipe)
+
+    row = qc_rows[0]
+    assert row["rolling_noise_enabled"] is True
+    assert row["rolling_noise_windows"] > 0
+    assert row["rolling_noise_max_rsd"] > row["rolling_noise_median_rsd"]
+    assert row["rolling_noise_max_rsd"] > 10.0
+    assert "rolling_noise" in row["flags"]
+    assert any(part.startswith("Rolling noise") for part in row["summary"].split("; "))
+
+
 def _make_synthetic_spec(
     wl: np.ndarray,
     baseline: float,
