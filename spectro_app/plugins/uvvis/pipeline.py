@@ -60,6 +60,9 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     if wl.size == 0:
         raise ValueError("Spectrum does not contain finite wavelength samples")
 
+    preserved_wl = wl.copy()
+    preserved_inten = inten.copy()
+
     original_min = float(wl[0])
     original_max = float(wl[-1])
 
@@ -67,6 +70,7 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     output_inten = inten
     requested_min: float | None = None
     requested_max: float | None = None
+    resampled = False
 
     if domain:
         start = float(domain.get("min", wl.min())) if domain.get("min") is not None else float(wl.min())
@@ -89,6 +93,7 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
                 axis = np.linspace(start, stop, 2)
             output_wl = axis
             output_inten = np.interp(axis, wl, inten, left=np.nan, right=np.nan)
+            resampled = True
         elif domain.get("num") is not None:
             num = int(domain.get("num", wl.size))
             if num < 2:
@@ -96,6 +101,7 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
             axis = np.linspace(start, stop, num)
             output_wl = axis
             output_inten = np.interp(axis, wl, inten, left=np.nan, right=np.nan)
+            resampled = True
         else:
             clip_mask = (wl >= start) & (wl <= stop)
             output_wl = wl[clip_mask]
@@ -104,6 +110,11 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
                 raise ValueError("Spectrum does not overlap requested domain")
 
     meta = dict(spec.meta)
+    if resampled:
+        channels = dict(meta.get("channels") or {})
+        channels["original_wavelength"] = preserved_wl
+        channels["original_intensity"] = preserved_inten
+        meta["channels"] = channels
     if domain:
         domain_meta = {
             "original_min_nm": original_min,
