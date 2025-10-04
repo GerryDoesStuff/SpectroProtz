@@ -545,14 +545,22 @@ def test_average_replicates():
     assert len(averaged) == 2
     key_a = pipeline.replicate_key(spec_a1)
     assert np.allclose(mapping[key_a].intensity, np.ones_like(wl) * 1.5)
-    assert mapping[key_a].meta["replicate_count"] == 2
-    assert mapping[key_a].meta["replicate_total"] == 2
-    assert mapping[key_a].meta.get("replicate_excluded") == []
-    stored = mapping[key_a].meta.get("replicates")
+    meta = mapping[key_a].meta
+    assert meta["replicate_count"] == 2
+    assert meta["replicate_total"] == 2
+    assert meta.get("replicate_excluded") == []
+    assert meta.get("replicate_outlier_method") == "mad"
+    assert meta.get("replicate_outlier_enabled") is True
+    assert meta.get("replicate_outlier_threshold") == 3.5
+    stored_scores = meta.get("replicate_outlier_scores")
+    assert stored_scores and len(stored_scores) == 2
+    assert all(score <= 3.5 for score in stored_scores)
+    stored = meta.get("replicates")
     assert stored and len(stored) == 2
     assert all(not entry["excluded"] for entry in stored)
     assert np.allclose(stored[0]["intensity"], spec_a1.intensity)
     assert np.allclose(stored[1]["intensity"], spec_a2.intensity)
+    assert all(entry.get("leverage") is None for entry in stored)
 
 
 def test_average_replicates_outlier_rejection():
@@ -574,16 +582,77 @@ def test_average_replicates_outlier_rejection():
 
     assert len(averaged) == 1
     averaged_spec = mapping[pipeline.replicate_key(spec_a1)]
-    assert averaged_spec.meta["replicate_count"] == 2
-    assert averaged_spec.meta["replicate_total"] == 3
-    assert averaged_spec.meta["replicate_excluded"] == ["rep3"]
-    stored = averaged_spec.meta["replicates"]
+    meta = averaged_spec.meta
+    assert meta["replicate_count"] == 2
+    assert meta["replicate_total"] == 3
+    assert meta["replicate_excluded"] == ["rep3"]
+    assert meta.get("replicate_outlier_method") == "mad"
+    assert meta.get("replicate_outlier_enabled") is True
+    assert meta.get("replicate_outlier_threshold") == 3.5
+    assert meta.get("replicate_outlier_scores") and len(meta["replicate_outlier_scores"]) == 3
+    stored = meta["replicates"]
     assert len(stored) == 3
     excluded_entries = [entry for entry in stored if entry["excluded"]]
     assert len(excluded_entries) == 1
     included_entries = [entry for entry in stored if not entry["excluded"]]
     assert len(included_entries) == 2
     assert np.allclose(averaged_spec.intensity, np.mean([spec_a1.intensity, spec_a2.intensity], axis=0))
+    assert excluded_entries[0]["score"] > 3.5
+    assert excluded_entries[0]["leverage"] is None
+
+
+def test_average_replicates_cooksd_outlier():
+    wl = np.linspace(400, 500, 41)
+    baseline = 0.05 + 0.01 * np.sin(wl / 12.0)
+    spec1 = Spectrum(
+        wavelength=wl,
+        intensity=baseline + 0.002 * np.cos(wl / 8.0),
+        meta={"sample_id": "A", "channel": "rep1"},
+    )
+    spec2 = Spectrum(
+        wavelength=wl,
+        intensity=baseline - 0.002 * np.sin(wl / 9.0),
+        meta={"sample_id": "A", "channel": "rep2"},
+    )
+    heavy = baseline + 0.12 * np.exp(-0.5 * ((wl - 455) / 4.0) ** 2) + 0.05 * (wl - wl.mean())
+    spec_heavy = Spectrum(
+        wavelength=wl,
+        intensity=heavy,
+        meta={"sample_id": "A", "channel": "rep3"},
+    )
+    spec4 = Spectrum(
+        wavelength=wl,
+        intensity=baseline + 0.001 * np.random.RandomState(1).normal(size=wl.size),
+        meta={"sample_id": "A", "channel": "rep4"},
+    )
+
+    threshold = 150.0
+    averaged, mapping = pipeline.average_replicates(
+        [spec1, spec2, spec_heavy, spec4],
+        return_mapping=True,
+        outlier={"enabled": True, "method": "cooksd", "threshold": threshold},
+    )
+
+    assert len(averaged) == 1
+    averaged_spec = mapping[pipeline.replicate_key(spec1)]
+    meta = averaged_spec.meta
+    assert meta["replicate_outlier_method"] == "cooksd"
+    assert meta["replicate_outlier_enabled"] is True
+    assert meta["replicate_outlier_threshold"] == threshold
+    assert meta.get("replicate_outlier_leverage") and len(meta["replicate_outlier_leverage"]) == 4
+    assert meta.get("replicate_outlier_scores") and len(meta["replicate_outlier_scores"]) == 4
+    assert meta["replicate_excluded"] == ["rep3"]
+
+    replicates_meta = meta["replicates"]
+    assert len(replicates_meta) == 4
+    heavy_entry = next(entry for entry in replicates_meta if entry["meta"]["channel"] == "rep3")
+    assert heavy_entry["excluded"] is True
+    heavy_score = heavy_entry["score"]
+    assert math.isnan(heavy_score) or heavy_score > threshold
+    assert heavy_entry["leverage"] and heavy_entry["leverage"] > 0.4
+    retained = [entry for entry in replicates_meta if not entry["excluded"]]
+    assert all(entry["score"] <= threshold for entry in retained)
+    assert all((entry.get("leverage") or 0.0) < heavy_entry["leverage"] for entry in retained)
 
 
 def test_plugin_preprocess_full_pipeline():
@@ -644,6 +713,51 @@ def test_plugin_preprocess_full_pipeline():
     right_mean = np.nanmean(processed_sample.intensity[-5:])
     assert abs(left_mean - right_mean) < 0.1
     assert processed_blank.meta.get("baseline") == "asls"
+
+
+def test_plugin_preprocess_threads_cooksd_configuration():
+    wl = np.linspace(380, 520, 57)
+    baseline = 0.04 + 0.008 * np.sin(wl / 15.0)
+    sample1 = Spectrum(
+        wavelength=wl,
+        intensity=baseline + 0.001 * np.cos(wl / 7.0),
+        meta={"role": "sample", "sample_id": "S2", "channel": "rep1"},
+    )
+    sample2 = Spectrum(
+        wavelength=wl,
+        intensity=baseline - 0.0015 * np.sin(wl / 9.0),
+        meta={"role": "sample", "sample_id": "S2", "channel": "rep2"},
+    )
+    levered = baseline + 0.09 * np.exp(-0.5 * ((wl - 450) / 5.0) ** 2)
+    sample3 = Spectrum(
+        wavelength=wl,
+        intensity=levered,
+        meta={"role": "sample", "sample_id": "S2", "channel": "rep3"},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {
+        "replicates": {
+            "average": True,
+            "outlier": {"enabled": True, "method": "cooksd", "threshold": 150.0},
+        },
+        "blank": {"subtract": False},
+    }
+
+    processed = plugin.preprocess([sample1, sample2, sample3], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+    meta = processed_sample.meta
+    assert meta["replicate_outlier_method"] == "cooksd"
+    assert meta["replicate_outlier_enabled"] is True
+    assert meta["replicate_outlier_threshold"] == 150.0
+    assert meta["replicate_excluded"] == ["rep3"]
+    replicates_meta = meta["replicates"]
+    heavy_entry = next(entry for entry in replicates_meta if entry["meta"]["channel"] == "rep3")
+    assert heavy_entry["excluded"] is True
+    heavy_score = heavy_entry["score"]
+    assert math.isnan(heavy_score) or heavy_score > 150.0
+    assert heavy_entry["leverage"] and heavy_entry["leverage"] > 0.3
 
 
 def test_preprocess_threads_baseline_anchor_configuration():
