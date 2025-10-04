@@ -417,17 +417,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not lookup:
             return {}
 
-        matches: List[Dict[str, object]] = []
-        seen: set[int] = set()
-
-        def add_entry(entry: Dict[str, object] | None) -> None:
-            if not entry:
-                return
-            entry_id = id(entry)
-            if entry_id in seen:
-                return
-            seen.add(entry_id)
-            matches.append(entry)
+        # Manifest precedence (lowest to highest):
+        #   global → sample-only → channel-only → file+sample → file+channel.
+        # Later merges override earlier ones so the most specific assignment wins.
 
         sample_tokens: List[str] = []
         sample_id = meta.get("sample_id")
@@ -461,22 +453,93 @@ class UvVisPlugin(SpectroscopyPlugin):
             if token:
                 file_tokens.append(token)
 
-        for token in sample_tokens:
-            add_entry(lookup.get("by_sample", {}).get(token))
+        file_token_set = set(file_tokens)
+        sample_token_set = set(sample_tokens)
+        channel_token_set = set(channel_tokens)
+
+        candidate_entries: Dict[int, Dict[str, object]] = {}
+
+        for token in file_tokens:
+            entry = lookup.get("by_source", {}).get(token)
+            if entry is not None:
+                candidate_entries.setdefault(id(entry), entry)
 
         for token in channel_tokens:
-            add_entry(lookup.get("by_channel", {}).get(token))
+            entry = lookup.get("by_channel", {}).get(token)
+            if entry is not None:
+                candidate_entries.setdefault(id(entry), entry)
 
-        if not matches:
-            for token in file_tokens:
-                add_entry(lookup.get("by_source", {}).get(token))
+        for token in sample_tokens:
+            entry = lookup.get("by_sample", {}).get(token)
+            if entry is not None:
+                candidate_entries.setdefault(id(entry), entry)
 
-        if not matches:
+        if not candidate_entries:
+            return {}
+
+        file_keys = ("file", "filename", "file_name", "source_file", "data_file", "path")
+        sample_keys = ("sample_id", "sample", "sample_name")
+        channel_keys = ("channel", "channel_id", "channel_name")
+
+        buckets: Dict[str, List[Dict[str, object]]] = {
+            "global": [],
+            "sample": [],
+            "channel": [],
+            "file_sample": [],
+            "file_channel": [],
+        }
+
+        for entry in candidate_entries.values():
+            file_value = self._first_manifest_field(entry, file_keys)
+            sample_value = self._first_manifest_field(entry, sample_keys)
+            channel_value = self._first_manifest_field(entry, channel_keys)
+
+            norm_file = (
+                self._normalize_manifest_token(file_value)
+                if file_value is not None
+                else None
+            )
+            norm_sample = (
+                self._normalize_manifest_token(sample_value)
+                if sample_value is not None
+                else None
+            )
+            norm_channel = (
+                self._normalize_manifest_token(channel_value)
+                if channel_value is not None
+                else None
+            )
+
+            has_file = norm_file is not None and norm_file in file_token_set
+            has_sample = norm_sample is not None and norm_sample in sample_token_set
+            has_channel = norm_channel is not None and norm_channel in channel_token_set
+
+            if has_file and has_channel:
+                buckets["file_channel"].append(entry)
+            elif has_file and has_sample:
+                buckets["file_sample"].append(entry)
+            elif has_channel:
+                buckets["channel"].append(entry)
+            elif has_sample:
+                buckets["sample"].append(entry)
+            else:
+                if has_file:
+                    if not sample_token_set and not channel_token_set:
+                        buckets["global"].append(entry)
+                else:
+                    buckets["global"].append(entry)
+
+        ordered_entries: List[Dict[str, object]] = []
+        for key in ("global", "sample", "channel", "file_sample", "file_channel"):
+            for entry in buckets[key]:
+                ordered_entries.append(entry)
+
+        if not ordered_entries:
             return {}
 
         skip_keys = {"file", "filename", "file_name", "data_file", "source_file", "path"}
         merged: Dict[str, object] = {}
-        for entry in matches:
+        for entry in ordered_entries:
             for key, value in entry.items():
                 if key in skip_keys:
                     continue
