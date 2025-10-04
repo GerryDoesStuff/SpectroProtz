@@ -17,7 +17,7 @@ from spectro_app.plugins.uvvis.plugin import UvVisPlugin
 from spectro_app.ui.dialogs.about import AboutDialog
 from spectro_app.ui.dialogs.help_viewer import HelpViewer
 from spectro_app.ui.dialogs.settings_dialog import SettingsDialog
-from spectro_app.ui.docks.file_queue import FileQueueDock
+from spectro_app.ui.docks.file_queue import FileQueueDock, QueueEntry
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
 from spectro_app.ui.docks.qc_widget import QCDock
@@ -660,19 +660,144 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._current_recipe_path.parent
         return Path.home()
 
+    def _build_queue_entries(
+        self,
+        paths: List[str],
+        plugin: Optional[object] = None,
+    ) -> List[QueueEntry]:
+        if not paths:
+            return []
+
+        normalized = [str(Path(p)) for p in paths]
+        active_plugin = plugin
+        if active_plugin is None:
+            candidate = self._recipe_data.get("module")
+            active_plugin = self._plugin_registry.get(candidate)
+            if active_plugin is None and normalized:
+                active_plugin = self._resolve_plugin(normalized, candidate)
+
+        plugin_id = getattr(active_plugin, "id", None) if active_plugin else None
+        plugin_label = getattr(active_plugin, "label", None) if active_plugin else None
+        technique_label: Optional[str]
+        if plugin_label:
+            technique_label = str(plugin_label)
+        elif isinstance(plugin_id, str):
+            technique_label = plugin_id.upper()
+        else:
+            technique_label = None
+
+        manifest_supported = bool(active_plugin and hasattr(active_plugin, "_is_manifest_file"))
+        manifest_entries: List[Dict[str, object]] = []
+        manifest_lookup: Dict[str, Dict[str, Dict[str, object]]] = {}
+        manifest_files: set[str] = set()
+        manifest_errors: set[str] = set()
+
+        if manifest_supported:
+            for path_str in normalized:
+                path_obj = Path(path_str)
+                try:
+                    is_manifest = bool(active_plugin._is_manifest_file(path_obj))  # type: ignore[attr-defined]
+                except Exception:
+                    is_manifest = False
+                if is_manifest:
+                    manifest_files.add(path_str)
+                    if hasattr(active_plugin, "_parse_manifest_file"):
+                        try:
+                            parsed = active_plugin._parse_manifest_file(path_obj)  # type: ignore[attr-defined]
+                        except Exception:
+                            manifest_errors.add(path_str)
+                        else:
+                            if parsed:
+                                manifest_entries.extend(parsed)
+            if manifest_entries and hasattr(active_plugin, "_build_manifest_lookup"):
+                try:
+                    manifest_lookup = active_plugin._build_manifest_lookup(manifest_entries)  # type: ignore[attr-defined]
+                except Exception:
+                    manifest_lookup = {}
+
+        entries: List[QueueEntry] = []
+        for path_str in normalized:
+            path_obj = Path(path_str)
+            is_manifest = path_str in manifest_files
+            manifest_status: Optional[str]
+            manifest_meta: Dict[str, object] = {}
+
+            if active_plugin is None:
+                manifest_status = None
+            elif is_manifest:
+                manifest_status = "manifest-error" if path_str in manifest_errors else "manifest"
+            elif manifest_supported:
+                if manifest_lookup and hasattr(active_plugin, "_lookup_manifest_entries"):
+                    try:
+                        manifest_meta = active_plugin._lookup_manifest_entries(  # type: ignore[attr-defined]
+                            manifest_lookup,
+                            path_obj,
+                            {},
+                        ) or {}
+                    except Exception:
+                        manifest_meta = {}
+                if manifest_meta:
+                    manifest_status = "linked"
+                elif manifest_files:
+                    manifest_status = "missing"
+                else:
+                    manifest_status = "none"
+            else:
+                manifest_status = "unsupported"
+
+            role: Optional[str] = None
+            mode: Optional[str] = None
+            if manifest_meta:
+                role_value = manifest_meta.get("role")
+                if isinstance(role_value, str):
+                    role = role_value.strip().lower() or None
+                mode_value = manifest_meta.get("mode")
+                if isinstance(mode_value, str):
+                    mode = mode_value.strip().lower() or None
+
+            metadata = dict(manifest_meta)
+            display_name = path_obj.name or path_str
+            entries.append(
+                QueueEntry(
+                    path=path_str,
+                    display_name=display_name,
+                    plugin_id=plugin_id,
+                    technique=technique_label,
+                    mode=mode,
+                    role=role,
+                    manifest_status=manifest_status,
+                    is_manifest=is_manifest,
+                    metadata=metadata,
+                )
+            )
+
+        return entries
+
+    def _refresh_queue_metadata(self) -> None:
+        if not self._queued_paths:
+            self.fileDock.set_entries([])
+            return
+        plugin = self._plugin_registry.get(self._active_plugin_id)
+        if plugin is None:
+            plugin = self._resolve_plugin(
+                self._queued_paths, self._recipe_data.get("module")
+            )
+        entries = self._build_queue_entries(self._queued_paths, plugin)
+        self.fileDock.apply_metadata(entries)
+
     def _set_queue(self, paths: List[str]):
         self._queued_paths = [str(p) for p in paths]
-        self.fileDock.list.clear()
-        if self._queued_paths:
-            self.fileDock.list.addItems(self._queued_paths)
-        self._last_result = None
-        self._update_action_states()
+        plugin = None
         if self._queued_paths:
             plugin = self._resolve_plugin(
                 self._queued_paths, self._recipe_data.get("module")
             )
-            if plugin:
-                self._select_module(plugin.id)
+        entries = self._build_queue_entries(self._queued_paths, plugin)
+        self.fileDock.set_entries(entries)
+        self._last_result = None
+        self._update_action_states()
+        if plugin:
+            self._select_module(plugin.id)
         message = (
             f"Queued {len(self._queued_paths)} files"
             if self._queued_paths
@@ -798,6 +923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_from_ui()
         self.appctx.set_dirty(True)
         self._update_action_states()
+        self._refresh_queue_metadata()
 
     def _on_recipe_widget_changed(self, *_):
         if self._updating_ui:
