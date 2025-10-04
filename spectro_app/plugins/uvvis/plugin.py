@@ -1530,21 +1530,134 @@ class UvVisPlugin(SpectroscopyPlugin):
             peaks = peaks[:max_peaks]
             if prominences is not None:
                 prominences = prominences[:max_peaks]
-        _, _, left_ips, right_ips = peak_widths(intensity, peaks, rel_height=0.5)
+        widths, width_heights, left_ips, right_ips = peak_widths(intensity, peaks, rel_height=0.5)
         x_indices = np.arange(wl.size)
         peak_rows: List[Dict[str, float]] = []
         for idx, peak in enumerate(peaks):
-            peak_wl = float(wl[peak])
-            peak_height = float(intensity[peak])
+            raw_peak_wl = float(wl[peak])
+            raw_peak_height = float(intensity[peak])
             left_wl = float(np.interp(left_ips[idx], x_indices, wl))
             right_wl = float(np.interp(right_ips[idx], x_indices, wl))
+            raw_fwhm = max(right_wl - left_wl, 0.0)
+
+            refinement = self._fit_peak_quadratic(
+                wl,
+                intensity,
+                peak,
+                float(width_heights[idx]) if width_heights is not None else None,
+            )
+
+            if refinement is not None:
+                refined_wl = refinement["wavelength"]
+                refined_height = refinement["height"]
+                left_half = refinement["left_half_max"]
+                right_half = refinement["right_half_max"]
+                refined_fwhm = max(right_half - left_half, 0.0) if left_half is not None and right_half is not None else raw_fwhm
+            else:
+                refined_wl = raw_peak_wl
+                refined_height = raw_peak_height
+                refined_fwhm = raw_fwhm
+                left_half = None
+                right_half = None
+
             peak_rows.append({
-                "wavelength": peak_wl,
-                "height": peak_height,
-                "fwhm": max(right_wl - left_wl, 0.0),
+                "wavelength": float(refined_wl),
+                "height": float(refined_height),
+                "fwhm": float(refined_fwhm),
                 "prominence": float(prominences[idx]) if prominences is not None else float("nan"),
+                "raw_wavelength": raw_peak_wl,
+                "raw_height": raw_peak_height,
+                "raw_fwhm": raw_fwhm,
+                "quadratic_refined": refinement is not None,
+                "quadratic_coefficients": refinement.get("coefficients") if refinement is not None else None,
+                "quadratic_window_indices": refinement.get("window_indices") if refinement is not None else None,
+                "quadratic_window_wavelengths": refinement.get("window_wavelengths") if refinement is not None else None,
+                "quadratic_half_height": refinement.get("half_height") if refinement is not None else None,
+                "quadratic_left_half_max": left_half,
+                "quadratic_right_half_max": right_half,
             })
         return peak_rows
+
+    def _fit_peak_quadratic(
+        self,
+        wl: np.ndarray,
+        intensity: np.ndarray,
+        peak_idx: int,
+        half_height: float | None,
+    ) -> Optional[Dict[str, object]]:
+        """Refine peak characteristics using a local quadratic fit.
+
+        The method considers a neighbourhood around ``peak_idx`` and fits a
+        parabola to derive sub-sample peak metrics. If a reliable quadratic
+        cannot be obtained the function returns ``None``.
+        """
+
+        if wl.size < 3 or intensity.size < 3:
+            return None
+
+        # Select a symmetric window (up to +/-2 neighbours) while remaining in
+        # bounds to capture the local curvature of the peak.
+        start = max(peak_idx - 2, 0)
+        stop = min(peak_idx + 3, wl.size)
+        if stop - start < 3:
+            # Expand window if near the boundaries.
+            deficit = 3 - (stop - start)
+            start = max(start - deficit, 0)
+            stop = min(start + 3, wl.size)
+        indices = np.arange(start, stop)
+        if indices.size < 3:
+            return None
+
+        x = wl[indices].astype(float)
+        y = intensity[indices].astype(float)
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+            return None
+
+        try:
+            coeffs = np.polyfit(x, y, 2)
+        except Exception:  # pragma: no cover - guard against unexpected polyfit errors
+            return None
+
+        a, b, c = coeffs
+        if abs(a) < 1e-12:
+            return None
+
+        vertex_x = -b / (2.0 * a)
+        # Require the vertex to fall within the chosen window to avoid
+        # extrapolation that could degrade the estimate.
+        if vertex_x < x[0] - 1e-9 or vertex_x > x[-1] + 1e-9:
+            return None
+
+        vertex_y = np.polyval(coeffs, vertex_x)
+        if not np.isfinite(vertex_y):
+            return None
+
+        left_half: Optional[float] = None
+        right_half: Optional[float] = None
+        if half_height is not None and np.isfinite(half_height):
+            # Solve the quadratic for the half-height contour. The returned
+            # roots are used as refined half-maximum crossings when they fall
+            # on either side of the apex.
+            roots = np.roots([a, b, c - half_height])
+            real_roots = roots[np.isreal(roots)].real
+            if real_roots.size:
+                left_candidates = real_roots[real_roots <= vertex_x]
+                right_candidates = real_roots[real_roots >= vertex_x]
+                if left_candidates.size:
+                    left_half = float(np.max(left_candidates))
+                if right_candidates.size:
+                    right_half = float(np.min(right_candidates))
+
+        return {
+            "wavelength": float(vertex_x),
+            "height": float(vertex_y),
+            "left_half_max": left_half,
+            "right_half_max": right_half,
+            "coefficients": [float(val) for val in coeffs],
+            "window_indices": [int(i) for i in indices],
+            "window_wavelengths": [float(val) for val in x],
+            "half_height": float(half_height) if half_height is not None and np.isfinite(half_height) else None,
+        }
 
     def _compute_isosbestic_checks(
         self,
