@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -27,8 +28,15 @@ def _clean_value(value: Any) -> Any:
         return json.dumps([_clean_value(v) for v in value])
     if isinstance(value, dict):
         return json.dumps({str(k): _clean_value(v) for k, v in value.items()})
+    if isinstance(value, (Path, os.PathLike)):
+        value = os.fspath(value)
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        if value and value[0] in "=+-@":
+            if not value.startswith("'"):
+                return "'" + value
+        return value
     return value
 
 
@@ -57,15 +65,15 @@ def _processed_rows(processed: Sequence[Spectrum]) -> List[List[Any]]:
         wl = np.asarray(spec.wavelength, dtype=float)
         intensity = np.asarray(spec.intensity, dtype=float)
         meta = spec.meta or {}
-        sample_id = (
+        sample_id = _clean_value(
             meta.get("sample_id")
             or meta.get("channel")
             or meta.get("blank_id")
             or f"spec_{idx}"
         )
-        role = meta.get("role", "sample")
-        mode = meta.get("mode")
-        base_channel_name = meta.get("channel_label", "processed")
+        role = _clean_value(meta.get("role", "sample"))
+        mode = _clean_value(meta.get("mode"))
+        base_channel_name = _clean_value(meta.get("channel_label", "processed"))
         for wl_val, inten_val in zip(wl, intensity):
             rows.append([
                 idx,
@@ -87,7 +95,7 @@ def _processed_rows(processed: Sequence[Spectrum]) -> List[List[Any]]:
                     sample_id,
                     role,
                     mode,
-                    name,
+                    _clean_value(name),
                     _clean_value(wl_val),
                     _clean_value(inten_val),
                 ])
