@@ -109,3 +109,86 @@ def test_uvvis_qc_drift_flags_increasing_trend():
         assert row["drift_slope_per_hour"] is not None
         assert np.isfinite(row["drift_slope_per_hour"])
     assert qc_rows[-1]["drift_span_minutes"] == pytest.approx(45.0)
+
+
+def test_uvvis_isosbestic_checks_capture_crossing():
+    wl = np.linspace(240.0, 260.0, 201)
+    line = np.linspace(0.2, 0.3, wl.size)
+    modulation = 0.01 * np.sin(((wl - wl.min()) / (wl.max() - wl.min())) * 2.0 * np.pi)
+    intensity = line + modulation
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"sample_id": "iso", "role": "sample"},
+    )
+    recipe = {
+        "features": {
+            "isosbestic": [
+                {"name": "Iso_245_255", "wavelengths": [245.0, 255.0], "tolerance": 5e-3}
+            ]
+        }
+    }
+
+    processed, qc_rows = UvVisPlugin().analyze([spec], recipe)
+
+    assert qc_rows[0]["isosbestic"]
+    check = qc_rows[0]["isosbestic"][0]
+    assert check["name"] == "Iso_245_255"
+    assert check["crossing_detected"] is True
+    assert check["within_tolerance"] is True
+    assert check["min_abs_deviation"] == pytest.approx(0.0, abs=5e-4)
+    assert 245.0 <= check["crossing_wavelength"] <= 255.0
+
+    feature_checks = processed[0].meta["features"]["isosbestic"]
+    assert feature_checks == qc_rows[0]["isosbestic"]
+
+
+def test_uvvis_kinetics_summary_tracks_delta_a():
+    wl = np.linspace(200.0, 260.0, 121)
+    start = datetime(2024, 1, 1, 10, 0)
+    minutes = [0.0, 5.0, 10.0]
+    base_curve = np.linspace(0.1, 0.15, wl.size)
+
+    specs = []
+    for offset in minutes:
+        intensity = base_curve + 0.005 * offset
+        specs.append(
+            Spectrum(
+                wavelength=wl,
+                intensity=intensity,
+                meta={
+                    "sample_id": "kinetic",
+                    "role": "sample",
+                    "acquired_datetime": (start + timedelta(minutes=offset)).isoformat(),
+                },
+            )
+        )
+
+    recipe = {
+        "features": {
+            "kinetics": {
+                "targets": [
+                    {"name": "A250", "wavelength": 250.0, "bandwidth": 2.0},
+                ]
+            }
+        }
+    }
+
+    processed, qc_rows = UvVisPlugin().analyze(specs, recipe)
+
+    assert len(qc_rows) == 3
+    relative_times = sorted(row["kinetics"]["relative_minutes"] for row in qc_rows)
+    assert relative_times == pytest.approx(minutes)
+
+    summaries = {row["sample_id"]: row["kinetics_summary"] for row in qc_rows}
+    summary = summaries["kinetic"]
+    assert summary["n_points"] == 3
+    assert summary["elapsed_minutes"] == pytest.approx(10.0)
+    target_metrics = summary["targets"]["A250"]
+    assert target_metrics["delta"] == pytest.approx(0.05)
+    assert target_metrics["slope_per_min"] == pytest.approx(0.005)
+    assert target_metrics["points"] == 3
+    assert len(summary["series"]) == 3
+
+    feature_summary = processed[0].meta["features"]["kinetics"]["summary"]
+    assert feature_summary == summary
