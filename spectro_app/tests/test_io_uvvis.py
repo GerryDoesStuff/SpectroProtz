@@ -230,6 +230,74 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     assert blank_spec.meta["role"] == "blank"
     assert blank_spec.meta["blank_id"] == "Blank Control"
     assert "replicate_id" not in blank_spec.meta
+
+
+def test_manifest_alias_assignments_from_excel(tmp_path):
+    generic_csv = """wavelength,Sample A,Sample B,Blank Control
+200,0.100,0.200,0.010
+205,0.105,0.205,0.011
+"""
+    data_path = tmp_path / "generic.csv"
+    data_path.write_text(generic_csv, encoding="utf-8")
+
+    manifest_rows = [
+        {
+            "File": "generic.csv",
+            "Channel": "Sample A",
+            "Sample": "Treated-A",
+            "Blank": "Blank-01",
+            "Replicate": "rep-1",
+            "Group": "Dose-Low",
+            "Role": "Sample",
+        },
+        {
+            "File": "generic.csv",
+            "Channel": "Sample B",
+            "Sample": "Treated-B",
+            "Blank": "Blank-01",
+            "Replicate": "rep-2",
+            "Group": "Dose-Low",
+            "Role": "SAMPLE",
+        },
+        {
+            "File": "generic.csv",
+            "Channel": "Blank Control",
+            "Sample": "Blank-01",
+            "Blank": "Blank-01",
+            "Replicate": "ref-blank",
+            "Group": "QC",
+            "Role": "BLANK",
+        },
+    ]
+    manifest_df = pd.DataFrame(manifest_rows)
+    manifest_path = tmp_path / "manifest.xlsx"
+    manifest_df.to_excel(manifest_path, index=False)
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(data_path), str(manifest_path)])
+
+    assert len(spectra) == 3
+
+    by_sample = {spec.meta["sample_id"]: spec for spec in spectra}
+    sample_a = by_sample["Treated-A"]
+    sample_b = by_sample["Treated-B"]
+    blank_spec = by_sample["Blank-01"]
+
+    assert sample_a.meta["blank_id"] == "Blank-01"
+    assert sample_a.meta["replicate_id"] == "rep-1"
+    assert sample_a.meta["group_id"] == "Dose-Low"
+    assert sample_a.meta["role"] == "sample"
+
+    assert sample_b.meta["replicate_id"] == "rep-2"
+    assert sample_b.meta["group_id"] == "Dose-Low"
+    assert sample_b.meta["role"] == "sample"
+
+    assert blank_spec.meta["role"] == "blank"
+    assert blank_spec.meta["blank_id"] == "Blank-01"
+    assert blank_spec.meta["replicate_id"] == "ref-blank"
+    assert blank_spec.meta["group_id"] == "QC"
+
+
 def test_manifest_named_csv_when_disabled(tmp_path):
     content = """wavelength,Sample
 200,0.100
