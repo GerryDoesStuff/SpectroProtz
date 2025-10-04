@@ -2282,6 +2282,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                         {
                             "status": "no_model",
                             "predicted_concentration": float("nan"),
+                            "predicted_concentration_std_err": float("nan"),
                             "within_range": False,
                             "lod_flag": None,
                         }
@@ -2366,8 +2367,19 @@ class UvVisPlugin(SpectroscopyPlugin):
             else:
                 r_squared = max(0.0, 1.0 - ss_res / ss_tot)
 
-            dof = max(len(valid_points) - (1 if not fit_intercept else 2), 1)
-            residual_std = math.sqrt(ss_res / dof) if dof > 0 else float("nan")
+            if weights_arr is not None:
+                try:
+                    weight_sum = float(np.nansum(weights_arr))
+                except Exception:  # pragma: no cover - defensive
+                    weight_sum = float(len(valid_points))
+                dof_raw = weight_sum - (1.0 if not fit_intercept else 2.0)
+            else:
+                dof_raw = float(len(valid_points) - (1 if not fit_intercept else 2))
+            if not math.isfinite(dof_raw):
+                dof_raw = float(len(valid_points) - (1 if not fit_intercept else 2))
+            dof = max(float(dof_raw), 1.0)
+            residual_variance = ss_res / dof if dof > 0 else float("nan")
+            residual_std = math.sqrt(residual_variance) if math.isfinite(residual_variance) else float("nan")
             lod = (lod_multiplier * residual_std / slope) if model_valid and slope > 0 else float("nan")
             loq = (loq_multiplier * residual_std / slope) if model_valid and slope > 0 else float("nan")
             min_conc = float(np.nanmin(x)) if x.size else float("nan")
@@ -2419,6 +2431,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "intercept": float(intercept),
                 "r_squared": float(r_squared),
                 "residual_std": float(residual_std),
+                "residual_dof": float(dof),
                 "lod": float(lod),
                 "loq": float(loq),
                 "points": len(valid_points),
@@ -2430,6 +2443,10 @@ class UvVisPlugin(SpectroscopyPlugin):
                 },
                 "weighting_applied": bool(weighting_applied),
             }
+            concentration_std = float("nan")
+            if math.isfinite(residual_std) and math.isfinite(slope) and slope != 0:
+                concentration_std = abs(residual_std / slope)
+            fit_summary["concentration_std_per_response"] = float(concentration_std)
             target_result["fit"] = fit_summary
 
             unknown_results: List[Dict[str, Any]] = []
@@ -2440,6 +2457,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 response_val = measurement["response"]
                 model_available = target_result.get("status") not in {"failed"} and math.isfinite(slope) and slope != 0
                 predicted_conc = float("nan")
+                predicted_uncertainty = float("nan")
                 status = "no_model"
                 if model_available:
                     predicted_conc = (response_val - intercept) / slope
@@ -2449,6 +2467,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                     status = "ok"
                     if not math.isfinite(predicted_conc):
                         status = "invalid"
+                    if math.isfinite(concentration_std):
+                        predicted_uncertainty = float(concentration_std)
                 within_range = (
                     math.isfinite(predicted_conc)
                     and math.isfinite(fit_summary["min_concentration"])
@@ -2466,6 +2486,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     {
                         "status": status if model_available else "no_model",
                         "predicted_concentration": float(predicted_conc),
+                        "predicted_concentration_std_err": float(predicted_uncertainty),
                         "within_range": within_range if status not in {"no_model", "invalid"} else False,
                         "lod_flag": lod_flag if status not in {"no_model", "invalid"} else None,
                     }
@@ -2785,10 +2806,16 @@ class UvVisPlugin(SpectroscopyPlugin):
                 r_squared = fit.get("r_squared")
                 slope_str = f"{slope:.4f}" if isinstance(slope, (int, float)) and math.isfinite(slope) else "nan"
                 r2_str = f"{r_squared:.4f}" if isinstance(r_squared, (int, float)) and math.isfinite(r_squared) else "nan"
+                conc_sigma = fit.get("concentration_std_per_response")
+                conc_sigma_str = (
+                    f"{conc_sigma:.4f}"
+                    if isinstance(conc_sigma, (int, float)) and math.isfinite(conc_sigma)
+                    else "nan"
+                )
                 weighting_flag = "weighted" if fit.get("weighting_applied") else "unweighted"
                 entries.append(
                     f"Calibration {target.get('name', 'target')}: status={target.get('status', 'unknown')} "
-                    f"slope={slope_str} r2={r2_str} weighting={weighting_flag}"
+                    f"slope={slope_str} r2={r2_str} weighting={weighting_flag} conc_se={conc_sigma_str}"
                 )
         else:
             entries.append("Calibration: not performed.")
