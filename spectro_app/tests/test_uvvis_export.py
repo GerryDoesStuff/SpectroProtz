@@ -107,6 +107,7 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert any("band_ratios" in str(value) for value in qc_header)
 
     assert result.figures, "Export should include generated plots"
+    assert "qc_summary_noise.png" in result.figures
     assert any("Workbook written" in entry for entry in result.audit)
 
 
@@ -127,13 +128,14 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
 
     coerced = pipeline.coerce_domain(sample, {"min": 400.0, "max": 460.0, "num": 7})
     joined = pipeline.correct_joins(coerced, [3], window=1)
+    joined.meta["join_indices"] = (3,)
     despiked = pipeline.despike_spectrum(joined, zscore=2.0, window=3)
     blanked = pipeline.subtract_blank(despiked, blank)
     baseline = pipeline.apply_baseline(blanked, "asls", lam=1e2, p=0.01, niter=10)
     smoothed = pipeline.smooth_spectrum(baseline, window=5, polyorder=2)
 
     recipe = {"export": {"path": str(tmp_path / "stage_channels.xlsx")}}
-    plugin.export([smoothed], [{}], recipe)
+    result = plugin.export([smoothed], [{}], recipe)
 
     workbook_path = Path(recipe["export"]["path"])
     assert workbook_path.exists()
@@ -148,6 +150,7 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
     }
     expected = {"raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"}
     assert expected.issubset(channels)
+    assert any(name.endswith("join_1.png") for name in result.figures)
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
@@ -273,6 +276,7 @@ def test_uvvis_calibration_success(tmp_path):
     sample_row = next(row for row in rows if row and row[0] == "Sample-1")
     assert sample_row[3] == pytest.approx(7.5, rel=1e-4)
     assert any("Calibration Analyte" in entry for entry in result.audit)
+    assert any(name.startswith("calibration_Analyte") for name in result.figures)
 
 
 def test_uvvis_calibration_insufficient_standards():
