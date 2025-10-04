@@ -486,6 +486,62 @@ def test_preprocess_guardrails_and_missing_blank():
         plugin.preprocess([sample], recipe_missing_blank)
 
 
+def test_smooth_spectrum_respects_join_boundaries():
+    wl = np.linspace(400, 500, 20)
+    left = np.linspace(0.0, 1.0, 10)
+    right = np.linspace(10.0, 11.0, 10)
+    intensity = np.concatenate([left, right])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    global_smoothed = pipeline.smooth_spectrum(spec, window=5, polyorder=2)
+    segmented_smoothed = pipeline.smooth_spectrum(
+        spec, window=5, polyorder=2, join_indices=[10]
+    )
+
+    original_gap = intensity[10] - intensity[9]
+    segmented_gap = segmented_smoothed.intensity[10] - segmented_smoothed.intensity[9]
+    global_gap = global_smoothed.intensity[10] - global_smoothed.intensity[9]
+
+    assert segmented_smoothed.meta.get("smoothed") is True
+    assert segmented_smoothed.meta.get("smoothed_segmented") is True
+    assert abs(segmented_gap - original_gap) < abs(global_gap - original_gap)
+    assert abs(segmented_gap) > abs(global_gap)
+
+
+def test_preprocess_smoothing_uses_join_segments():
+    wl = np.linspace(400, 500, 20)
+    left = np.linspace(0.0, 1.0, 10)
+    right = np.linspace(0.0, 1.0, 10)
+    right[0] = 5.0
+    intensity = np.concatenate([left, right])
+    sample = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample", "sample_id": "S1"})
+
+    plugin = UvVisPlugin()
+    base_recipe = disable_blank_requirement({"join": {"enabled": True}})
+    unsmoothed = plugin.preprocess([sample], base_recipe)
+    assert len(unsmoothed) == 1
+    unsmoothed_sample = unsmoothed[0]
+    join_indices = unsmoothed_sample.meta.get("join_indices")
+
+    expected = pipeline.smooth_spectrum(
+        unsmoothed_sample, window=5, polyorder=2, join_indices=join_indices
+    )
+
+    recipe = disable_blank_requirement(
+        {
+            "join": {"enabled": True},
+            "smoothing": {"enabled": True, "window": 5, "polyorder": 2},
+        }
+    )
+
+    processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+
+    assert processed_sample.meta.get("smoothed_segmented") is True
+    assert processed_sample.meta.get("join_indices") == (10,)
+
+    assert np.allclose(processed_sample.intensity, expected.intensity)
 def test_preprocess_applies_default_domain_limits():
     wavelengths = np.array([150.0, 190.0, 250.0, 1090.0, 1120.0])
     intensities = np.array([0.0, 1.0, 2.0, 3.0, 4.0])

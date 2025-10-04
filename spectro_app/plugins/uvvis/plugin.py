@@ -786,6 +786,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     window=despike_cfg.get("window", 5),
                     join_indices=joins,
                 )
+            processed.meta["join_indices"] = tuple(joins)
             stage_one.append(processed)
 
         blanks_stage = [spec for spec in stage_one if spec.meta.get("role") == "blank"]
@@ -869,10 +870,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                 working = pipeline.apply_baseline(working, method, **params)
 
             if smoothing_cfg.get("enabled"):
+                join_indices = working.meta.get("join_indices")
                 working = pipeline.smooth_spectrum(
                     working,
                     window=int(smoothing_cfg.get("window", 5)),
                     polyorder=int(smoothing_cfg.get("polyorder", 2)),
+                    join_indices=join_indices,
                 )
 
             processed_samples.append(working)
@@ -907,6 +910,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                         blank,
                         window=int(smoothing_cfg.get("window", 5)),
                         polyorder=int(smoothing_cfg.get("polyorder", 2)),
+                        join_indices=blank.meta.get("join_indices"),
                     )
                     for blank in blanks_working
                 ]
