@@ -135,6 +135,33 @@ def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
 
     digest = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()
     assert any(digest in entry for entry in audit_entries)
+def test_uvvis_export_with_workbook_path_creates_sidecar_and_pdf(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_batch.xlsx"),
+            "recipe_sidecar": True,
+            "pdf_report": True,
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+
+    result = plugin.export(processed, qc_rows, recipe)
+
+    workbook_path = tmp_path / "uvvis_batch.xlsx"
+    recipe_sidecar = tmp_path / "uvvis_batch.recipe.json"
+    pdf_report = tmp_path / "uvvis_batch.pdf"
+
+    assert workbook_path.exists()
+    assert recipe_sidecar.exists()
+    assert pdf_report.exists()
+
+    audit_text = "\n".join(result.audit)
+    assert "Workbook written" in audit_text
+    assert "Recipe sidecar written" in audit_text
+    assert "PDF report written" in audit_text
 
 
 def test_uvvis_calibration_success(tmp_path):
@@ -191,8 +218,21 @@ def test_uvvis_calibration_success(tmp_path):
     wb = load_workbook(workbook_path)
     ws_calibration = wb["Calibration"]
     rows = list(ws_calibration.iter_rows(values_only=True))
-    assert any(row[0] == "Analyte" for row in rows if row and row[0])
-    assert any("Sample-1" in row for row in rows if row)
+    summary_header = rows[0]
+    assert summary_header[:3] == ("Target", "Status", "Slope")
+    analyte_summary = next(row for row in rows if row and row[0] == "Analyte")
+    assert analyte_summary[1] == "ok"
+    assert analyte_summary[2] == pytest.approx(slope, rel=1e-6)
+
+    standards_header = next(row for row in rows if row and "Response (A/cm)" in row)
+    assert standards_header[:3] == ("Sample ID", "Concentration", "Response (A/cm)")
+    std_row = next(row for row in rows if row and row[0] == "Std-1")
+    assert std_row[2] == pytest.approx(intercept + slope * 5.0, rel=1e-6)
+
+    unknowns_header = next(row for row in rows if row and "Predicted Concentration" in row)
+    assert unknowns_header[0] == "Sample ID"
+    sample_row = next(row for row in rows if row and row[0] == "Sample-1")
+    assert sample_row[3] == pytest.approx(7.5, rel=1e-4)
     assert any("Calibration Analyte" in entry for entry in result.audit)
 
 
