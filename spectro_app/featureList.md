@@ -138,6 +138,10 @@ QC_Flags + metrics.
 Calibration (if used): standards table, fit stats, residuals.
 
 Audit_Log: ordered operations + parameters + library versions + input hashes.
+  - Runtime entries include tokens such as ``Runtime library spectro-app==<version>`` so batches capture the
+    executing build.
+  - Each spectrum with a ``meta.source_file`` records ``Input <sample_id> source_hash=sha256:<digest>`` for
+    provenance of the originating files.
 
 Sidecar recipe JSON/YAML snapshot stored with outputs.
 
