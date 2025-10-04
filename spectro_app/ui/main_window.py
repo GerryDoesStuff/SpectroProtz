@@ -18,6 +18,12 @@ from spectro_app.ui.docks.file_queue import FileQueueDock
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
 from spectro_app.ui.docks.qc_widget import QCDock
+from spectro_app.ui.docks.logger_view import LoggerDock
+from spectro_app.ui.dialogs.about import AboutDialog
+from spectro_app.ui.dialogs.help_viewer import HelpViewer
+from spectro_app.engine.run_controller import RunController
+from spectro_app.engine.plugin_api import BatchResult
+from spectro_app.engine.recipe_model import Recipe
 from spectro_app.ui.docks.recipe_editor import RecipeEditorDock
 from spectro_app.ui.menus import build_menus
 
@@ -34,6 +40,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.restore_state()
 
         self.runctl = RunController(self)
+        self._connect_run_controller()
         self.runctl.job_started.connect(self._on_job_started)
         self.runctl.job_finished.connect(self._on_job_finished)
         self.runctl.job_progress.connect(self._on_job_progress)
@@ -260,6 +267,39 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def restore_state(self):
         s = self.appctx.settings
+        g = s.value("geometry"); w = s.value("windowState")
+        if g: self.restoreGeometry(g)
+        if w: self.restoreState(w)
+
+    # ------------------------------------------------------------------
+    # Run controller plumbing
+    def _connect_run_controller(self):
+        self.runctl.job_started.connect(self._on_job_started)
+        self.runctl.job_finished.connect(self._on_job_finished)
+
+    def _on_job_started(self):
+        self.previewDock.clear()
+        self.qcDock.clear()
+        self.loggerDock.clear()
+
+    def _on_job_finished(self, payload):
+        if isinstance(payload, Exception):
+            message = str(payload) or payload.__class__.__name__
+            self.previewDock.show_error(message)
+            self.loggerDock.append_line(f"Error: {message}")
+            return
+
+        if isinstance(payload, BatchResult):
+            self.previewDock.show_figures(payload.figures)
+            self.qcDock.show_qc_table(payload.qc_table)
+            if payload.audit:
+                self.loggerDock.stream_lines(payload.audit)
+            else:
+                self.loggerDock.append_line("No audit messages were produced.")
+            return
+
+        # Fallback for unexpected payloads
+        self.loggerDock.append_line(f"Received unexpected job result: {payload!r}")
         g = s.value("geometry")
         w = s.value("windowState")
         if g:
