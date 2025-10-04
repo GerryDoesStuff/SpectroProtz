@@ -3,6 +3,10 @@ defaults:
     enabled: true
     window: 3
     threshold: 0.2
+    windows:
+      helios:
+        - min_nm: 340.0
+          max_nm: 360.0
   smoothing:
     enabled: false
     window: 15

@@ -508,6 +508,48 @@ def test_preprocess_threads_join_indices_to_despike(monkeypatch):
     assert captured.get("join_indices") == expected_joins
 
 
+def test_preprocess_defaults_limit_join_windows_for_helios():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 330.0] += 3.0
+    intensity[wl >= 350.0] += 3.0
+
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"role": "sample", "instrument": "Helios Gamma"},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {
+        "join": {"enabled": True, "threshold": 0.5, "window": 5},
+        "blank": {"subtract": False},
+    }
+    processed = plugin.preprocess([spec], recipe)
+    assert processed
+    helios_result = processed[0]
+    helios_indices = tuple(helios_result.meta.get("join_indices", ()))
+    assert helios_indices
+    helios_wavelengths = helios_result.wavelength[np.asarray(helios_indices, dtype=int)]
+    assert all(340.0 <= float(val) <= 360.0 for val in helios_wavelengths)
+
+    override_recipe = {
+        "join": {
+            "enabled": True,
+            "threshold": 0.5,
+            "window": 5,
+            "windows": [{"min_nm": 320.0, "max_nm": 335.0}],
+        },
+        "blank": {"subtract": False},
+    }
+    override_processed = plugin.preprocess([spec], override_recipe)
+    assert override_processed
+    override_indices = tuple(override_processed[0].meta.get("join_indices", ()))
+    assert override_indices
+    override_wavelengths = override_processed[0].wavelength[np.asarray(override_indices, dtype=int)]
+    assert all(320.0 <= float(val) <= 335.0 for val in override_wavelengths)
+
+
 def test_join_detection_and_correction():
     wl = np.linspace(400, 700, 31)
     intensity = np.zeros_like(wl)
@@ -519,6 +561,37 @@ def test_join_detection_and_correction():
     left_mean = np.mean(corrected.intensity[:15])
     right_mean = np.mean(corrected.intensity[16:])
     assert abs(left_mean - right_mean) < 1e-6
+
+
+def test_detect_joins_respects_wavelength_windows():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 330.0] += 3.0
+    intensity[wl >= 350.0] += 3.0
+
+    unrestricted = pipeline.detect_joins(wl, intensity, window=5, threshold=0.5)
+    assert len(unrestricted) >= 2
+
+    restricted = pipeline.detect_joins(
+        wl,
+        intensity,
+        window=5,
+        threshold=0.5,
+        windows=[{"min_nm": 345.0, "max_nm": 355.0}],
+    )
+    assert restricted
+    restricted_wavelengths = wl[np.asarray(restricted, dtype=int)]
+    assert restricted_wavelengths.size == 1
+    assert 345.0 <= float(restricted_wavelengths[0]) <= 355.0
+
+    blocked = pipeline.detect_joins(
+        wl,
+        intensity,
+        window=5,
+        threshold=0.5,
+        windows=[{"min_nm": 300.0, "max_nm": 320.0}],
+    )
+    assert blocked == []
 
 
 def test_detect_joins_handles_gradual_spectra():
@@ -917,7 +990,7 @@ def test_preprocess_smoothing_uses_join_segments():
 def test_preprocess_uses_default_join_detection():
     wl = np.linspace(300.0, 800.0, 101)
     baseline = 0.002 * (wl - wl.min())
-    join_idx = 60
+    join_idx = 10
     intensity = baseline.copy()
     intensity[join_idx:] += 0.4
     sample = Spectrum(

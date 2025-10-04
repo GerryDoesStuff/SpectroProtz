@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -554,14 +554,36 @@ def _normalise_anchor_windows(windows_cfg: object) -> List[Dict[str, object]]:
     return normalised
 
 
+def normalise_join_windows(windows_cfg: object) -> List[Dict[str, float | None]]:
+    """Normalise a join window configuration into explicit numeric bounds."""
+
+    if windows_cfg is None:
+        return []
+
+    windows = _normalise_anchor_windows(windows_cfg)
+    normalised: List[Dict[str, float | None]] = []
+    for entry in windows:
+        lower = entry.get("lower_nm")
+        upper = entry.get("upper_nm")
+        lower_val = float(lower) if lower is not None else None
+        upper_val = float(upper) if upper is not None else None
+        normalised.append({"lower_nm": lower_val, "upper_nm": upper_val})
+    return normalised
+
+
 def detect_joins(
     wavelength: Sequence[float],
     intensity: Sequence[float],
     *,
     threshold: float | None = None,
     window: int = 5,
+    windows: Sequence[Mapping[str, float | int | None]] | None = None,
 ) -> List[int]:
-    """Detect detector joins using change-point analysis of overlap windows."""
+    """Detect detector joins using change-point analysis of overlap windows.
+
+    When ``windows`` are supplied only change-points whose wavelength falls
+    within the specified bounds are considered.
+    """
 
     y = _nan_safe(np.asarray(intensity, dtype=float))
     n = y.size
@@ -589,6 +611,36 @@ def detect_joins(
         scores[idx] = abs(delta)
 
     valid_positions = np.where(np.isfinite(scores))[0]
+    if windows is not None:
+        bounds = normalise_join_windows(windows)
+        if not bounds:
+            return []
+        wl = np.asarray(wavelength, dtype=float)
+        if wl.size != n:
+            raise ValueError("Wavelength axis and intensity must be the same length")
+        if not np.any(np.isfinite(wl)):
+            return []
+        mask = np.zeros_like(wl, dtype=bool)
+        for entry in bounds:
+            lo = entry.get("lower_nm")
+            hi = entry.get("upper_nm")
+            if lo is None and hi is None:
+                mask |= np.isfinite(wl)
+                break
+            lo_val = float(lo) if lo is not None else None
+            hi_val = float(hi) if hi is not None else None
+            if lo_val is not None and hi_val is not None and lo_val > hi_val:
+                lo_val, hi_val = hi_val, lo_val
+            window_condition = np.isfinite(wl)
+            if lo_val is not None:
+                window_condition &= wl >= lo_val
+            if hi_val is not None:
+                window_condition &= wl <= hi_val
+            mask |= window_condition
+        mask &= np.isfinite(wl)
+        if not np.any(mask):
+            return []
+        valid_positions = valid_positions[mask[valid_positions]]
     if valid_positions.size == 0:
         return []
 

@@ -81,6 +81,13 @@ class UvVisPlugin(SpectroscopyPlugin):
     DEFAULT_JOIN_ENABLED = True
     DEFAULT_JOIN_WINDOW_POINTS = 3
     DEFAULT_JOIN_THRESHOLD_ABS = 0.2
+    DEFAULT_JOIN_WINDOWS_BY_INSTRUMENT: Mapping[
+        str, Sequence[Mapping[str, float | int | None]]
+    ] = {
+        "helios": (
+            {"min_nm": 340.0, "max_nm": 360.0},
+        ),
+    }
 
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
@@ -113,8 +120,39 @@ class UvVisPlugin(SpectroscopyPlugin):
             join_defaults["threshold"] = self.DEFAULT_JOIN_THRESHOLD_ABS
 
         join_defaults.update(join_cfg)
+        if join_defaults.get("windows") is None:
+            join_defaults["windows"] = copy.deepcopy(self.DEFAULT_JOIN_WINDOWS_BY_INSTRUMENT)
         base["join"] = join_defaults
         return base
+
+    def _resolve_join_windows(
+        self, windows_cfg: object, spec: Spectrum
+    ) -> Sequence[Mapping[str, float | int | None]] | None:
+        if windows_cfg is None:
+            return None
+
+        if isinstance(windows_cfg, Mapping):
+            instrument = str(spec.meta.get("instrument") or "").lower()
+            default_windows = None
+            for key, value in windows_cfg.items():
+                if value is None:
+                    continue
+                key_lower = str(key).strip().lower()
+                if not key_lower:
+                    continue
+                if key_lower == "default":
+                    default_windows = value
+                    continue
+                if key_lower in instrument:
+                    return copy.deepcopy(value)  # type: ignore[return-value]
+            if default_windows is None:
+                return None
+            return copy.deepcopy(default_windows)  # type: ignore[return-value]
+
+        if isinstance(windows_cfg, Sequence) and not isinstance(windows_cfg, (str, bytes)):
+            return copy.deepcopy(windows_cfg)  # type: ignore[return-value]
+
+        raise TypeError("Join windows configuration must be a mapping or sequence")
 
     def _default_wavelength_limits(self, spec: Spectrum) -> tuple[float, float]:
         instrument = str(spec.meta.get("instrument") or "").lower()
@@ -820,11 +858,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             processed = coerced
             joins: list[int] = []
             if join_cfg.get("enabled"):
+                join_windows = self._resolve_join_windows(join_cfg.get("windows"), processed)
                 joins = pipeline.detect_joins(
                     processed.wavelength,
                     processed.intensity,
                     threshold=join_cfg.get("threshold"),
                     window=join_cfg.get("window", 10),
+                    windows=join_windows,
                 )
                 if joins:
                     bounds = join_cfg.get("offset_bounds")
