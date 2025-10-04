@@ -31,7 +31,9 @@ def build_menus(window):
     edit_menu.addAction(_act(window, "Select All", shortcut="Ctrl+A"))
 
     view_menu = menubar.addMenu("&View")
+    view_menu.setObjectName("viewMenu")
     view_menu.addAction(_act(window, "Reset Layout", slot=window.on_reset_layout))
+    window._view_menu = view_menu
 
     process_menu = menubar.addMenu("&Process")
     process_menu.addAction(_act(window, "Run", shortcut="F5", slot=window.on_run))
