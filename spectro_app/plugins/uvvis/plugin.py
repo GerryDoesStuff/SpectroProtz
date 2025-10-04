@@ -2255,6 +2255,16 @@ class UvVisPlugin(SpectroscopyPlugin):
                 }
                 for name, values in derivatives.items()
             }
+            def _finite_max(values, *, absolute: bool = False) -> float:
+                arr = np.asarray(values, dtype=float)
+                if arr.size == 0:
+                    return float("nan")
+                if absolute:
+                    arr = np.abs(arr)
+                finite = arr[np.isfinite(arr)]
+                if finite.size == 0:
+                    return float("nan")
+                return float(np.nanmax(finite))
             row = {
                 "id": idx,
                 "sample_id": spec.meta.get("sample_id") or spec.meta.get("channel") or spec.meta.get("blank_id"),
@@ -2283,6 +2293,15 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "join_mean_offset": join.mean_offset,
                 "join_max_overlap_error": join.max_overlap_error,
                 "join_indices": join.indices,
+                "join_offsets": join.offsets,
+                "join_pre_deltas": join.pre_deltas,
+                "join_post_deltas": join.post_deltas,
+                "join_pre_overlap_errors": join.pre_overlap_errors,
+                "join_post_overlap_errors": join.post_overlap_errors,
+                "join_pre_delta_abs_max": _finite_max(join.pre_deltas, absolute=True),
+                "join_post_delta_abs_max": _finite_max(join.post_deltas, absolute=True),
+                "join_pre_overlap_max": _finite_max(join.pre_overlap_errors),
+                "join_post_overlap_max": _finite_max(join.post_overlap_errors),
                 "spike_count": spikes.count,
                 "spike_threshold": spikes.threshold,
                 "smoothing_guard": smoothing.flag,
