@@ -1,10 +1,18 @@
-from PyQt6.QtWidgets import QAction
+from PyQt6.QtGui import QAction
+
+
+_RECENT_PLACEHOLDER_TEXT = "No Recent Files"
+
 
 def build_menus(window):
     menubar = window.menuBar()
 
     file_menu = menubar.addMenu("&File")
     file_menu.addAction(_act(window, "Open...", shortcut="Ctrl+O", slot=window.on_open))
+    recent_menu = file_menu.addMenu("Open Recent")
+    recent_menu.setObjectName("openRecentMenu")
+    window._recent_menu = recent_menu
+    window._recent_placeholder_text = _RECENT_PLACEHOLDER_TEXT
     file_menu.addAction(_act(window, "Save Recipe", shortcut="Ctrl+S", slot=window.on_save_recipe))
     file_menu.addAction(_act(window, "Save Recipe As...", slot=window.on_save_recipe_as))
     file_menu.addSeparator()
