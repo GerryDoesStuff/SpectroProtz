@@ -62,6 +62,11 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
 
     preserved_wl = wl.copy()
     preserved_inten = inten.copy()
+    unique_wl, inverse, counts = np.unique(wl, return_inverse=True, return_counts=True)
+    aggregated_inten = np.zeros_like(unique_wl, dtype=float)
+    np.add.at(aggregated_inten, inverse, inten)
+    inten = aggregated_inten / counts
+    wl = unique_wl
 
     original_min = float(wl[0])
     original_max = float(wl[-1])

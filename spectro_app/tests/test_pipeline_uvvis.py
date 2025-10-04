@@ -57,6 +57,37 @@ def test_coerce_domain_resample_num_preserves_original_grid_metadata():
     assert np.allclose(channels["original_intensity"], sorted_intensity)
 
 
+def test_coerce_domain_averages_duplicate_wavelengths_before_clipping():
+    spec = Spectrum(
+        wavelength=np.array([500.0, 400.0, 500.0, 450.0, 400.0]),
+        intensity=np.array([10.0, 1.0, 30.0, 5.0, 5.0]),
+        meta={},
+    )
+    domain = {"min": 395.0, "max": 505.0}
+    coerced = pipeline.coerce_domain(spec, domain)
+
+    assert np.allclose(coerced.wavelength, np.array([400.0, 450.0, 500.0]))
+    assert np.allclose(coerced.intensity, np.array([3.0, 5.0, 20.0]))
+
+
+def test_coerce_domain_interpolates_from_merged_duplicates():
+    spec = Spectrum(
+        wavelength=np.array([450.0, 450.0, 475.0, 400.0, 400.0]),
+        intensity=np.array([2.0, 4.0, 6.0, 0.0, 1.0]),
+        meta={},
+    )
+    domain = {"min": 400.0, "max": 475.0, "step": 25.0}
+    coerced = pipeline.coerce_domain(spec, domain)
+
+    expected_axis = np.array([400.0, 425.0, 450.0, 475.0])
+    base_wl = np.array([400.0, 450.0, 475.0])
+    base_intensity = np.array([0.5, 3.0, 6.0])
+    expected_intensity = np.interp(expected_axis, base_wl, base_intensity)
+
+    assert np.allclose(coerced.wavelength, expected_axis)
+    assert np.allclose(coerced.intensity, expected_intensity)
+
+
 def test_subtract_blank_validates_overlap_and_subtracts():
     sample = Spectrum(
         wavelength=np.array([400.0, 450.0, 500.0]),
