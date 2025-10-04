@@ -2668,7 +2668,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not qc_rows:
             return []
 
-        figures: List[Tuple[str, Figure]] = []
+        figures: List[Tuple[Tuple[str, ...], Figure]] = []
         noise_values = np.array(
             [row.get("noise_rsd", float("nan")) for row in qc_rows],
             dtype=float,
@@ -2684,15 +2684,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         join_counts = np.array([row.get("join_count", 0) or 0 for row in qc_rows], dtype=float)
 
         scatter_fig = self._plot_noise_scatter(sample_labels, noise_values, join_counts, finite_mask)
-        figures.append((self._sanitise_figure_name("qc", "summary", "noise"), scatter_fig))
+        figures.append((("qc", "summary", "noise"), scatter_fig))
 
         hist_fig = self._plot_noise_histogram(noise_values[finite_mask])
         if hist_fig is not None:
-            figures.append((self._sanitise_figure_name("qc", "summary", "noise", "hist"), hist_fig))
+            figures.append((("qc", "summary", "noise", "hist"), hist_fig))
 
         timestamp_fig = self._plot_noise_trend(sample_labels, noise_values, qc_rows, finite_mask)
         if timestamp_fig is not None:
-            figures.append((self._sanitise_figure_name("qc", "summary", "noise", "trend"), timestamp_fig))
+            figures.append((("qc", "summary", "noise", "trend"), timestamp_fig))
 
         return figures
 
@@ -2821,7 +2821,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d\n%H:%M"))
         fig.autofmt_xdate()
         fig.tight_layout()
-        return [(("qc", "summary", "noise"), fig)]
+        return fig
 
     def _generate_figures(
         self,
