@@ -539,9 +539,8 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         skip_keys = {"file", "filename", "file_name", "data_file", "source_file", "path"}
         merged: Dict[str, object] = {}
-        for entry in matches:
-            normalized_entry: Dict[str, object] = {}
         for entry in ordered_entries:
+            normalized_entry: Dict[str, object] = {}
             for key, value in entry.items():
                 norm_key = self._normalize_manifest_key(key)
                 normalized_entry[norm_key] = value
