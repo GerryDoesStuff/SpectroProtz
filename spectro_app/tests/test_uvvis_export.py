@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -113,7 +114,10 @@ def test_uvvis_analyze_extracts_features():
 def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
-    recipe = {"export": {"path": str(tmp_path / "uvvis_batch.xlsx")}}
+    recipe = {
+        "export": {"path": str(tmp_path / "uvvis_batch.xlsx")},
+        "qc": {"quiet_window": {"min": 240.0, "max": 260.0}},
+    }
 
     processed, qc_rows = plugin.analyze([spec], recipe)
     result = plugin.export(processed, qc_rows, recipe)
@@ -166,7 +170,10 @@ def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
             )
         )
 
-    recipe = {"export": {"path": str(tmp_path / "uvvis_hist_trend.xlsx")}}
+    recipe = {
+        "export": {"path": str(tmp_path / "uvvis_hist_trend.xlsx")},
+        "qc": {"quiet_window": {"min": 240.0, "max": 260.0}},
+    }
     processed, qc_rows = plugin.analyze(spectra, recipe)
     result = plugin.export(processed, qc_rows, recipe)
 
@@ -530,11 +537,13 @@ def test_uvvis_calibration_success(tmp_path):
     unknown_entry = next(entry for entry in target["unknowns"] if entry["sample_id"] == "Sample-1")
     assert unknown_entry["status"] == "ok"
     assert unknown_entry["predicted_concentration"] == pytest.approx(7.5, rel=1e-4)
+    assert unknown_entry["predicted_concentration_std_err"] == pytest.approx(0.0, abs=1e-12)
 
     qc_unknown = next(row for row in qc_rows if row["sample_id"] == "Sample-1")
     qc_calibration = qc_unknown.get("calibration", {}).get("Analyte")
     assert qc_calibration
     assert qc_calibration["predicted_concentration"] == pytest.approx(7.5, rel=1e-4)
+    assert qc_calibration["predicted_concentration_std_err"] == pytest.approx(0.0, abs=1e-12)
 
     result = plugin.export(processed, qc_rows, recipe)
     workbook_path = Path(recipe["export"]["path"])
@@ -558,9 +567,13 @@ def test_uvvis_calibration_success(tmp_path):
 
     unknowns_header = next(row for row in rows if row and "Predicted Concentration" in row)
     assert unknowns_header[0] == "Sample ID"
+    assert "Predicted Concentration StdErr" in unknowns_header
+    pred_idx = unknowns_header.index("Predicted Concentration")
+    se_idx = unknowns_header.index("Predicted Concentration StdErr")
     sample_row = next(row for row in rows if row and row[0] == "Sample-1")
-    assert sample_row[3] == pytest.approx(7.5, rel=1e-4)
-    assert any("Calibration Analyte" in entry for entry in result.audit)
+    assert sample_row[pred_idx] == pytest.approx(7.5, rel=1e-4)
+    assert sample_row[se_idx] == pytest.approx(0.0, abs=1e-12)
+    assert any("Calibration Analyte" in entry and "conc_se=" in entry for entry in result.audit)
     assert any(name.startswith("calibration_Analyte") for name in result.figures)
 
 
@@ -621,9 +634,12 @@ def test_uvvis_calibration_weighted_regression(tmp_path):
     assert fit["weights"]["Std-2"] == pytest.approx(5.0)
     assert fit["slope"] == pytest.approx(expected_slope, rel=1e-6)
     assert fit["intercept"] == pytest.approx(expected_intercept, rel=1e-6)
+    conc_sigma = fit["concentration_std_per_response"]
+    assert math.isfinite(conc_sigma) and conc_sigma > 0
 
     unknown_entry = target["unknowns"][0]
     assert unknown_entry["predicted_concentration"] == pytest.approx(target_conc, rel=1e-6)
+    assert unknown_entry["predicted_concentration_std_err"] == pytest.approx(conc_sigma, rel=1e-6)
 
     std_entries = {entry["sample_id"]: entry for entry in target["standards"]}
     assert std_entries["Std-2"]["applied_weight"] == pytest.approx(5.0)
@@ -645,6 +661,77 @@ def test_uvvis_calibration_weighted_regression(tmp_path):
 
     assert any("weighting=weighted" in entry for entry in result.audit)
 
+
+def test_uvvis_calibration_uncertainty_propagates(tmp_path):
+    plugin = UvVisPlugin()
+    slope = 0.11
+    intercept = 0.04
+    standards = [
+        ("Std-0", 0.0, intercept + slope * 0.0 + 0.005),
+        ("Std-1", 5.0, intercept + slope * 5.0 - 0.008),
+        ("Std-2", 10.0, intercept + slope * 10.0 + 0.012),
+        ("Std-3", 15.0, intercept + slope * 15.0 - 0.01),
+    ]
+    unknown_sample = ("Sample-1", 7.5, intercept + slope * 7.5)
+
+    spectra = [
+        _calibration_spectrum(sample_id, response, role="standard")
+        for sample_id, _, response in standards
+    ]
+    spectra.append(_calibration_spectrum(unknown_sample[0], unknown_sample[2], role="sample"))
+
+    recipe = {
+        "calibration": {
+            "targets": [
+                {
+                    "name": "Analyte",
+                    "wavelength": 260.0,
+                    "standards": [
+                        {"sample_id": sample_id, "concentration": conc}
+                        for sample_id, conc, _ in standards
+                    ],
+                    "unknowns": [{"sample_id": unknown_sample[0]}],
+                }
+            ],
+        },
+        "export": {"path": str(tmp_path / "calibration_uncertainty.xlsx")},
+    }
+
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    calibration = plugin.last_calibration_results
+    assert calibration and calibration["status"] == "ok"
+    target = calibration["targets"][0]
+    fit = target["fit"]
+    conc_sigma = fit["concentration_std_per_response"]
+    assert math.isfinite(conc_sigma) and conc_sigma > 0
+
+    unknown_entry = target["unknowns"][0]
+    assert unknown_entry["predicted_concentration"] == pytest.approx(unknown_sample[1], rel=1e-3)
+    assert unknown_entry["predicted_concentration_std_err"] == pytest.approx(conc_sigma, rel=1e-6)
+
+    qc_unknown = next(row for row in qc_rows if row["sample_id"] == unknown_sample[0])
+    qc_calibration = qc_unknown["calibration"]["Analyte"]
+    assert qc_calibration["predicted_concentration_std_err"] == pytest.approx(conc_sigma, rel=1e-6)
+
+    processed_meta = next(spec.meta for spec in processed if spec.meta.get("sample_id") == unknown_sample[0])
+    meta_calibration = processed_meta["calibration"]["Analyte"]
+    assert meta_calibration["predicted_concentration_std_err"] == pytest.approx(conc_sigma, rel=1e-6)
+
+    workbook_path = Path(recipe["export"]["path"])
+    wb = load_workbook(workbook_path)
+    ws_calibration = wb["Calibration"]
+    rows = list(ws_calibration.iter_rows(values_only=True))
+    unknowns_header = next(row for row in rows if row and "Predicted Concentration" in row)
+    pred_idx = unknowns_header.index("Predicted Concentration")
+    se_idx = unknowns_header.index("Predicted Concentration StdErr")
+    sample_row = next(row for row in rows if row and row[0] == unknown_sample[0])
+    assert sample_row[pred_idx] == pytest.approx(unknown_entry["predicted_concentration"], rel=1e-6)
+    assert sample_row[se_idx] == pytest.approx(conc_sigma, rel=1e-6)
+
+    audit_text = "\n".join(result.audit)
+    assert "conc_se=" in audit_text
 
 def test_uvvis_calibration_insufficient_standards():
     plugin = UvVisPlugin()
