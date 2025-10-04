@@ -287,6 +287,7 @@ def apply_baseline(
     p: float = 0.01,
     niter: int = 10,
     iterations: int = 24,
+    anchor: Dict[str, object] | None = None,
 ) -> Spectrum:
     """Baseline correction entry point."""
 
@@ -302,14 +303,255 @@ def apply_baseline(
         raise ValueError(f"Unsupported baseline method: {method}")
 
     corrected = y - baseline
+    anchor_meta: Dict[str, object] | None = None
+    if anchor:
+        corrected, anchor_meta = _apply_baseline_anchor(
+            np.asarray(spec.wavelength, dtype=float), corrected, anchor
+        )
     meta = dict(spec.meta)
     meta.setdefault("baseline", method)
+    if anchor_meta is not None:
+        meta["baseline_anchor"] = anchor_meta
     _update_channel(meta, "baseline_corrected", corrected, overwrite=True)
     return Spectrum(
         wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
         intensity=np.asarray(corrected, dtype=float).copy(),
         meta=meta,
     )
+
+
+def _apply_baseline_anchor(
+    wavelength: np.ndarray,
+    intensity: np.ndarray,
+    anchor_cfg: Dict[str, object],
+) -> tuple[np.ndarray, Dict[str, object]]:
+    """Adjust ``intensity`` so that anchor windows hit their targets."""
+
+    enabled = True
+    if isinstance(anchor_cfg, dict):
+        enabled = bool(anchor_cfg.get("enabled", True))
+        windows_cfg = (
+            anchor_cfg.get("windows")
+            or anchor_cfg.get("ranges")
+            or anchor_cfg.get("anchors")
+        )
+    else:
+        windows_cfg = anchor_cfg
+
+    if not enabled:
+        return intensity, {
+            "enabled": False,
+            "applied": False,
+            "windows": [],
+            "config": anchor_cfg,
+        }
+
+    norm_windows = _normalise_anchor_windows(windows_cfg)
+    if not norm_windows:
+        return intensity, {
+            "enabled": True,
+            "applied": False,
+            "windows": [],
+            "config": anchor_cfg,
+        }
+
+    wl = np.asarray(wavelength, dtype=float)
+    corrected = np.asarray(intensity, dtype=float).copy()
+
+    anchor_records: List[Dict[str, object]] = []
+    centers: List[float] = []
+    offsets: List[float] = []
+
+    for window in norm_windows:
+        lo = window.get("lower_nm")
+        hi = window.get("upper_nm")
+        target = float(window.get("target", 0.0) or 0.0)
+
+        mask = np.ones_like(wl, dtype=bool)
+        if lo is not None:
+            mask &= wl >= lo
+        if hi is not None:
+            mask &= wl <= hi
+
+        if not np.any(mask):
+            record = {
+                "lower_nm": lo,
+                "upper_nm": hi,
+                "target_level": target,
+                "points": 0,
+                "window_mean": float("nan"),
+                "applied_offset": float("nan"),
+                "center_nm": float("nan"),
+            }
+            if window.get("label") is not None:
+                record["label"] = window["label"]
+            anchor_records.append(record)
+            continue
+
+        window_values = corrected[mask]
+        finite_mask = np.isfinite(window_values)
+        points = int(finite_mask.sum())
+        if points == 0:
+            record = {
+                "lower_nm": lo,
+                "upper_nm": hi,
+                "target_level": target,
+                "points": 0,
+                "window_mean": float("nan"),
+                "applied_offset": float("nan"),
+                "center_nm": float("nan"),
+            }
+            if window.get("label") is not None:
+                record["label"] = window["label"]
+            anchor_records.append(record)
+            continue
+
+        window_wl = wl[mask][finite_mask]
+        window_vals = window_values[finite_mask]
+        window_mean = float(np.nanmean(window_vals))
+        offset = float(window_mean - target)
+        center = float(np.nanmean(window_wl)) if window_wl.size else float("nan")
+
+        centers.append(center if np.isfinite(center) else float(np.nanmean(wl)))
+        offsets.append(offset)
+
+        record = {
+            "lower_nm": lo,
+            "upper_nm": hi,
+            "target_level": target,
+            "points": points,
+            "window_mean": window_mean,
+            "applied_offset": offset,
+            "center_nm": center,
+        }
+        if window.get("label") is not None:
+            record["label"] = window["label"]
+        anchor_records.append(record)
+
+    valid = [idx for idx, center in enumerate(centers) if np.isfinite(center)]
+    if not valid:
+        meta = {
+            "enabled": True,
+            "applied": False,
+            "windows": anchor_records,
+            "config": anchor_cfg,
+        }
+        return corrected, meta
+
+    centers_arr = np.asarray([centers[idx] for idx in valid], dtype=float)
+    offsets_arr = np.asarray([offsets[idx] for idx in valid], dtype=float)
+    order = np.argsort(centers_arr)
+    centers_sorted = centers_arr[order]
+    offsets_sorted = offsets_arr[order]
+
+    correction = np.interp(
+        wl,
+        centers_sorted,
+        offsets_sorted,
+        left=offsets_sorted[0],
+        right=offsets_sorted[-1],
+    )
+    corrected -= correction
+
+    for record in anchor_records:
+        lo = record["lower_nm"]
+        hi = record["upper_nm"]
+        target_level = record["target_level"]
+        mask = np.ones_like(wl, dtype=bool)
+        if lo is not None:
+            mask &= wl >= lo
+        if hi is not None:
+            mask &= wl <= hi
+        if np.any(mask):
+            corrected[mask] = target_level
+
+    meta = {
+        "enabled": True,
+        "applied": True,
+        "windows": anchor_records,
+        "config": anchor_cfg,
+        "correction_min": float(np.nanmin(correction)),
+        "correction_max": float(np.nanmax(correction)),
+        "correction_mean": float(np.nanmean(correction)),
+    }
+    return corrected, meta
+
+
+def _normalise_anchor_windows(windows_cfg: object) -> List[Dict[str, object]]:
+    """Normalise user-supplied window definitions."""
+
+    if windows_cfg is None:
+        return []
+
+    if isinstance(windows_cfg, dict):
+        windows_iterable = windows_cfg.get("windows")
+        if windows_iterable is None:
+            return []
+    else:
+        windows_iterable = windows_cfg
+
+    if not isinstance(windows_iterable, Sequence):
+        return []
+
+    normalised: List[Dict[str, object]] = []
+    for entry in windows_iterable:
+        if entry is None:
+            continue
+        if isinstance(entry, dict):
+            lo = (
+                entry.get("min_nm")
+                if entry.get("min_nm") is not None
+                else entry.get("lower_nm")
+            )
+            if lo is None:
+                lo = entry.get("min")
+            if lo is None:
+                lo = entry.get("lower")
+            lo_val = float(lo) if lo is not None else None
+
+            hi = (
+                entry.get("max_nm")
+                if entry.get("max_nm") is not None
+                else entry.get("upper_nm")
+            )
+            if hi is None:
+                hi = entry.get("max")
+            if hi is None:
+                hi = entry.get("upper")
+            hi_val = float(hi) if hi is not None else None
+
+            target = entry.get("target")
+            if target is None:
+                target = entry.get("level")
+            if target is None:
+                target = entry.get("value")
+            target_val = float(target) if target is not None else 0.0
+
+            label = entry.get("label")
+        elif isinstance(entry, Sequence):
+            data = list(entry)
+            if len(data) < 2:
+                continue
+            lo_val = float(data[0]) if data[0] is not None else None
+            hi_val = float(data[1]) if data[1] is not None else None
+            target_val = float(data[2]) if len(data) > 2 and data[2] is not None else 0.0
+            label = None
+        else:
+            continue
+
+        if lo_val is not None and hi_val is not None and lo_val > hi_val:
+            lo_val, hi_val = hi_val, lo_val
+
+        window_payload: Dict[str, object] = {
+            "lower_nm": lo_val,
+            "upper_nm": hi_val,
+            "target": target_val,
+        }
+        if label is not None:
+            window_payload["label"] = str(label)
+        normalised.append(window_payload)
+
+    return normalised
 
 
 def detect_joins(

@@ -914,6 +914,14 @@ class UvVisPlugin(SpectroscopyPlugin):
                     "niter": baseline_cfg.get("niter", 10),
                     "iterations": baseline_cfg.get("iterations", 24),
                 }
+                anchor_cfg = (
+                    baseline_cfg.get("anchor")
+                    or baseline_cfg.get("anchor_windows")
+                    or baseline_cfg.get("anchors")
+                )
+                if anchor_cfg is None:
+                    anchor_cfg = baseline_cfg.get("zeroing")
+                params["anchor"] = anchor_cfg
                 working = pipeline.apply_baseline(working, method, **params)
 
             if smoothing_cfg.get("enabled"):
@@ -948,6 +956,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                         p=baseline_cfg.get("p", 0.01),
                         niter=baseline_cfg.get("niter", 10),
                         iterations=baseline_cfg.get("iterations", 24),
+                        anchor=(
+                            baseline_cfg.get("anchor")
+                            or baseline_cfg.get("anchor_windows")
+                            or baseline_cfg.get("anchors")
+                            or baseline_cfg.get("zeroing")
+                        ),
                     )
                     for blank in blanks_working
                 ]
