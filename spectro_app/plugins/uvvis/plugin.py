@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set, Mapping
 
 import numpy as np
 import pandas as pd
@@ -2482,7 +2482,12 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not tokens:
             tokens.append("figure")
         base = "_".join(tokens)
-        return f"{base}.{ext}"
+        ext_str = str(ext or "").strip()
+        if ext_str.startswith("."):
+            ext_str = ext_str[1:]
+        if not ext_str:
+            return base
+        return f"{base}.{ext_str}"
 
     def _render_processed_figure(self, spec: Spectrum):
         wl = np.asarray(spec.wavelength, dtype=float)
@@ -2520,7 +2525,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         self,
         spec: Spectrum,
         qc_row: Dict[str, object] | None = None,
-    ) -> List[Tuple[str, Figure]]:
+    ) -> List[Tuple[Tuple[str, ...], Figure]]:
         join_indices: Tuple[int, ...] = tuple()
         if qc_row and isinstance(qc_row.get("join_indices"), (list, tuple)):
             join_indices = tuple(
@@ -2558,7 +2563,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not join_indices:
             return []
 
-        figures: List[Tuple[str, Figure]] = []
+        figures: List[Tuple[Tuple[str, ...], Figure]] = []
         sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
         n = wl.size
         for order, join_idx in enumerate(join_indices, start=1):
@@ -2584,13 +2589,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             ax.grid(True, alpha=0.2)
             ax.legend(loc="best")
             fig.tight_layout()
-            figures.append((self._sanitise_figure_name(sample_id, f"join_{order}"), fig))
+            figures.append(((sample_id, f"join_{order}"), fig))
         return figures
 
-    def _render_calibration_figures(self) -> List[Tuple[str, Figure]]:
+    def _render_calibration_figures(self) -> List[Tuple[Tuple[str, ...], Figure]]:
         calibration = getattr(self, "_last_calibration_results", None)
         targets = calibration.get("targets", []) if calibration else []
-        figures: List[Tuple[str, Figure]] = []
+        figures: List[Tuple[Tuple[str, ...], Figure]] = []
         for target in targets:
             standards = target.get("standards") or []
             if not standards:
@@ -2654,10 +2659,12 @@ class UvVisPlugin(SpectroscopyPlugin):
             ax_resid.grid(True, alpha=0.2)
 
             fig.tight_layout()
-            figures.append((self._sanitise_figure_name("calibration", str(target.get("name", "target"))), fig))
+            figures.append((("calibration", str(target.get("name", "target"))), fig))
         return figures
 
-    def _render_qc_summary_figures(self, qc_rows: Sequence[Dict[str, object]] | None) -> List[Tuple[str, Figure]]:
+    def _render_qc_summary_figures(
+        self, qc_rows: Sequence[Dict[str, object]] | None
+    ) -> List[Tuple[Tuple[str, ...], Figure]]:
         if not qc_rows:
             return []
 
@@ -2814,13 +2821,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d\n%H:%M"))
         fig.autofmt_xdate()
         fig.tight_layout()
-        return fig
+        return [(("qc", "summary", "noise"), fig)]
 
     def _generate_figures(
         self,
         specs: List[Spectrum],
         qc_rows: Sequence[Dict[str, object]] | None = None,
+        formats: object = None,
     ) -> Tuple[Dict[str, bytes], List[Tuple[str, Figure]]]:
+        figure_formats = self._normalise_figure_formats(formats)
         figures: Dict[str, bytes] = {}
         figure_objs: List[Tuple[str, Figure]] = []
         qc_lookup: Dict[int, Dict[str, object]] = {}
@@ -2829,41 +2838,67 @@ class UvVisPlugin(SpectroscopyPlugin):
                 if isinstance(qc_row, dict):
                     qc_lookup[id(spec)] = qc_row
 
+        def capture(parts: Sequence[str], fig: Figure) -> None:
+            base_name = self._sanitise_figure_name(*parts, ext=figure_formats[0])
+            for fmt in figure_formats:
+                filename = self._sanitise_figure_name(*parts, ext=fmt)
+                buf = io.BytesIO()
+                save_kwargs = {"format": fmt}
+                if fmt == "png":
+                    save_kwargs["dpi"] = 150
+                fig.savefig(buf, **save_kwargs)
+                buf.seek(0)
+                figures[filename] = buf.read()
+            figure_objs.append((base_name, fig))
+
         for spec in specs:
             rendered = self._render_processed_figure(spec)
             if not rendered:
                 continue
             sample_id, fig = rendered
-            filename = self._sanitise_figure_name(sample_id, "processed")
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=150)
-            buf.seek(0)
-            figures[filename] = buf.read()
-            figure_objs.append((filename, fig))
+            capture((sample_id, "processed"), fig)
 
             qc_row = qc_lookup.get(id(spec))
-            for name, join_fig in self._render_join_overlap_figures(spec, qc_row):
-                buf = io.BytesIO()
-                join_fig.savefig(buf, format="png", dpi=150)
-                buf.seek(0)
-                figures[name] = buf.read()
-                figure_objs.append((name, join_fig))
+            for name_parts, join_fig in self._render_join_overlap_figures(spec, qc_row):
+                capture(name_parts, join_fig)
 
-        for name, cal_fig in self._render_calibration_figures():
-            buf = io.BytesIO()
-            cal_fig.savefig(buf, format="png", dpi=150)
-            buf.seek(0)
-            figures[name] = buf.read()
-            figure_objs.append((name, cal_fig))
+        for name_parts, cal_fig in self._render_calibration_figures():
+            capture(name_parts, cal_fig)
 
-        for name, qc_fig in self._render_qc_summary_figures(qc_rows):
-            buf = io.BytesIO()
-            qc_fig.savefig(buf, format="png", dpi=150)
-            buf.seek(0)
-            figures[name] = buf.read()
-            figure_objs.append((name, qc_fig))
+        for name_parts, qc_fig in self._render_qc_summary_figures(qc_rows):
+            capture(name_parts, qc_fig)
 
         return figures, figure_objs
+
+    @staticmethod
+    def _normalise_figure_formats(formats: object = None) -> Tuple[str, ...]:
+        default = ("png",)
+        if formats is None:
+            return default
+        candidates: List[str]
+        if isinstance(formats, Mapping):
+            candidates = [str(key) for key, value in formats.items() if value]
+        elif isinstance(formats, (str, bytes)):
+            candidates = [formats]
+        else:
+            try:
+                candidates = list(formats)  # type: ignore[arg-type]
+            except TypeError:
+                candidates = [str(formats)]
+        normalised: List[str] = []
+        for raw in candidates:
+            if raw is None:
+                continue
+            token = str(raw).strip().lower()
+            if not token:
+                continue
+            if token.startswith("."):
+                token = token[1:]
+            if token not in {"png", "svg"}:
+                continue
+            if token not in normalised:
+                normalised.append(token)
+        return tuple(normalised) if normalised else default
 
     @staticmethod
     def _coerce_export_path(value, default: Optional[Path] = None) -> Optional[Path]:
@@ -2936,7 +2971,14 @@ class UvVisPlugin(SpectroscopyPlugin):
     def export(self, specs, qc, recipe):
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
         workbook_target = self._coerce_export_path(export_cfg.get("path") or export_cfg.get("workbook"))
-        figures, figure_objs = self._generate_figures(specs, qc)
+        processed_layout = export_cfg.get("processed_layout", "tidy")
+        if isinstance(processed_layout, str):
+            processed_layout = processed_layout.lower()
+        else:
+            processed_layout = "tidy"
+        if processed_layout not in {"tidy", "wide"}:
+            processed_layout = "tidy"
+        figures, figure_objs = self._generate_figures(specs, qc, formats=export_cfg.get("formats"))
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
         calibration_results = getattr(self, "_last_calibration_results", None)
@@ -2964,6 +3006,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     workbook_audit,
                     figures,
                     calibration_results,
+                    processed_layout=processed_layout,
                 )
             else:
                 workbook_audit.append("No workbook path provided; workbook not written.")

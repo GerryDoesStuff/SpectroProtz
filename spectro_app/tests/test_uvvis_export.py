@@ -9,6 +9,7 @@ import numpy as np
 from importlib import metadata
 from openpyxl import load_workbook
 
+from spectro_app.engine import excel_writer
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
 from spectro_app.plugins.uvvis import pipeline
@@ -139,6 +140,51 @@ def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
     assert "qc_summary_noise.png" in result.figures
     assert "qc_summary_noise_hist.png" in result.figures
     assert "qc_summary_noise_trend.png" in result.figures
+def test_uvvis_export_supports_wide_processed_layout(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_wide.xlsx"),
+            "processed_layout": "wide",
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    plugin.export(processed, qc_rows, recipe)
+
+    workbook_path = Path(recipe["export"]["path"])
+    assert workbook_path.exists(), "Wide workbook should be written"
+
+    wb = load_workbook(workbook_path)
+    ws_processed = wb["Processed_Spectra"]
+
+    header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
+    base_columns = ["spectrum_index", "sample_id", "role", "mode"]
+    assert header[: len(base_columns)] == base_columns
+
+    data_rows = list(ws_processed.iter_rows(min_row=2, values_only=True))
+    assert len(data_rows) == len(processed)
+
+    header_dynamic = set(header[len(base_columns) :])
+    expected_columns = set()
+    for spec in processed:
+        wavelengths = np.asarray(spec.wavelength, dtype=float)
+        for channel_label, _ in excel_writer._iter_channels(spec, wavelengths):
+            for wl_val in wavelengths:
+                expected_columns.add(excel_writer._format_channel_column(channel_label, float(wl_val)))
+
+    assert expected_columns == header_dynamic
+
+    column_index = {name: idx for idx, name in enumerate(header)}
+    for row, spec in zip(data_rows, processed):
+        wavelengths = np.asarray(spec.wavelength, dtype=float)
+        for channel_label, data in excel_writer._iter_channels(spec, wavelengths):
+            for wl_val, inten_val in zip(wavelengths, data):
+                col_name = excel_writer._format_channel_column(channel_label, float(wl_val))
+                cell_value = row[column_index[col_name]]
+                assert cell_value is not None
+                assert cell_value == pytest.approx(float(inten_val))
 
 
 def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
@@ -207,6 +253,29 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
     assert data_row[smoothed_idx] is not None
     assert data_row[raw_idx] > data_row[smoothed_idx]
     assert data_row[raw_delta_idx] > 0.0
+
+
+def test_uvvis_export_emits_svg_when_requested(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_svg.xlsx"),
+            "formats": ["png", "svg"],
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    expected_base = Path("Sample-1_processed")
+    png_name = expected_base.with_suffix(".png").name
+    svg_name = expected_base.with_suffix(".svg").name
+    assert png_name in result.figures
+    assert svg_name in result.figures
+    svg_stems = {Path(name).stem for name in result.figures if name.endswith(".svg")}
+    png_stems = {Path(name).stem for name in result.figures if name.endswith(".png")}
+    assert svg_stems <= png_stems
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
