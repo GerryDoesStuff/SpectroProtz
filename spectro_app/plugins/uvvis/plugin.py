@@ -2194,6 +2194,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             spikes = metrics["spikes"]
             smoothing = metrics["smoothing"]
             drift = metrics["drift"]
+            negative = metrics["negative_intensity"]
             wl = np.asarray(spec.wavelength, dtype=float)
             intensity = np.asarray(spec.intensity, dtype=float)
             derivatives = self._compute_derivatives(wl, intensity, derivative_enabled)
@@ -2227,6 +2228,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "noise_rsd": noise.rsd,
                 "noise_window": noise.window,
                 "noise_points": noise.used_points,
+                "negative_intensity_flag": negative.flag,
+                "negative_intensity_fraction": negative.processed_fraction,
+                "negative_intensity_count": negative.processed_count,
+                "negative_intensity_total": negative.processed_total,
+                "negative_intensity_channels": negative.channels,
+                "negative_intensity_tolerance": negative.tolerance,
                 "join_count": join.count,
                 "join_max_offset": join.max_offset,
                 "join_mean_offset": join.mean_offset,
