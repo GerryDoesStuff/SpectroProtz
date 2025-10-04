@@ -12,8 +12,9 @@ from __future__ import annotations
 import copy
 import io
 import math
+import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
@@ -23,6 +24,8 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.figure import Figure
 from scipy.signal import find_peaks, peak_widths
 
 from spectro_app.engine.io_common import sniff_locale
@@ -2272,45 +2275,121 @@ class UvVisPlugin(SpectroscopyPlugin):
             entries.append("Calibration: not performed.")
         return entries
 
-    def _generate_figures(self, specs: List[Spectrum]) -> Dict[str, bytes]:
-        figures: Dict[str, bytes] = {}
-        for spec in specs:
-            wl = np.asarray(spec.wavelength, dtype=float)
-            intensity = np.asarray(spec.intensity, dtype=float)
-            if wl.size == 0 or intensity.size == 0:
+    def _render_processed_figure(self, spec: Spectrum):
+        wl = np.asarray(spec.wavelength, dtype=float)
+        intensity = np.asarray(spec.intensity, dtype=float)
+        if wl.size == 0 or intensity.size == 0:
+            return None
+        channels = spec.meta.get("channels") or {}
+        sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(wl, intensity, label="Processed", linewidth=1.5)
+        for name, channel in channels.items():
+            channel_arr = np.asarray(channel, dtype=float)
+            if channel_arr.shape != wl.shape:
                 continue
-            channels = spec.meta.get("channels") or {}
-            sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(wl, intensity, label="Processed", linewidth=1.5)
-            for name, channel in channels.items():
-                channel_arr = np.asarray(channel, dtype=float)
-                if channel_arr.shape != wl.shape:
-                    continue
-                ax.plot(wl, channel_arr, label=name.replace("_", " "))
-            features = spec.meta.get("features", {})
-            for peak in features.get("peaks", [])[:5]:
-                wavelength = peak.get("wavelength")
-                if wavelength is None or not np.isfinite(wavelength):
-                    continue
-                ax.axvline(wavelength, color="tab:orange", linestyle="--", alpha=0.3)
-            ax.set_xlabel(self.xlabel)
-            ax.set_ylabel("Intensity")
-            ax.set_title(f"Spectrum {sample_id}")
-            ax.legend(loc="best")
-            ax.grid(True, alpha=0.2)
+            ax.plot(wl, channel_arr, label=name.replace("_", " "))
+        features = spec.meta.get("features", {})
+        for peak in features.get("peaks", [])[:5]:
+            wavelength = peak.get("wavelength")
+            if wavelength is None or not np.isfinite(wavelength):
+                continue
+            ax.axvline(wavelength, color="tab:orange", linestyle="--", alpha=0.3)
+        ax.set_xlabel(self.xlabel)
+        ax.set_ylabel("Intensity")
+        ax.set_title(f"Spectrum {sample_id}")
+        ax.legend(loc="best")
+        ax.grid(True, alpha=0.2)
+        fig.tight_layout()
+        return sample_id, fig
+
+    def _generate_figures(self, specs: List[Spectrum]) -> Tuple[Dict[str, bytes], List[Tuple[str, Figure]]]:
+        figures: Dict[str, bytes] = {}
+        figure_objs: List[Tuple[str, Figure]] = []
+        for spec in specs:
+            rendered = self._render_processed_figure(spec)
+            if not rendered:
+                continue
+            sample_id, fig = rendered
             buf = io.BytesIO()
-            fig.tight_layout()
             fig.savefig(buf, format="png", dpi=150)
-            plt.close(fig)
             buf.seek(0)
             figures[f"{sample_id}_processed.png"] = buf.read()
-        return figures
+            figure_objs.append((sample_id, fig))
+        return figures, figure_objs
+
+    @staticmethod
+    def _coerce_export_path(value, default: Optional[Path] = None) -> Optional[Path]:
+        if value in (None, False):
+            return None
+        if isinstance(value, dict):
+            value = value.get("path") or value.get("file")
+        if isinstance(value, (str, Path)):
+            return Path(value)
+        if value is True and default is not None:
+            return default
+        return None
+
+    @staticmethod
+    def _json_sanitise(value):
+        if isinstance(value, dict):
+            return {str(k): UvVisPlugin._json_sanitise(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [UvVisPlugin._json_sanitise(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (np.floating, np.integer)):
+            return value.item()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()  # type: ignore[return-value]
+            except Exception:  # pragma: no cover - best effort serialisation
+                return str(value)
+        return value
+
+    def _write_recipe_sidecar(self, recipe_path: Path, recipe: Dict[str, object]) -> None:
+        recipe_path.parent.mkdir(parents=True, exist_ok=True)
+        serialisable = self._json_sanitise(recipe or {})
+        with recipe_path.open("w", encoding="utf-8") as handle:
+            json.dump(serialisable, handle, indent=2, sort_keys=True)
+
+    def _write_pdf_report(
+        self,
+        pdf_path: Path,
+        figures: List[Tuple[str, Figure]],
+        audit_entries: List[str],
+        specs: List[Spectrum],
+        qc: List[Dict[str, object]],
+    ) -> None:
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        with PdfPages(pdf_path) as pdf:
+            summary_fig, ax = plt.subplots(figsize=(8.5, 11))
+            ax.axis("off")
+            title = "UV-Vis Export Report"
+            ax.text(0.5, 0.95, title, ha="center", va="center", fontsize=16, fontweight="bold")
+            timestamp = datetime.now(UTC).isoformat()
+            ax.text(0.02, 0.9, f"Generated: {timestamp}", fontsize=10, va="top")
+            ax.text(0.02, 0.85, f"Spectra processed: {len(specs)}", fontsize=10, va="top")
+            ax.text(0.02, 0.82, f"QC rows: {len(qc)}", fontsize=10, va="top")
+            ax.text(0.02, 0.78, "Audit log:", fontsize=12, fontweight="bold", va="top")
+            if audit_entries:
+                text = "\n".join(audit_entries)
+            else:
+                text = "No audit entries available."
+            ax.text(0.02, 0.76, text, fontsize=9, va="top", wrap=True)
+            pdf.savefig(summary_fig)
+            plt.close(summary_fig)
+            for _, figure in figures:
+                pdf.savefig(figure)
 
     def export(self, specs, qc, recipe):
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
-        output_path = export_cfg.get("path") or export_cfg.get("workbook")
-        figures = self._generate_figures(specs)
+        workbook_target = self._coerce_export_path(export_cfg.get("path") or export_cfg.get("workbook"))
+        figures, figure_objs = self._generate_figures(specs)
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
         calibration_results = getattr(self, "_last_calibration_results", None)
@@ -2329,3 +2408,39 @@ class UvVisPlugin(SpectroscopyPlugin):
         else:
             audit_entries.append("No workbook path provided; workbook not written.")
         return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=audit_entries)
+        workbook_default = workbook_target if workbook_target else None
+        recipe_target = self._coerce_export_path(
+            export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar") or export_cfg.get("recipe"),
+            workbook_default.with_suffix(".recipe.json") if workbook_default else None,
+        )
+        pdf_target = self._coerce_export_path(
+            export_cfg.get("pdf_path")
+            or export_cfg.get("pdf_report")
+            or export_cfg.get("pdf")
+            or export_cfg.get("report"),
+            workbook_default.with_suffix(".pdf") if workbook_default else None,
+        )
+
+        try:
+            if workbook_target:
+                resolved_path = str(workbook_target)
+                workbook_audit.append(f"Workbook written to {resolved_path}")
+                write_workbook(resolved_path, specs, qc, workbook_audit, figures)
+            else:
+                workbook_audit.append("No workbook path provided; workbook not written.")
+
+            if recipe_target and recipe:
+                self._write_recipe_sidecar(recipe_target, recipe)
+                workbook_audit.append(f"Recipe sidecar written to {recipe_target}")
+            elif export_cfg.get("recipe") or export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar"):
+                workbook_audit.append("Recipe sidecar requested but no path resolved.")
+
+            if pdf_target:
+                audit_for_pdf = list(workbook_audit)
+                self._write_pdf_report(pdf_target, figure_objs, audit_for_pdf, specs, qc)
+                workbook_audit.append(f"PDF report written to {pdf_target}")
+        finally:
+            for _, fig in figure_objs:
+                plt.close(fig)
+
+        return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=workbook_audit)

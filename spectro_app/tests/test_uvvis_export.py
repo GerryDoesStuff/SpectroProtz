@@ -1,7 +1,9 @@
-import numpy as np
+import json
 from pathlib import Path
 
 import pytest
+import numpy as np
+
 from openpyxl import load_workbook
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -235,3 +237,49 @@ def test_uvvis_calibration_poor_regression():
     qc_unknown = next(row for row in qc_rows if row["sample_id"] == unknown[0])
     calibration_meta = qc_unknown.get("calibration", {}).get("Analyte")
     assert calibration_meta["status"] == "no_model"
+def test_uvvis_export_writes_sidecar_and_pdf(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    workbook = tmp_path / "uvvis_batch.xlsx"
+    recipe_path = tmp_path / "uvvis_batch.recipe.json"
+    pdf_path = tmp_path / "uvvis_batch.pdf"
+    recipe = {
+        "export": {
+            "path": str(workbook),
+            "recipe_path": str(recipe_path),
+            "pdf_path": str(pdf_path),
+        },
+        "features": {"integrals": [{"name": "Area", "min": 250.0, "max": 270.0}]},
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    assert workbook.exists(), "Workbook should be generated"
+    assert recipe_path.exists(), "Recipe sidecar should be generated"
+    assert pdf_path.exists(), "PDF report should be generated"
+    assert pdf_path.stat().st_size > 0
+
+    exported_recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    assert "features" in exported_recipe
+    assert any("Recipe sidecar written" in entry for entry in result.audit)
+    assert any("PDF report written" in entry for entry in result.audit)
+
+
+def test_clean_value_sanitises_formula_strings(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    spec.meta["sample_id"] = "=2+2"
+    recipe = {"export": {"path": str(tmp_path / "uvvis_batch.xlsx")}}
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    plugin.export(processed, qc_rows, recipe)
+
+    wb = load_workbook(recipe["export"]["path"])
+    ws_processed = wb["Processed_Spectra"]
+    header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
+    sample_idx = header.index("sample_id") + 1
+    sample_cell = ws_processed.cell(row=2, column=sample_idx)
+    assert sample_cell.value.startswith("'")
+    assert sample_cell.value[1:] == "=2+2"
+    assert sample_cell.data_type == "s"  # Written as literal string rather than formula
