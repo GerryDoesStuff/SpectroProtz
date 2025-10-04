@@ -931,25 +931,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_from_ui()
         self.appctx.set_dirty(True)
 
+    def _sync_recipe_state(self) -> None:
+        recipe_obj = self.recipeDock.get_recipe()
+        if not isinstance(recipe_obj, Recipe):
+            recipe_obj = Recipe()
+
+        module = (recipe_obj.module or "uvvis").strip().lower()
+        params_source = (
+            recipe_obj.params if isinstance(recipe_obj.params, dict) else {}
+        )
+        params = copy.deepcopy(params_source)
+
+        export_cfg = self._recipe_data.get("export")
+        if not isinstance(export_cfg, dict):
+            export_cfg = {}
+        export_cfg = copy.deepcopy(export_cfg)
+
+        version = str(recipe_obj.version or Recipe().version)
+
+        combined = {
+            "module": module,
+            "params": params,
+            "export": export_cfg,
+            "version": version,
+        }
+        self._recipe_data = self._normalise_recipe_data(combined)
+        self._active_plugin_id = module
+
     def _update_recipe_from_ui(self):
-        params = dict(self._recipe_data.get("params") or {})
-        smoothing = dict(params.get("smoothing") or {})
-        smoothing["enabled"] = self.recipeDock.smooth_enable.isChecked()
-        smoothing["window"] = int(self.recipeDock.smooth_window.value())
-        params["smoothing"] = smoothing
-        self._recipe_data["params"] = params
-        module = (self.recipeDock.module.currentText() or "uvvis").strip().lower()
-        if module:
-            self._recipe_data["module"] = module
-        if "version" not in self._recipe_data:
-            self._recipe_data["version"] = Recipe().version
+        self._sync_recipe_state()
 
     def _build_recipe_payload(self) -> Dict[str, Any]:
+        self._sync_recipe_state()
         payload = copy.deepcopy(self._recipe_data)
         payload.setdefault("module", "uvvis")
         payload.setdefault("params", {})
         payload.setdefault("export", {})
         payload.setdefault("version", Recipe().version)
+        self._recipe_data = copy.deepcopy(payload)
         return payload
 
     def _select_module(self, module_id: str):
@@ -1069,27 +1088,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._recipe_data = self._normalise_recipe_data(data)
         self._current_recipe_path = path
-        module_id = self._recipe_data.get("module", "uvvis")
-        smoothing = (self._recipe_data.get("params") or {}).get("smoothing", {})
+
+        recipe_model = Recipe(
+            module=self._recipe_data.get("module", "uvvis"),
+            params=copy.deepcopy(self._recipe_data.get("params", {})),
+            version=str(self._recipe_data.get("version", Recipe().version)),
+        )
 
         self._updating_ui = True
         try:
-            self._select_module(module_id)
-            self.recipeDock.smooth_enable.setChecked(
-                bool(smoothing.get("enabled", False))
-            )
-            window = smoothing.get(
-                "window", self.recipeDock.smooth_window.value()
-            )
-            try:
-                window_value = int(window)
-            except (TypeError, ValueError):
-                window_value = self.recipeDock.smooth_window.value()
-            self.recipeDock.smooth_window.setValue(window_value)
+            self.recipeDock.set_recipe(recipe_model)
         finally:
             self._updating_ui = False
 
-        self._update_recipe_from_ui()
+        self._sync_recipe_state()
+        self._refresh_queue_metadata()
         self.appctx.set_dirty(False)
         self.status.showMessage(f"Loaded recipe from {path}", 5000)
         self._update_action_states()
