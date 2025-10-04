@@ -9,6 +9,8 @@ import numpy as np
 from importlib import metadata
 from openpyxl import load_workbook
 
+from scipy.signal import savgol_filter
+
 from spectro_app.engine import excel_writer
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
@@ -70,6 +72,37 @@ def test_uvvis_analyze_extracts_features():
     channels = enriched.meta.get("channels", {})
     assert "first_derivative" in channels
     assert channels["first_derivative"].shape == enriched.wavelength.shape
+
+    wl = enriched.wavelength
+    diffs = np.diff(wl)
+    finite_diffs = diffs[np.isfinite(diffs)]
+    if finite_diffs.size:
+        delta = float(np.nanmedian(finite_diffs))
+        if not np.isfinite(delta) or delta == 0:
+            delta = float(np.nanmedian(np.abs(finite_diffs)))
+    else:
+        delta = 1.0
+    if not np.isfinite(delta) or delta == 0:
+        delta = 1.0
+    delta = abs(delta)
+    expected_first = savgol_filter(
+        enriched.intensity,
+        window_length=5,
+        polyorder=2,
+        deriv=1,
+        delta=delta,
+        mode="interp",
+    )
+    expected_second = savgol_filter(
+        enriched.intensity,
+        window_length=5,
+        polyorder=2,
+        deriv=2,
+        delta=delta,
+        mode="interp",
+    )
+    np.testing.assert_allclose(channels["first_derivative"], expected_first)
+    np.testing.assert_allclose(channels["second_derivative"], expected_second)
 
     assert len(qc_rows) == 1
     qc_entry = qc_rows[0]
@@ -169,6 +202,57 @@ def test_uvvis_generate_figures_trend_uses_sanitised_name():
 
     trend_obj_names = [name for name, _ in figure_objs if "noise_trend" in name]
     assert trend_obj_names == ["qc_summary_noise_trend.png"]
+
+
+def test_uvvis_derivative_respects_recipe_window():
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    recipe = {
+        "smoothing": {"enabled": True, "window": 11, "polyorder": 3},
+        "features": {"derivatives": {"enabled": True, "window": 7, "polyorder": 3}},
+    }
+
+    processed, _ = plugin.analyze([spec], recipe)
+
+    enriched = processed[0]
+    channels = enriched.meta.get("channels", {})
+    assert "first_derivative" in channels
+    assert "second_derivative" in channels
+
+    wl = enriched.wavelength
+    diffs = np.diff(wl)
+    finite_diffs = diffs[np.isfinite(diffs)]
+    if finite_diffs.size:
+        delta = float(np.nanmedian(finite_diffs))
+        if not np.isfinite(delta) or delta == 0:
+            delta = float(np.nanmedian(np.abs(finite_diffs)))
+    else:
+        delta = 1.0
+    if not np.isfinite(delta) or delta == 0:
+        delta = 1.0
+    delta = abs(delta)
+
+    expected_first = savgol_filter(
+        enriched.intensity,
+        window_length=7,
+        polyorder=3,
+        deriv=1,
+        delta=delta,
+        mode="interp",
+    )
+    expected_second = savgol_filter(
+        enriched.intensity,
+        window_length=7,
+        polyorder=3,
+        deriv=2,
+        delta=delta,
+        mode="interp",
+    )
+
+    np.testing.assert_allclose(channels["first_derivative"], expected_first)
+    np.testing.assert_allclose(channels["second_derivative"], expected_second)
+
+
 def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
