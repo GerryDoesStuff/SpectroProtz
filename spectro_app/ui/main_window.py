@@ -119,7 +119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.setValue(0)
 
     def _collect_actions(self):
-        actions = {action.text(): action for action in self.findChildren(QtWidgets.QAction)}
+        actions = {action.text(): action for action in self.findChildren(QtGui.QAction)}
         self._open_action = actions.get("Open...")
         self._save_recipe_action = actions.get("Save Recipe")
         self._save_recipe_as_action = actions.get("Save Recipe As...")
@@ -465,11 +465,79 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"Opened log folder: {log_dir}", 5000)
 
     def closeEvent(self, e):
-        if not self.appctx.maybe_close():
-            e.ignore()
-            return
+        if self.appctx.is_job_running():
+            job_action = self._prompt_job_running_action()
+            if job_action == "cancel":
+                self.on_cancel()
+                e.ignore()
+                return
+            if job_action != "force":
+                e.ignore()
+                return
+            if self.runctl.cancel():
+                self.status.showMessage("Force stopping job...", 5000)
+            self._job_running = False
+            self.appctx.set_job_running(False)
+
+        if self.appctx.is_dirty():
+            dirty_action = self._prompt_unsaved_changes()
+            if dirty_action == "cancel":
+                e.ignore()
+                return
+            if dirty_action == "save":
+                self.on_save_recipe()
+                if self.appctx.is_dirty():
+                    e.ignore()
+                    return
+            elif dirty_action == "discard":
+                self.appctx.set_dirty(False)
+
         self.save_state()
         super().closeEvent(e)
+
+    def _prompt_job_running_action(self) -> str:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setWindowTitle("Job Running")
+        box.setText(
+            "A processing job is currently running. Choose an option to continue."
+        )
+        cancel_job = box.addButton(
+            "Cancel Job", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        )
+        force_stop = box.addButton(
+            "Force Stop", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        stay_open = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(stay_open)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == cancel_job:
+            return "cancel"
+        if clicked == force_stop:
+            return "force"
+        return "abort"
+
+    def _prompt_unsaved_changes(self) -> str:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved Changes")
+        box.setText(
+            "You have unsaved recipe changes. Do you want to save before exiting?"
+        )
+        save_btn = box.addButton("Save", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton(
+            "Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(save_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save_btn:
+            return "save"
+        if clicked == discard_btn:
+            return "discard"
+        return "cancel"
 
     def save_state(self):
         s = self.appctx.settings
