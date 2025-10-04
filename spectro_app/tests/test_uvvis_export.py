@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
+from spectro_app.plugins.uvvis import pipeline
 
 
 def _mock_spectrum():
@@ -109,6 +110,44 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert any("Workbook written" in entry for entry in result.audit)
 
 
+def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
+    plugin = UvVisPlugin()
+    wl = np.linspace(400.0, 460.0, 7)
+    raw_intensity = np.array([1.0, 1.2, 1.1, 3.5, 3.6, 3.7, 3.8])
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=raw_intensity,
+        meta={"sample_id": "StageSample", "role": "sample"},
+    )
+    blank = Spectrum(
+        wavelength=wl,
+        intensity=np.full_like(wl, 0.2, dtype=float),
+        meta={"role": "blank"},
+    )
+
+    coerced = pipeline.coerce_domain(sample, {"min": 400.0, "max": 460.0, "num": 7})
+    joined = pipeline.correct_joins(coerced, [3], window=1)
+    despiked = pipeline.despike_spectrum(joined, zscore=2.0, window=3)
+    blanked = pipeline.subtract_blank(despiked, blank)
+    baseline = pipeline.apply_baseline(blanked, "asls", lam=1e2, p=0.01, niter=10)
+    smoothed = pipeline.smooth_spectrum(baseline, window=5, polyorder=2)
+
+    recipe = {"export": {"path": str(tmp_path / "stage_channels.xlsx")}}
+    plugin.export([smoothed], [{}], recipe)
+
+    workbook_path = Path(recipe["export"]["path"])
+    assert workbook_path.exists()
+    wb = load_workbook(workbook_path)
+    ws_processed = wb["Processed_Spectra"]
+    header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
+    channel_idx = header.index("channel")
+    channels = {
+        row[channel_idx]
+        for row in ws_processed.iter_rows(min_row=2, values_only=True)
+        if row and row[1] == "StageSample"
+    }
+    expected = {"raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"}
+    assert expected.issubset(channels)
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()

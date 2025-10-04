@@ -2404,7 +2404,11 @@ class UvVisPlugin(SpectroscopyPlugin):
         sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(wl, intensity, label="Processed", linewidth=1.5)
-        for name, channel in channels.items():
+        stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
+        ordered_names = [name for name in stage_order if name in channels]
+        ordered_names.extend(name for name in channels.keys() if name not in ordered_names)
+        for name in ordered_names:
+            channel = channels[name]
             channel_arr = np.asarray(channel, dtype=float)
             if channel_arr.shape != wl.shape:
                 continue

@@ -43,6 +43,16 @@ def _nan_safe(values: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _update_channel(meta: Dict[str, object], name: str, values: np.ndarray, *, overwrite: bool = True) -> None:
+    """Store a processing channel in ``meta`` preserving existing ones."""
+
+    channels = dict(meta.get("channels") or {})
+    if not overwrite and name in channels:
+        return
+    channels[name] = np.asarray(values, dtype=float).copy()
+    meta["channels"] = channels
+
+
 def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     """Ensure wavelength axis is sorted, clipped, and optionally interpolated."""
 
@@ -117,8 +127,8 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     meta = dict(spec.meta)
     if resampled:
         channels = dict(meta.get("channels") or {})
-        channels["original_wavelength"] = preserved_wl
-        channels["original_intensity"] = preserved_inten
+        channels["original_wavelength"] = np.asarray(preserved_wl, dtype=float).copy()
+        channels["original_intensity"] = np.asarray(preserved_inten, dtype=float).copy()
         meta["channels"] = channels
     if domain:
         domain_meta = {
@@ -133,7 +143,12 @@ def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
             domain_meta["requested_max_nm"] = requested_max
         meta["wavelength_domain_nm"] = domain_meta
 
-    return Spectrum(wavelength=output_wl, intensity=output_inten, meta=meta)
+    _update_channel(meta, "raw", output_inten, overwrite=True)
+    return Spectrum(
+        wavelength=np.asarray(output_wl, dtype=float).copy(),
+        intensity=np.asarray(output_inten, dtype=float).copy(),
+        meta=meta,
+    )
 
 
 def subtract_blank(
@@ -195,7 +210,12 @@ def subtract_blank(
         merged_audit = audit_payload
 
     meta["blank_audit"] = merged_audit
-    return Spectrum(wavelength=sample.wavelength.copy(), intensity=corrected, meta=meta)
+    _update_channel(meta, "blanked", corrected, overwrite=True)
+    return Spectrum(
+        wavelength=np.asarray(sample.wavelength, dtype=float).copy(),
+        intensity=np.asarray(corrected, dtype=float).copy(),
+        meta=meta,
+    )
 
 
 def _baseline_asls(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
@@ -284,7 +304,12 @@ def apply_baseline(
     corrected = y - baseline
     meta = dict(spec.meta)
     meta.setdefault("baseline", method)
-    return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
+    _update_channel(meta, "baseline_corrected", corrected, overwrite=True)
+    return Spectrum(
+        wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
+        intensity=np.asarray(corrected, dtype=float).copy(),
+        meta=meta,
+    )
 
 
 def detect_joins(
@@ -348,7 +373,12 @@ def correct_joins(spec: Spectrum, join_indices: Iterable[int], *, window: int = 
     meta = dict(spec.meta)
     if join_indices:
         meta.setdefault("join_corrected", True)
-    return Spectrum(wavelength=spec.wavelength.copy(), intensity=y, meta=meta)
+    _update_channel(meta, "joined", y, overwrite=True)
+    return Spectrum(
+        wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
+        intensity=np.asarray(y, dtype=float).copy(),
+        meta=meta,
+    )
 
 
 def despike_spectrum(
@@ -366,8 +396,20 @@ def despike_spectrum(
     """
 
     y = np.asarray(spec.intensity, dtype=float)
+
+    def _final_spectrum(values: np.ndarray, *, mask: np.ndarray | None = None) -> Spectrum:
+        meta = dict(spec.meta)
+        if mask is not None and np.any(mask):
+            meta.setdefault("despiked", True)
+        _update_channel(meta, "despiked", values, overwrite=True)
+        return Spectrum(
+            wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
+            intensity=np.asarray(values, dtype=float).copy(),
+            meta=meta,
+        )
+
     if y.size < 3:
-        return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+        return _final_spectrum(y.copy())
 
     base_window = int(window)
     if base_window <= 1:
@@ -375,7 +417,7 @@ def despike_spectrum(
     if base_window % 2 == 0:
         base_window += 1
     if base_window < 3:
-        return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+        return _final_spectrum(y.copy())
 
     n = y.size
 
@@ -396,13 +438,13 @@ def despike_spectrum(
     if not joins:
         window_size = _effective_window(n)
         if window_size is None:
-            return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+            return _final_spectrum(y.copy())
 
         baseline = medfilt(y, kernel_size=window_size)
         residual = y - baseline
         mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
         if not np.isfinite(mad) or mad == 0:
-            return Spectrum(wavelength=spec.wavelength.copy(), intensity=y.copy(), meta=dict(spec.meta))
+            return _final_spectrum(y.copy())
 
         threshold = float(zscore) * 1.4826 * mad
         mask = np.abs(residual) > threshold
@@ -414,10 +456,7 @@ def despike_spectrum(
                 corrected[mask] = np.interp(indices[mask], good, corrected[~mask])
             else:
                 corrected[mask] = baseline[mask]
-        meta = dict(spec.meta)
-        if np.any(mask):
-            meta.setdefault("despiked", True)
-        return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
+        return _final_spectrum(corrected, mask=mask)
 
     boundaries = [0, *joins, n]
     corrected = y.copy()
@@ -453,10 +492,7 @@ def despike_spectrum(
             target[mask] = baseline[mask]
         overall_mask[start:stop] = mask
 
-    meta = dict(spec.meta)
-    if np.any(overall_mask):
-        meta.setdefault("despiked", True)
-    return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
+    return _final_spectrum(corrected, mask=overall_mask)
 
 
 def smooth_spectrum(
@@ -525,7 +561,12 @@ def smooth_spectrum(
     meta.setdefault("smoothed", True)
     if segmented:
         meta.setdefault("smoothed_segmented", True)
-    return Spectrum(wavelength=spec.wavelength.copy(), intensity=smoothed, meta=meta)
+    _update_channel(meta, "smoothed", smoothed, overwrite=True)
+    return Spectrum(
+        wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
+        intensity=np.asarray(smoothed, dtype=float).copy(),
+        meta=meta,
+    )
 
 
 def replicate_key(spec: Spectrum) -> Tuple[str, str]:

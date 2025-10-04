@@ -35,6 +35,7 @@ def test_coerce_domain_interpolates_and_sorts():
     assert channels is not None
     assert np.allclose(channels["original_wavelength"], sorted_wl)
     assert np.allclose(channels["original_intensity"], sorted_intensity)
+    assert np.allclose(channels["raw"], expected_intensity)
 
 
 def test_coerce_domain_resample_num_preserves_original_grid_metadata():
@@ -55,6 +56,7 @@ def test_coerce_domain_resample_num_preserves_original_grid_metadata():
     assert "some_existing" in channels
     assert np.allclose(channels["original_wavelength"], sorted_wl)
     assert np.allclose(channels["original_intensity"], sorted_intensity)
+    assert np.allclose(channels["raw"], coerced.intensity)
 
 
 def test_coerce_domain_averages_duplicate_wavelengths_before_clipping():
@@ -86,6 +88,87 @@ def test_coerce_domain_interpolates_from_merged_duplicates():
 
     assert np.allclose(coerced.wavelength, expected_axis)
     assert np.allclose(coerced.intensity, expected_intensity)
+    assert np.allclose(coerced.meta["channels"]["raw"], expected_intensity)
+
+
+def test_subtract_blank_records_channel():
+    wl = np.array([400.0, 410.0, 420.0])
+    sample_intensity = np.array([1.5, 1.7, 2.0])
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=sample_intensity,
+        meta={"channels": {"raw": sample_intensity.copy()}},
+    )
+    blank = Spectrum(
+        wavelength=wl,
+        intensity=np.array([0.5, 0.5, 0.5]),
+        meta={},
+    )
+
+    corrected = pipeline.subtract_blank(sample, blank)
+    channels = corrected.meta.get("channels") or {}
+    assert np.allclose(channels["blanked"], corrected.intensity)
+    assert np.allclose(channels["raw"], sample_intensity)
+
+
+def test_apply_baseline_records_channel():
+    wl = np.linspace(400, 460, 7)
+    intensity = np.sin(wl / 40.0) + 0.1 * wl
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"channels": {"blanked": intensity.copy()}},
+    )
+
+    corrected = pipeline.apply_baseline(spec, "asls", lam=1e3, p=0.01, niter=10)
+    channels = corrected.meta.get("channels") or {}
+    assert "blanked" in channels
+    assert np.allclose(channels["baseline_corrected"], corrected.intensity)
+
+
+def test_correct_joins_records_channel():
+    wl = np.linspace(400, 450, 6)
+    intensity = np.array([0.1, 0.2, 0.3, 5.0, 5.1, 5.2])
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"channels": {"blanked": intensity.copy()}},
+    )
+
+    corrected = pipeline.correct_joins(spec, [3], window=1)
+    channels = corrected.meta.get("channels") or {}
+    assert "blanked" in channels
+    assert np.allclose(channels["joined"], corrected.intensity)
+
+
+def test_despike_records_channel():
+    wl = np.linspace(400, 440, 5)
+    intensity = np.array([1.0, 1.05, 5.0, 1.1, 1.15])
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"channels": {"joined": intensity.copy()}},
+    )
+
+    corrected = pipeline.despike_spectrum(spec, zscore=2.5, window=3)
+    channels = corrected.meta.get("channels") or {}
+    assert "joined" in channels
+    assert np.allclose(channels["despiked"], corrected.intensity)
+
+
+def test_smooth_records_channel():
+    wl = np.linspace(400, 460, 7)
+    intensity = np.array([1.0, 1.2, 1.1, 1.3, 1.25, 1.27, 1.26])
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"channels": {"baseline_corrected": intensity.copy()}},
+    )
+
+    smoothed = pipeline.smooth_spectrum(spec, window=5, polyorder=2)
+    channels = smoothed.meta.get("channels") or {}
+    assert "baseline_corrected" in channels
+    assert np.allclose(channels["smoothed"], smoothed.intensity)
 
 
 def test_subtract_blank_validates_overlap_and_subtracts():
