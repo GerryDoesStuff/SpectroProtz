@@ -4,7 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from openpyxl import Workbook
@@ -59,11 +59,60 @@ def _flatten_dict(data: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     return flat
 
 
-def _processed_rows(processed: Sequence[Spectrum]) -> List[List[Any]]:
+_STAGE_CHANNEL_ORDER: Tuple[str, ...] = (
+    "raw",
+    "blanked",
+    "baseline_corrected",
+    "joined",
+    "despiked",
+    "smoothed",
+)
+
+
+def _normalize_channel_label(value: Any) -> str:
+    cleaned = _clean_value(value)
+    if cleaned is None:
+        return ""
+    return str(cleaned)
+
+
+def _format_channel_column(channel: str, wavelength: float) -> str:
+    return f"{channel}:{wavelength:.6g}"
+
+
+def _iter_channels(spec: Spectrum, wavelengths: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+    meta = spec.meta or {}
+    channels: List[Tuple[str, np.ndarray]] = []
+    base_label = _normalize_channel_label(meta.get("channel_label", "processed")) or "processed"
+    intensity = np.asarray(spec.intensity, dtype=float)
+    if intensity.shape == wavelengths.shape:
+        channels.append((base_label, intensity))
+
+    extra_channels = meta.get("channels") or {}
+    ordered_names = [name for name in _STAGE_CHANNEL_ORDER if name in extra_channels]
+    ordered_names.extend(name for name in extra_channels if name not in ordered_names)
+    for name in ordered_names:
+        arr = np.asarray(extra_channels[name], dtype=float)
+        if arr.shape != wavelengths.shape:
+            continue
+        label = _normalize_channel_label(name) or str(name)
+        channels.append((label, arr))
+    return channels
+
+
+def _processed_table_tidy(processed: Sequence[Spectrum]) -> Tuple[List[str], List[List[Any]]]:
+    header = [
+        "spectrum_index",
+        "sample_id",
+        "role",
+        "mode",
+        "channel",
+        "wavelength",
+        "value",
+    ]
     rows: List[List[Any]] = []
     for idx, spec in enumerate(processed):
-        wl = np.asarray(spec.wavelength, dtype=float)
-        intensity = np.asarray(spec.intensity, dtype=float)
+        wavelengths = np.asarray(spec.wavelength, dtype=float)
         meta = spec.meta or {}
         sample_id = _clean_value(
             meta.get("sample_id")
@@ -73,37 +122,68 @@ def _processed_rows(processed: Sequence[Spectrum]) -> List[List[Any]]:
         )
         role = _clean_value(meta.get("role", "sample"))
         mode = _clean_value(meta.get("mode"))
-        base_channel_name = _clean_value(meta.get("channel_label", "processed"))
-        for wl_val, inten_val in zip(wl, intensity):
-            rows.append([
-                idx,
-                sample_id,
-                role,
-                mode,
-                base_channel_name,
-                _clean_value(wl_val),
-                _clean_value(inten_val),
-            ])
-        extra_channels = meta.get("channels") or {}
-        stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
-        ordered_names = [name for name in stage_order if name in extra_channels]
-        ordered_names.extend(name for name in extra_channels.keys() if name not in ordered_names)
-        for name in ordered_names:
-            channel = extra_channels[name]
-            arr = np.asarray(channel, dtype=float)
-            if arr.shape != wl.shape:
-                continue
-            for wl_val, inten_val in zip(wl, arr):
-                rows.append([
-                    idx,
-                    sample_id,
-                    role,
-                    mode,
-                    _clean_value(name),
-                    _clean_value(wl_val),
-                    _clean_value(inten_val),
-                ])
-    return rows
+        for channel_label, data in _iter_channels(spec, wavelengths):
+            for wl_val, inten_val in zip(wavelengths, data):
+                rows.append(
+                    [
+                        idx,
+                        sample_id,
+                        role,
+                        mode,
+                        channel_label,
+                        _clean_value(wl_val),
+                        _clean_value(inten_val),
+                    ]
+                )
+    return header, rows
+
+
+def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], List[List[Any]]]:
+    base_columns = ["spectrum_index", "sample_id", "role", "mode"]
+    dynamic_columns: List[str] = []
+    seen_columns: set[str] = set()
+    rows_dicts: List[Dict[str, Any]] = []
+
+    for idx, spec in enumerate(processed):
+        wavelengths = np.asarray(spec.wavelength, dtype=float)
+        meta = spec.meta or {}
+        sample_id = _clean_value(
+            meta.get("sample_id")
+            or meta.get("channel")
+            or meta.get("blank_id")
+            or f"spec_{idx}"
+        )
+        role = _clean_value(meta.get("role", "sample"))
+        mode = _clean_value(meta.get("mode"))
+
+        row: Dict[str, Any] = {
+            "spectrum_index": idx,
+            "sample_id": sample_id,
+            "role": role,
+            "mode": mode,
+        }
+
+        for channel_label, data in _iter_channels(spec, wavelengths):
+            for wl_val, inten_val in zip(wavelengths, data):
+                column_name = _format_channel_column(channel_label, float(wl_val))
+                if column_name not in seen_columns:
+                    seen_columns.add(column_name)
+                    dynamic_columns.append(column_name)
+                row[column_name] = _clean_value(inten_val)
+
+        rows_dicts.append(row)
+
+    header = base_columns + dynamic_columns
+    rows: List[List[Any]] = []
+    for row_dict in rows_dicts:
+        rows.append([row_dict.get(column) for column in header])
+    return header, rows
+
+
+def _processed_table(processed: Sequence[Spectrum], layout: str) -> Tuple[List[str], List[List[Any]]]:
+    if layout == "wide":
+        return _processed_table_wide(processed)
+    return _processed_table_tidy(processed)
 
 
 def _metadata_rows(processed: Sequence[Spectrum]) -> List[Dict[str, Any]]:
@@ -243,23 +323,25 @@ def _write_calibration_sheet(ws, calibration: Dict[str, Any] | None) -> None:
             ws.append(["Unknowns", "None"])
 
 
-def write_workbook(out_path: str, processed, qc_table, audit, figures, calibration=None):
+def write_workbook(
+    out_path: str,
+    processed,
+    qc_table,
+    audit,
+    figures,
+    calibration=None,
+    *,
+    processed_layout: str = "tidy",
+):
     workbook_path = Path(out_path)
     _ensure_parent(workbook_path)
 
     wb = Workbook()
     ws_processed = wb.active
     ws_processed.title = "Processed_Spectra"
-    ws_processed.append([
-        "spectrum_index",
-        "sample_id",
-        "role",
-        "mode",
-        "channel",
-        "wavelength",
-        "value",
-    ])
-    for row in _processed_rows(processed):
+    header, rows = _processed_table(processed, processed_layout)
+    ws_processed.append(header)
+    for row in rows:
         ws_processed.append(row)
 
     ws_metadata = wb.create_sheet("Metadata")

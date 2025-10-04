@@ -2847,6 +2847,13 @@ class UvVisPlugin(SpectroscopyPlugin):
     def export(self, specs, qc, recipe):
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
         workbook_target = self._coerce_export_path(export_cfg.get("path") or export_cfg.get("workbook"))
+        processed_layout = export_cfg.get("processed_layout", "tidy")
+        if isinstance(processed_layout, str):
+            processed_layout = processed_layout.lower()
+        else:
+            processed_layout = "tidy"
+        if processed_layout not in {"tidy", "wide"}:
+            processed_layout = "tidy"
         figures, figure_objs = self._generate_figures(specs, qc, formats=export_cfg.get("formats"))
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
@@ -2875,6 +2882,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     workbook_audit,
                     figures,
                     calibration_results,
+                    processed_layout=processed_layout,
                 )
             else:
                 workbook_audit.append("No workbook path provided; workbook not written.")
