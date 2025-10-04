@@ -411,7 +411,13 @@ def despike_spectrum(
     return Spectrum(wavelength=spec.wavelength.copy(), intensity=corrected, meta=meta)
 
 
-def smooth_spectrum(spec: Spectrum, *, window: int, polyorder: int) -> Spectrum:
+def smooth_spectrum(
+    spec: Spectrum,
+    *,
+    window: int,
+    polyorder: int,
+    join_indices: Sequence[int] | None = None,
+) -> Spectrum:
     """Savitzky–Golay smoothing wrapper."""
 
     y = np.asarray(spec.intensity, dtype=float)
@@ -424,9 +430,53 @@ def smooth_spectrum(spec: Spectrum, *, window: int, polyorder: int) -> Spectrum:
     if window > y.size:
         raise ValueError("Savitzky-Golay window larger than spectrum length")
 
-    smoothed = savgol_filter(y, window_length=window, polyorder=polyorder, mode="interp")
+    n = y.size
+
+    joins: list[int] = []
+    if join_indices:
+        joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
+
+    segments: list[tuple[int, int]] = []
+    last = 0
+    for join in joins:
+        if join <= last or join >= n:
+            continue
+        segments.append((last, join))
+        last = join
+    if last < n:
+        segments.append((last, n))
+    if not segments:
+        segments = [(0, n)]
+
+    def _effective_window(length: int) -> int | None:
+        eff = min(window, length)
+        if eff % 2 == 0:
+            eff -= 1
+        while eff >= 3:
+            if eff > polyorder:
+                return eff
+            eff -= 2
+        return None
+
+    smoothed = y.copy()
+    for start, stop in segments:
+        seg_len = stop - start
+        if seg_len <= polyorder or seg_len < 3:
+            continue
+        seg_window = _effective_window(seg_len)
+        if seg_window is None:
+            continue
+        segment = y[start:stop]
+        smoothed[start:stop] = savgol_filter(
+            segment, window_length=seg_window, polyorder=polyorder, mode="interp"
+        )
+
+    segmented = len(segments) > 1
+
     meta = dict(spec.meta)
     meta.setdefault("smoothed", True)
+    if segmented:
+        meta.setdefault("smoothed_segmented", True)
     return Spectrum(wavelength=spec.wavelength.copy(), intensity=smoothed, meta=meta)
 
 
