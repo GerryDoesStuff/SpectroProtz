@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 from contextlib import contextmanager
+from pathlib import Path
 
+import yaml
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,8 +12,10 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -21,15 +25,38 @@ from spectro_app.engine.recipe_model import Recipe
 
 
 class RecipeEditorDock(QDockWidget):
+    _CUSTOM_SENTINEL = "__custom__"
+
     def __init__(self, parent=None):
         super().__init__("Recipe Editor", parent)
         self.recipe = Recipe()
         self._updating = False
+        self._project_root = Path(__file__).resolve().parents[2]
 
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
+
+        preset_form = QFormLayout()
+        preset_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        preset_row_widget = QWidget()
+        preset_row = QHBoxLayout(preset_row_widget)
+        preset_row.setContentsMargins(0, 0, 0, 0)
+        preset_row.setSpacing(6)
+
+        self.preset_combo = QComboBox()
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        preset_row.addWidget(self.preset_combo, 1)
+
+        self.load_preset_button = QPushButton("Load Preset")
+        preset_row.addWidget(self.load_preset_button)
+
+        self.save_preset_button = QPushButton("Save as Preset…")
+        preset_row.addWidget(self.save_preset_button)
+
+        preset_form.addRow("Preset", preset_row_widget)
+        layout.addLayout(preset_form)
 
         self.module = QComboBox()
         self.module.addItems(["uvvis", "ftir", "raman", "pees"])
@@ -131,11 +158,14 @@ class RecipeEditorDock(QDockWidget):
 
         self.setWidget(container)
 
+        self._refresh_preset_list()
         self._connect_signals()
         self._update_ui_from_recipe()
         self._run_validation()
 
     def _connect_signals(self):
+        self.load_preset_button.clicked.connect(self._load_selected_preset)
+        self.save_preset_button.clicked.connect(self._save_preset)
         for signal in (
             self.module.currentTextChanged,
             self.smooth_enable.toggled,
@@ -297,6 +327,7 @@ class RecipeEditorDock(QDockWidget):
 
         self.recipe.module = self.module.currentText()
         self.recipe.params = params
+        self._mark_custom_preset()
         self._run_validation()
 
     def _parse_optional_float(self, text: str):
@@ -333,3 +364,125 @@ class RecipeEditorDock(QDockWidget):
 
     def get_recipe(self) -> Recipe:
         return self.recipe
+
+    def _refresh_preset_list(self):
+        current_data = self.preset_combo.currentData()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("— Custom —", self._CUSTOM_SENTINEL)
+
+        for label, path in self._discover_presets():
+            self.preset_combo.addItem(label, str(path))
+
+        if current_data:
+            index = self.preset_combo.findData(current_data)
+            if index != -1:
+                self.preset_combo.setCurrentIndex(index)
+            else:
+                self.preset_combo.setCurrentIndex(0)
+        else:
+            self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
+
+    def _discover_presets(self) -> list[tuple[str, Path]]:
+        presets: list[tuple[str, Path]] = []
+        base_dir = self._project_root / "config" / "presets"
+        presets.extend(self._collect_presets_from_dir(base_dir, "Core"))
+
+        plugin_root = self._project_root / "plugins"
+        if plugin_root.is_dir():
+            for plugin_dir in sorted(plugin_root.iterdir()):
+                if not plugin_dir.is_dir():
+                    continue
+                preset_dir = plugin_dir / "presets"
+                label_prefix = plugin_dir.name
+                presets.extend(self._collect_presets_from_dir(preset_dir, label_prefix))
+        return presets
+
+    def _collect_presets_from_dir(self, directory: Path, label_prefix: str) -> list[tuple[str, Path]]:
+        if not directory.is_dir():
+            return []
+        entries: list[tuple[str, Path]] = []
+        for path in sorted(directory.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            label = f"{label_prefix}: {path.stem}"
+            entries.append((label, path))
+        return entries
+
+    def _load_selected_preset(self):
+        data = self.preset_combo.currentData()
+        if data == self._CUSTOM_SENTINEL:
+            self.set_recipe(Recipe())
+            self._mark_custom_preset()
+            return
+        if not data:
+            return
+
+        path = Path(str(data))
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                content = yaml.safe_load(handle) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            self._show_validation_error(f"Failed to load preset: {exc}")
+            return
+
+        if not isinstance(content, dict):
+            self._show_validation_error("Preset file must contain a mapping at the top level.")
+            return
+
+        try:
+            self.set_recipe(content)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._show_validation_error(f"Invalid preset contents: {exc}")
+            return
+
+        index = self.preset_combo.findData(str(path))
+        if index != -1:
+            self.preset_combo.setCurrentIndex(index)
+
+    def _save_preset(self):
+        base_dir = self._project_root / "config" / "presets"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        default_name = f"{self.recipe.module}_preset"
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Preset",
+            "Preset file name (will be saved under config/presets):",
+            text=default_name,
+        )
+        if not ok:
+            return
+        filename = name.strip()
+        if not filename:
+            self._show_validation_error("Preset name cannot be empty.")
+            return
+        if not filename.lower().endswith(('.yaml', '.yml')):
+            filename += ".yaml"
+
+        path = base_dir / filename
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(self.recipe_dict(), handle, sort_keys=False)
+        except OSError as exc:
+            self._show_validation_error(f"Failed to save preset: {exc}")
+            return
+
+        self._refresh_preset_list()
+        index = self.preset_combo.findData(str(path))
+        if index != -1:
+            self.preset_combo.setCurrentIndex(index)
+
+    def _show_validation_error(self, message: str):
+        self.validation_label.setStyleSheet("color: #b00020;")
+        self.validation_label.setText(message)
+
+    def _mark_custom_preset(self):
+        if self.preset_combo.currentData() == self._CUSTOM_SENTINEL:
+            return
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
