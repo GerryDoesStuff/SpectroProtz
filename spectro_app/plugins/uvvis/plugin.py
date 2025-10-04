@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
-from scipy.signal import find_peaks, peak_widths
+from scipy.signal import find_peaks, peak_widths, savgol_filter
 
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
@@ -1408,13 +1408,92 @@ class UvVisPlugin(SpectroscopyPlugin):
         wl: np.ndarray,
         intensity: np.ndarray,
         enabled: bool = True,
+        *,
+        window: int | None = None,
+        polyorder: int | None = None,
     ) -> Dict[str, np.ndarray]:
         if not enabled or intensity.size < 3:
             return {}
+
         safe_y = self._fill_nan(intensity)
         safe_wl = self._fill_nan(wl)
-        first = np.gradient(safe_y, safe_wl)
-        second = np.gradient(first, safe_wl)
+
+        n = safe_y.size
+        requested_window = int(window) if window is not None else None
+        if requested_window is not None and requested_window <= 0:
+            requested_window = None
+
+        if requested_window is None:
+            default_window = 5
+            if n < default_window:
+                default_window = n if n % 2 else n - 1
+            if default_window < 3:
+                default_window = 3
+            eff_window = default_window
+        else:
+            eff_window = requested_window
+
+        if eff_window % 2 == 0:
+            # Prefer shrinking to preserve the requested neighbourhood when possible.
+            eff_window -= 1
+
+        if eff_window > n:
+            eff_window = n if n % 2 else n - 1
+
+        while eff_window > n and eff_window >= 3:
+            eff_window -= 2
+
+        if eff_window < 3:
+            eff_window = 3 if n >= 3 else eff_window
+        if eff_window < 3 or eff_window > n:
+            return {}
+
+        base_poly = int(polyorder) if polyorder is not None else 2
+        if base_poly < 0:
+            base_poly = 0
+
+        min_poly_for_second = 2
+        if base_poly < min_poly_for_second:
+            base_poly = min_poly_for_second
+
+        if base_poly >= eff_window:
+            base_poly = eff_window - 1
+
+        if base_poly < min_poly_for_second:
+            return {}
+
+        diffs = np.diff(safe_wl)
+        finite_diffs = diffs[np.isfinite(diffs)]
+        if finite_diffs.size:
+            delta = float(np.nanmedian(finite_diffs))
+            if not np.isfinite(delta) or delta == 0:
+                delta = float(np.nanmedian(np.abs(finite_diffs)))
+        else:
+            delta = 1.0
+
+        if not np.isfinite(delta) or delta == 0:
+            delta = 1.0
+
+        delta = abs(delta)
+        if delta == 0:
+            delta = 1.0
+
+        first = savgol_filter(
+            safe_y,
+            window_length=eff_window,
+            polyorder=base_poly,
+            deriv=1,
+            delta=delta,
+            mode="interp",
+        )
+        second = savgol_filter(
+            safe_y,
+            window_length=eff_window,
+            polyorder=base_poly,
+            deriv=2,
+            delta=delta,
+            mode="interp",
+        )
         return {
             "first_derivative": first,
             "second_derivative": second,
@@ -2174,6 +2253,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         recipe = self._apply_recipe_defaults(recipe)
 
         feature_cfg = dict(recipe.get("features", {})) if recipe else {}
+        smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
         peak_cfg = dict(feature_cfg.get("peaks", {}))
         ratio_cfg = feature_cfg.get("band_ratios")
         if not ratio_cfg:
@@ -2187,7 +2267,23 @@ class UvVisPlugin(SpectroscopyPlugin):
                 {"name": "Area_240_260", "min": 240.0, "max": 260.0},
                 {"name": "Area_260_280", "min": 260.0, "max": 280.0},
             ]
-        derivative_enabled = feature_cfg.get("derivatives", True)
+        derivative_cfg_raw = feature_cfg.get("derivatives", True)
+        derivative_enabled = True
+        derivative_window: int | None = None
+        derivative_polyorder: int | None = None
+        if smoothing_cfg:
+            if smoothing_cfg.get("window") is not None:
+                derivative_window = int(smoothing_cfg.get("window"))
+            if smoothing_cfg.get("polyorder") is not None:
+                derivative_polyorder = int(smoothing_cfg.get("polyorder"))
+        if isinstance(derivative_cfg_raw, Mapping):
+            derivative_enabled = bool(derivative_cfg_raw.get("enabled", True))
+            if derivative_cfg_raw.get("window") is not None:
+                derivative_window = int(derivative_cfg_raw.get("window"))
+            if derivative_cfg_raw.get("polyorder") is not None:
+                derivative_polyorder = int(derivative_cfg_raw.get("polyorder"))
+        else:
+            derivative_enabled = bool(derivative_cfg_raw)
         isosbestic_cfg = feature_cfg.get("isosbestic") or feature_cfg.get("isosbestic_checks") or []
         kinetics_cfg_raw = feature_cfg.get("kinetics") or {}
         kinetics_targets = self._normalize_kinetics_targets(kinetics_cfg_raw)
@@ -2236,7 +2332,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             negative = metrics["negative_intensity"]
             wl = np.asarray(spec.wavelength, dtype=float)
             intensity = np.asarray(spec.intensity, dtype=float)
-            derivatives = self._compute_derivatives(wl, intensity, derivative_enabled)
+            derivatives = self._compute_derivatives(
+                wl,
+                intensity,
+                derivative_enabled,
+                window=derivative_window,
+                polyorder=derivative_polyorder,
+            )
             band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
             integrals = self._compute_integrals(wl, intensity, integral_cfg)
             peaks = self._compute_peak_metrics(wl, intensity, peak_cfg)
