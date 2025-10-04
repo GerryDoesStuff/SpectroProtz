@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,33 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert any("Workbook written" in entry for entry in result.audit)
 
 
+def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
+    plugin = UvVisPlugin()
+    base = _mock_spectrum()
+    base_time = datetime(2024, 1, 1, 9, 0)
+    rng = np.random.default_rng(42)
+    spectra = []
+    for idx in range(6):
+        meta = dict(base.meta)
+        meta["sample_id"] = f"Sample-{idx + 1}"
+        meta["acquired_datetime"] = (base_time + timedelta(minutes=idx * 5)).isoformat()
+        noise_scale = 0.002 + 0.001 * idx
+        noisy_intensity = base.intensity + rng.normal(scale=noise_scale, size=base.intensity.shape)
+        spectra.append(
+            Spectrum(
+                wavelength=base.wavelength.copy(),
+                intensity=noisy_intensity,
+                meta=meta,
+            )
+        )
+
+    recipe = {"export": {"path": str(tmp_path / "uvvis_hist_trend.xlsx")}}
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    assert "qc_summary_noise.png" in result.figures
+    assert "qc_summary_noise_hist.png" in result.figures
+    assert "qc_summary_noise_trend.png" in result.figures
 def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
