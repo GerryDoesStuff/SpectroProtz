@@ -1,9 +1,11 @@
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 import numpy as np
 
+from importlib import metadata
 from openpyxl import load_workbook
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -105,6 +107,34 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
 
     assert result.figures, "Export should include generated plots"
     assert any("Workbook written" in entry for entry in result.audit)
+
+
+def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    source_path = tmp_path / "sample_source.csv"
+    source_path.write_text("wavelength,intensity\n")
+    spec.meta["source_file"] = str(source_path)
+    recipe = {"export": {"path": str(tmp_path / "audit.xlsx")}}
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    audit_entries = plugin._build_audit_entries(processed, qc_rows, recipe, figures={})
+
+    package_label = "spectro-app"
+    version = "unknown"
+    for candidate in ("spectro-app", "spectro_app"):
+        try:
+            version = metadata.version(candidate)
+        except metadata.PackageNotFoundError:
+            continue
+        else:
+            package_label = candidate
+            break
+    runtime_token = f"{package_label}=={version}"
+    assert any(runtime_token in entry for entry in audit_entries)
+
+    digest = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()
+    assert any(digest in entry for entry in audit_entries)
 
 
 def test_uvvis_calibration_success(tmp_path):
