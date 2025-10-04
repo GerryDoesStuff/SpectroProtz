@@ -445,7 +445,39 @@ def average_replicates(
     specs: Sequence[Spectrum],
     *,
     return_mapping: bool = False,
+    outlier: Dict[str, object] | bool | None = None,
 ) -> Tuple[List[Spectrum], Dict[Tuple[str, str], Spectrum]] | List[Spectrum]:
+    """Average replicate spectra with optional outlier rejection.
+
+    Parameters
+    ----------
+    specs:
+        Sequence of spectra to be grouped and averaged by replicate key.
+    return_mapping:
+        When ``True`` both the averaged spectra and a mapping keyed by
+        replicate identifier are returned.
+    outlier:
+        Optional configuration enabling the rejection of replicate spectra
+        deemed outliers. When provided, the configuration may specify
+        ``method`` (currently only ``"mad"`` is supported), ``threshold``
+        defining the score above which replicates are discarded, and an
+        ``enabled`` flag. A simple boolean can be passed to toggle the
+        default configuration.
+    """
+
+    if outlier is None or outlier is False:
+        outlier_cfg: Dict[str, object] = {}
+    elif isinstance(outlier, dict):
+        outlier_cfg = dict(outlier)
+    elif isinstance(outlier, bool):
+        outlier_cfg = {"enabled": outlier}
+    else:
+        raise TypeError("'outlier' must be a mapping, boolean or None")
+
+    outlier_enabled = bool(outlier_cfg.get("enabled", bool(outlier_cfg)))
+    outlier_method = str(outlier_cfg.get("method", "mad")).lower()
+    outlier_threshold = float(outlier_cfg.get("threshold", 3.5))
+
     groups: "OrderedDict[Tuple[str, str], List[Spectrum]]" = OrderedDict()
     for spec in specs:
         key = replicate_key(spec)
@@ -455,21 +487,79 @@ def average_replicates(
     mapping: Dict[Tuple[str, str], Spectrum] = {}
 
     for key, members in groups.items():
+        sources = [
+            member.meta.get("source_file")
+            or member.meta.get("channel")
+            or member.meta.get("sample_id")
+            for member in members
+        ]
+
         if len(members) == 1:
-            averaged = members[0]
+            member = members[0]
+            meta = dict(member.meta)
+            meta.setdefault("replicate_sources", sources)
+            meta["replicate_total"] = 1
+            meta["replicate_excluded"] = []
+            meta["replicates"] = [
+                {
+                    "wavelength": np.asarray(member.wavelength, dtype=float).tolist(),
+                    "intensity": np.asarray(member.intensity, dtype=float).tolist(),
+                    "meta": dict(member.meta),
+                    "excluded": False,
+                    "score": None,
+                }
+            ]
+            averaged = Spectrum(
+                wavelength=np.asarray(member.wavelength, dtype=float).copy(),
+                intensity=np.asarray(member.intensity, dtype=float).copy(),
+                meta=meta,
+            )
         else:
             ref_wl = members[0].wavelength
             for other in members[1:]:
                 if not np.array_equal(other.wavelength, ref_wl):
                     raise ValueError("Replicates must share identical domains for averaging")
+
             stack = np.vstack([np.asarray(m.intensity, dtype=float) for m in members])
-            averaged_intensity = np.nanmean(stack, axis=0)
+
+            scores = np.zeros(len(members), dtype=float)
+            excluded_mask = np.zeros(len(members), dtype=bool)
+            if outlier_enabled and outlier_threshold > 0 and len(members) >= 2:
+                if outlier_method not in {"mad", "median_absolute_deviation"}:
+                    raise ValueError(f"Unsupported outlier method: {outlier_method}")
+
+                residual = np.abs(stack - np.nanmedian(stack, axis=0))
+                metrics = np.nanmedian(residual, axis=1)
+                median_metric = np.nanmedian(metrics)
+                mad_metric = np.nanmedian(np.abs(metrics - median_metric))
+
+                if np.isfinite(mad_metric) and mad_metric > 0:
+                    scores = 0.6745 * np.abs(metrics - median_metric) / mad_metric
+                    excluded_mask = scores > outlier_threshold
+
+            if excluded_mask.all():
+                excluded_mask[:] = False
+
+            included_mask = ~excluded_mask
+            averaged_intensity = np.nanmean(stack[included_mask], axis=0)
+
             meta = dict(members[0].meta)
-            meta["replicate_count"] = len(members)
+            meta["replicate_count"] = int(included_mask.sum())
+            meta["replicate_total"] = len(members)
             meta["replicate_averaged"] = True
-            meta["replicate_sources"] = [
-                member.meta.get("source_file") or member.meta.get("channel") or member.meta.get("sample_id")
-                for member in members
+            meta["replicate_sources"] = sources
+            meta["replicate_excluded"] = [
+                src for src, flag in zip(sources, excluded_mask) if flag and src is not None
+            ]
+            meta["replicates"] = [
+                {
+                    "wavelength": np.asarray(member.wavelength, dtype=float).tolist(),
+                    "intensity": stack[idx].tolist(),
+                    "meta": dict(member.meta),
+                    "excluded": bool(excluded_mask[idx]),
+                    "score": float(scores[idx]) if np.isfinite(scores[idx]) else float("nan"),
+                }
+                for idx, member in enumerate(members)
             ]
             averaged = Spectrum(wavelength=ref_wl.copy(), intensity=averaged_intensity, meta=meta)
 

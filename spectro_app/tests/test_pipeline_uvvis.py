@@ -353,11 +353,51 @@ def test_average_replicates():
     spec_a1 = Spectrum(wavelength=wl, intensity=np.ones_like(wl), meta={"sample_id": "A"})
     spec_a2 = Spectrum(wavelength=wl, intensity=2 * np.ones_like(wl), meta={"sample_id": "A"})
     spec_b = Spectrum(wavelength=wl, intensity=np.zeros_like(wl), meta={"sample_id": "B"})
-    averaged, mapping = pipeline.average_replicates([spec_a1, spec_a2, spec_b], return_mapping=True)
+    averaged, mapping = pipeline.average_replicates(
+        [spec_a1, spec_a2, spec_b], return_mapping=True, outlier={"enabled": True}
+    )
     assert len(averaged) == 2
     key_a = pipeline.replicate_key(spec_a1)
     assert np.allclose(mapping[key_a].intensity, np.ones_like(wl) * 1.5)
     assert mapping[key_a].meta["replicate_count"] == 2
+    assert mapping[key_a].meta["replicate_total"] == 2
+    assert mapping[key_a].meta.get("replicate_excluded") == []
+    stored = mapping[key_a].meta.get("replicates")
+    assert stored and len(stored) == 2
+    assert all(not entry["excluded"] for entry in stored)
+    assert np.allclose(stored[0]["intensity"], spec_a1.intensity)
+    assert np.allclose(stored[1]["intensity"], spec_a2.intensity)
+
+
+def test_average_replicates_outlier_rejection():
+    wl = np.linspace(400, 500, 11)
+    baseline = np.sin(wl / 60.0)
+    spec_a1 = Spectrum(wavelength=wl, intensity=baseline + 0.02, meta={"sample_id": "A", "channel": "rep1"})
+    spec_a2 = Spectrum(wavelength=wl, intensity=baseline - 0.01, meta={"sample_id": "A", "channel": "rep2"})
+    spec_outlier = Spectrum(
+        wavelength=wl,
+        intensity=baseline + 5.0,
+        meta={"sample_id": "A", "channel": "rep3"},
+    )
+
+    averaged, mapping = pipeline.average_replicates(
+        [spec_a1, spec_a2, spec_outlier],
+        return_mapping=True,
+        outlier={"enabled": True, "threshold": 3.5},
+    )
+
+    assert len(averaged) == 1
+    averaged_spec = mapping[pipeline.replicate_key(spec_a1)]
+    assert averaged_spec.meta["replicate_count"] == 2
+    assert averaged_spec.meta["replicate_total"] == 3
+    assert averaged_spec.meta["replicate_excluded"] == ["rep3"]
+    stored = averaged_spec.meta["replicates"]
+    assert len(stored) == 3
+    excluded_entries = [entry for entry in stored if entry["excluded"]]
+    assert len(excluded_entries) == 1
+    included_entries = [entry for entry in stored if not entry["excluded"]]
+    assert len(included_entries) == 2
+    assert np.allclose(averaged_spec.intensity, np.mean([spec_a1.intensity, spec_a2.intensity], axis=0))
 
 
 def test_plugin_preprocess_full_pipeline():
@@ -409,6 +449,10 @@ def test_plugin_preprocess_full_pipeline():
     processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
 
     assert processed_sample.meta.get("replicate_count") == 2
+    assert processed_sample.meta.get("replicate_total") == 2
+    replicates_meta = processed_sample.meta.get("replicates")
+    assert replicates_meta and len(replicates_meta) == 2
+    assert all(not entry.get("excluded") for entry in replicates_meta)
     assert np.nanmax(processed_sample.intensity) > 0.01
     left_mean = np.nanmean(processed_sample.intensity[:5])
     right_mean = np.nanmean(processed_sample.intensity[-5:])
