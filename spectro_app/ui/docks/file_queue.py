@@ -1,10 +1,188 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDockWidget, QListWidget
+
+
+__all__ = ["FileQueueDock", "QueueEntry"]
+
+
+QUEUE_ENTRY_ROLE = QtCore.Qt.ItemDataRole.UserRole
+
+
+@dataclass
+class QueueEntry:
+    path: str
+    display_name: str
+    plugin_id: Optional[str] = None
+    technique: Optional[str] = None
+    mode: Optional[str] = None
+    role: Optional[str] = None
+    manifest_status: Optional[str] = None
+    is_manifest: bool = False
+    metadata: Dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class QueueBadge:
+    text: str
+    category: str
+    tooltip: str = ""
+
+
+class _QueueItemDelegate(QtWidgets.QStyledItemDelegate):
+    BADGE_PADDING = QtCore.QMargins(8, 3, 8, 3)
+    BADGE_SPACING = 6
+    TEXT_MARGIN = QtCore.QMargins(8, 6, 8, 6)
+
+    _CATEGORY_COLORS: Dict[str, QtGui.QColor] = {
+        "technique": QtGui.QColor(45, 101, 191),
+        "mode": QtGui.QColor(66, 133, 244),
+        "role-sample": QtGui.QColor(15, 157, 88),
+        "role-blank": QtGui.QColor(217, 48, 37),
+        "role-standard": QtGui.QColor(244, 180, 0),
+        "role-unknown": QtGui.QColor(95, 99, 104),
+        "manifest-file": QtGui.QColor(52, 168, 83),
+        "manifest-ok": QtGui.QColor(15, 157, 88),
+        "manifest-missing": QtGui.QColor(217, 48, 37),
+        "manifest-error": QtGui.QColor(217, 98, 48),
+        "manifest-na": QtGui.QColor(120, 120, 120),
+        "default": QtGui.QColor(95, 99, 104),
+    }
+
+    def __init__(self, dock: "FileQueueDock", parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._dock = dock
+
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        entry = index.data(QUEUE_ENTRY_ROLE)
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget else QtWidgets.QApplication.style()
+        style.drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_PanelItemViewItem, opt, painter, opt.widget)
+
+        painter.save()
+        rect = opt.rect.marginsRemoved(self.TEXT_MARGIN)
+        metrics = QtGui.QFontMetrics(opt.font)
+        badges = self._dock.badges_for_entry(entry) if isinstance(entry, QueueEntry) else []
+        badge_layout = self._prepare_badges(metrics, badges, rect)
+
+        text_rect = QtCore.QRect(rect)
+        if badge_layout:
+            total_width = badge_layout.total_width + self.BADGE_SPACING
+            text_rect.setRight(rect.right() - total_width)
+
+        display_text = index.data(QtCore.Qt.ItemDataRole.DisplayRole)
+        if isinstance(entry, QueueEntry):
+            display_text = entry.display_name
+
+        painter.setFont(opt.font)
+        if opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
+            painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.HighlightedText))
+        else:
+            painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.Text))
+        elided = metrics.elidedText(display_text or "", QtCore.Qt.TextElideMode.ElideMiddle, max(text_rect.width(), 10))
+        painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, elided)
+
+        if badge_layout:
+            self._draw_badges(painter, opt, metrics, badge_layout)
+
+        painter.restore()
+
+    def sizeHint(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtCore.QSize:
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        metrics = QtGui.QFontMetrics(opt.font)
+        height = metrics.height() + self.TEXT_MARGIN.top() + self.TEXT_MARGIN.bottom()
+        return QtCore.QSize(opt.rect.width(), height)
+
+    @dataclass
+    class _BadgeLayout:
+        badges: List[QueueBadge]
+        widths: List[int]
+        total_width: int
+        badge_height: int
+
+    def _prepare_badges(
+        self,
+        metrics: QtGui.QFontMetrics,
+        badges: List[QueueBadge],
+        rect: QtCore.QRect,
+    ) -> Optional["_QueueItemDelegate._BadgeLayout"]:
+        if not badges:
+            return None
+
+        badge_height = metrics.height() + self.BADGE_PADDING.top() + self.BADGE_PADDING.bottom()
+        widths: List[int] = []
+        total_width = 0
+        for badge in badges:
+            text_width = metrics.horizontalAdvance(badge.text)
+            width = text_width + self.BADGE_PADDING.left() + self.BADGE_PADDING.right()
+            widths.append(width)
+            total_width += width
+        total_width += max(len(badges) - 1, 0) * self.BADGE_SPACING
+        if total_width >= rect.width():
+            # Trim badges if they won't fit; keep the most important ones on the right.
+            while widths and total_width >= rect.width():
+                removed = widths.pop(0)
+                badges.pop(0)
+                total_width -= removed
+                if widths:
+                    total_width -= self.BADGE_SPACING
+        return self._BadgeLayout(badges=badges, widths=widths, total_width=total_width, badge_height=badge_height)
+
+    def _draw_badges(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        metrics: QtGui.QFontMetrics,
+        layout: "_QueueItemDelegate._BadgeLayout",
+    ) -> None:
+        rect = option.rect.marginsRemoved(self.TEXT_MARGIN)
+        right = rect.right()
+        text_pen = option.palette.color(QtGui.QPalette.ColorRole.HighlightedText)
+        default_pen = QtGui.QColor("white")
+
+        for badge, width in reversed(list(zip(layout.badges, layout.widths))):
+            top = rect.center().y() - layout.badge_height // 2
+            badge_rect = QtCore.QRect(right - width, top, width, layout.badge_height)
+            right = badge_rect.left() - self.BADGE_SPACING
+
+            color = QtGui.QColor(self._CATEGORY_COLORS.get(badge.category, self._CATEGORY_COLORS["default"]))
+            if option.state & QtWidgets.QStyle.StateFlag.State_Selected:
+                highlight = option.palette.color(QtGui.QPalette.ColorRole.Highlight)
+                color = self._blend_colors(color, highlight)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(color)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(badge_rect, 6, 6)
+            painter.setPen(text_pen if option.state & QtWidgets.QStyle.StateFlag.State_Selected else default_pen)
+            painter.drawText(
+                badge_rect,
+                QtCore.Qt.AlignmentFlag.AlignCenter,
+                badge.text,
+            )
+
+    @staticmethod
+    def _blend_colors(base: QtGui.QColor, overlay: QtGui.QColor) -> QtGui.QColor:
+        ratio = 0.5
+        r = int(base.red() * (1 - ratio) + overlay.red() * ratio)
+        g = int(base.green() * (1 - ratio) + overlay.green() * ratio)
+        b = int(base.blue() * (1 - ratio) + overlay.blue() * ratio)
+        return QtGui.QColor(r, g, b)
 
 
 class FileQueueDock(QDockWidget):
@@ -21,14 +199,146 @@ class FileQueueDock(QDockWidget):
     ) -> None:
         super().__init__("File Queue", parent)
         self.list = QListWidget()
+        self.list.setItemDelegate(_QueueItemDelegate(self, self.list))
+        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setUniformItemSizes(False)
+        self.list.setAlternatingRowColors(False)
         self.setWidget(self.list)
         self.setAcceptDrops(True)
         self._plugin_resolver = plugin_resolver
+        self._entries: List[QueueEntry] = []
 
     def set_plugin_resolver(
         self, resolver: Optional[Callable[[List[str]], object]]
     ) -> None:
         self._plugin_resolver = resolver
+
+    def set_entries(self, entries: List[QueueEntry]) -> None:
+        selected_path = self._selected_path()
+        self.list.clear()
+        self._entries = list(entries)
+        for entry in self._entries:
+            item = QtWidgets.QListWidgetItem(entry.display_name)
+            item.setData(QUEUE_ENTRY_ROLE, entry)
+            tooltip_lines = [entry.path]
+            if entry.manifest_status:
+                tooltip_lines.append(f"Manifest: {entry.manifest_status}")
+            if entry.metadata:
+                for key, value in entry.metadata.items():
+                    tooltip_lines.append(f"{key}: {value}")
+            item.setToolTip("\n".join(tooltip_lines))
+            self.list.addItem(item)
+            if selected_path and entry.path == selected_path:
+                item.setSelected(True)
+
+    def apply_metadata(self, entries: List[QueueEntry]) -> None:
+        if not self._entries:
+            self.set_entries(entries)
+            return
+        mapping = {entry.path: entry for entry in entries}
+        ordered: List[QueueEntry] = []
+        seen: set[str] = set()
+        for existing in self._entries:
+            updated = mapping.get(existing.path, existing)
+            ordered.append(updated)
+            seen.add(existing.path)
+        for entry in entries:
+            if entry.path not in seen:
+                ordered.append(entry)
+        self.set_entries(ordered)
+
+    def badges_for_entry(self, entry: Optional[QueueEntry]) -> List[QueueBadge]:
+        if not isinstance(entry, QueueEntry):
+            return []
+
+        badges: List[QueueBadge] = []
+        technique = entry.technique or (entry.plugin_id.upper() if entry.plugin_id else None)
+        if technique:
+            tooltip = f"Technique: {technique}"
+            if entry.plugin_id and entry.plugin_id.lower() != technique.lower():
+                tooltip += f" ({entry.plugin_id})"
+            badges.append(QueueBadge(text=technique, category="technique", tooltip=tooltip))
+
+        if entry.is_manifest:
+            if entry.manifest_status == "manifest-error":
+                badges.append(
+                    QueueBadge(
+                        text="Manifest ⚠",
+                        category="manifest-error",
+                        tooltip="Manifest file could not be parsed",
+                    )
+                )
+            else:
+                badges.append(
+                    QueueBadge(
+                        text="Manifest",
+                        category="manifest-file",
+                        tooltip="Manifest file",
+                    )
+                )
+            return badges
+
+        mode_badge = self._mode_badge(entry)
+        if mode_badge:
+            badges.append(mode_badge)
+
+        role_badge = self._role_badge(entry.role)
+        if role_badge:
+            badges.append(role_badge)
+
+        manifest_badge = self._manifest_badge(entry.manifest_status)
+        if manifest_badge:
+            badges.append(manifest_badge)
+
+        return badges
+
+    def _mode_badge(self, entry: QueueEntry) -> Optional[QueueBadge]:
+        mode = entry.mode
+        if not mode and entry.plugin_id == "uvvis":
+            mode = "absorbance"
+        if not mode:
+            return None
+        normalized = str(mode).strip().lower()
+        mapping = {
+            "absorbance": ("A", "Absorbance"),
+            "transmittance": ("%T", "Transmittance"),
+            "percent_transmittance": ("%T", "Percent transmittance"),
+            "reflectance": ("%R", "Reflectance"),
+        }
+        text, tooltip = mapping.get(normalized, (normalized.title() or "—", normalized.title() or "Unknown mode"))
+        return QueueBadge(text=text, category="mode", tooltip=f"Mode: {tooltip}")
+
+    @staticmethod
+    def _role_badge(role: Optional[str]) -> Optional[QueueBadge]:
+        if role is None:
+            return QueueBadge(text="—", category="role-unknown", tooltip="Role not specified")
+        normalized = str(role).strip().lower()
+        mapping = {
+            "blank": QueueBadge(text="Blank", category="role-blank", tooltip="Blank spectrum"),
+            "sample": QueueBadge(text="Sample", category="role-sample", tooltip="Sample spectrum"),
+            "standard": QueueBadge(text="Standard", category="role-standard", tooltip="Standard"),
+        }
+        if normalized in mapping:
+            return mapping[normalized]
+        if not normalized:
+            return QueueBadge(text="—", category="role-unknown", tooltip="Role not specified")
+        return QueueBadge(text=normalized.title(), category="role-unknown", tooltip=f"Role: {normalized}")
+
+    @staticmethod
+    def _manifest_badge(status: Optional[str]) -> Optional[QueueBadge]:
+        mapping = {
+            "linked": QueueBadge(text="Manifest", category="manifest-ok", tooltip="Manifest metadata linked"),
+            "missing": QueueBadge(text="No Manifest", category="manifest-missing", tooltip="No manifest entry matched"),
+            "none": QueueBadge(text="No Manifest", category="manifest-na", tooltip="No manifest provided"),
+            "unsupported": QueueBadge(text="Manifest N/A", category="manifest-na", tooltip="Plugin does not support manifests"),
+            "manifest-error": QueueBadge(text="Manifest ⚠", category="manifest-error", tooltip="Manifest metadata unavailable"),
+        }
+        if not status:
+            return None
+        badge = mapping.get(status)
+        if badge:
+            return badge
+        return QueueBadge(text=status.title(), category="manifest-na", tooltip=f"Manifest status: {status}")
 
     # ------------------------------------------------------------------
     # Drag and drop handling
@@ -178,4 +488,11 @@ class FileQueueDock(QDockWidget):
         items = self.list.selectedItems()
         if not items:
             return None
-        return items[0].text()
+        item = items[0]
+        entry = item.data(QUEUE_ENTRY_ROLE)
+        if isinstance(entry, QueueEntry):
+            return entry.path
+        data = item.data(QtCore.Qt.ItemDataRole.DisplayRole)
+        if isinstance(data, str):
+            return data
+        return item.text()
