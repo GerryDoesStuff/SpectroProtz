@@ -21,12 +21,6 @@ from spectro_app.ui.docks.file_queue import FileQueueDock, QueueEntry
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
 from spectro_app.ui.docks.qc_widget import QCDock
-from spectro_app.ui.docks.logger_view import LoggerDock
-from spectro_app.ui.dialogs.about import AboutDialog
-from spectro_app.ui.dialogs.help_viewer import HelpViewer
-from spectro_app.engine.run_controller import RunController
-from spectro_app.engine.plugin_api import BatchResult
-from spectro_app.engine.recipe_model import Recipe
 from spectro_app.ui.docks.recipe_editor import RecipeEditorDock
 from spectro_app.ui.menus import build_menus
 
@@ -45,6 +39,16 @@ class MainWindow(QtWidgets.QMainWindow):
         build_menus(self)
         self._refresh_recent_menu()
         self._collect_actions()
+        self._plugin_registry = {
+            plugin.id: plugin
+            for plugin in (
+                UvVisPlugin(),
+                FtirPlugin(),
+                RamanPlugin(),
+                PeesPlugin(),
+            )
+        }
+        self._mode_selector: Optional[QtWidgets.QComboBox] = None
         self._init_toolbar()
         self._init_docks()
         self._default_geometry: Optional[QtCore.QByteArray] = QtCore.QByteArray(
@@ -59,16 +63,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.runctl = RunController(self)
         self._connect_run_controller()
-
-        self._plugin_registry = {
-            plugin.id: plugin
-            for plugin in (
-                UvVisPlugin(),
-                FtirPlugin(),
-                RamanPlugin(),
-                PeesPlugin(),
-            )
-        }
 
         self._queued_paths: List[str] = []
         self._recipe_data: Dict[str, Any] = self._normalise_recipe_data({})
@@ -87,6 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._job_running = False
         self._updating_ui = False
 
+        self._populate_plugin_selectors()
         self._connect_recipe_editor()
         self._select_module(self._recipe_data["module"])
         self.status.showMessage("Ready")
@@ -146,6 +141,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._toolbar.addSeparator()
         if self._export_action:
             self._toolbar.addAction(self._export_action)
+        if self._plugin_registry:
+            self._toolbar.addSeparator()
+            label = QtWidgets.QLabel("Mode:")
+            label.setObjectName("ModeSelectorLabel")
+            self._toolbar.addWidget(label)
+            self._mode_selector = QtWidgets.QComboBox()
+            self._mode_selector.setObjectName("ModeSelector")
+            self._mode_selector.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+            )
+            self._mode_selector.currentIndexChanged.connect(
+                self._on_mode_selector_changed
+            )
+            self._toolbar.addWidget(self._mode_selector)
 
     def _init_status(self):
         self.status = self.statusBar()
@@ -162,6 +171,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._export_action = actions.get("Export Workbook...")
         self._run_action = actions.get("Run")
         self._cancel_action = actions.get("Cancel")
+
+    def _populate_plugin_selectors(self) -> None:
+        modules: List[tuple[str, str]] = []
+        for plugin_id, plugin in sorted(
+            self._plugin_registry.items(),
+            key=lambda item: getattr(item[1], "label", item[0]).lower(),
+        ):
+            label = getattr(plugin, "label", plugin_id) or plugin_id
+            modules.append((plugin_id, str(label)))
+
+        if self.recipeDock and hasattr(self.recipeDock, "set_available_modules"):
+            self.recipeDock.set_available_modules(modules)
+
+        if self._mode_selector:
+            previous = self._mode_selector.blockSignals(True)
+            try:
+                self._mode_selector.clear()
+                for module_id, display_label in modules:
+                    self._mode_selector.addItem(display_label, module_id)
+            finally:
+                self._mode_selector.blockSignals(previous)
 
     def _load_app_settings(self):
         settings = self.appctx.settings
@@ -971,14 +1001,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_module_changed(self, module_text: str):
         if self._updating_ui:
             return
-        module_id = (module_text or "").strip().lower()
-        if module_id:
-            self._recipe_data["module"] = module_id
-            self._active_plugin_id = module_id
-        self._update_recipe_from_ui()
-        self.appctx.set_dirty(True)
-        self._update_action_states()
-        self._refresh_queue_metadata()
+        module_id = self.recipeDock.module.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        if not isinstance(module_id, str) or not module_id.strip():
+            module_id = (module_text or "").strip().lower()
+        if not module_id:
+            return
+        self._select_module(module_id, user_initiated=True)
+
+    def _on_mode_selector_changed(self, index: int):
+        if self._updating_ui:
+            return
+        if not self._mode_selector:
+            return
+        module_id = self._mode_selector.itemData(
+            index, QtCore.Qt.ItemDataRole.UserRole
+        )
+        if not isinstance(module_id, str) or not module_id.strip():
+            module_id = (self._mode_selector.itemText(index) or "").strip().lower()
+        if not module_id:
+            return
+        if module_id == self._recipe_data.get("module"):
+            return
+        self._select_module(module_id, user_initiated=True)
 
     def _on_recipe_widget_changed(self, *_):
         if self._updating_ui:
@@ -1026,22 +1072,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_data = copy.deepcopy(payload)
         return payload
 
-    def _select_module(self, module_id: str):
+    def _select_module(self, module_id: str, *, user_initiated: bool = False):
         module_id = (module_id or "uvvis").strip().lower()
         if module_id not in self._plugin_registry:
             return
         previous_state = self._updating_ui
         self._updating_ui = True
         try:
-            index = self.recipeDock.module.findText(module_id)
+            index = self.recipeDock.module.findData(
+                module_id, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index < 0:
+                index = self.recipeDock.module.findText(module_id)
             if index >= 0:
                 self.recipeDock.module.setCurrentIndex(index)
+            if self._mode_selector:
+                selector_previous = self._mode_selector.blockSignals(True)
+                try:
+                    selector_index = self._mode_selector.findData(
+                        module_id, QtCore.Qt.ItemDataRole.UserRole
+                    )
+                    if selector_index < 0:
+                        selector_index = self._mode_selector.findText(module_id)
+                    if selector_index >= 0:
+                        self._mode_selector.setCurrentIndex(selector_index)
+                finally:
+                    self._mode_selector.blockSignals(selector_previous)
         finally:
             self._updating_ui = previous_state
         self._recipe_data["module"] = module_id
         self._active_plugin_id = module_id
         if not previous_state:
             self._update_recipe_from_ui()
+        if user_initiated:
+            self.appctx.set_dirty(True)
+            self._update_action_states()
+            self._refresh_queue_metadata()
 
     def _resolve_plugin(
         self, paths: List[str], preferred: Optional[str] = None

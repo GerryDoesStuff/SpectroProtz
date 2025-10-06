@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
+from PyQt6 import QtCore
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -59,7 +60,15 @@ class RecipeEditorDock(QDockWidget):
         layout.addLayout(preset_form)
 
         self.module = QComboBox()
-        self.module.addItems(["uvvis", "ftir", "raman", "pees"])
+        self.module.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.set_available_modules(
+            [
+                ("uvvis", "uvvis"),
+                ("ftir", "ftir"),
+                ("raman", "raman"),
+                ("pees", "pees"),
+            ]
+        )
         module_form = QFormLayout()
         module_form.addRow("Module", self.module)
         layout.addLayout(module_form)
@@ -186,6 +195,37 @@ class RecipeEditorDock(QDockWidget):
         ):
             signal.connect(self._update_model_from_ui)
 
+    def set_available_modules(self, modules: list[tuple[str, str]] | None) -> None:
+        cleaned: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        if modules:
+            for module_id, label in modules:
+                raw_id = str(module_id or "").strip().lower()
+                if not raw_id or raw_id in seen:
+                    continue
+                seen.add(raw_id)
+                display = str(label or module_id or raw_id).strip() or raw_id
+                cleaned.append((raw_id, display))
+
+        if not cleaned:
+            default_id = (self.recipe.module or "uvvis").strip().lower()
+            cleaned.append((default_id, default_id))
+
+        with self._suspend_updates():
+            current_id = self.module.currentData(QtCore.Qt.ItemDataRole.UserRole)
+            if not isinstance(current_id, str) or not current_id:
+                current_id = (self.recipe.module or "uvvis").strip().lower()
+            self.module.clear()
+            for module_id, display_label in cleaned:
+                self.module.addItem(display_label, module_id)
+            index = self.module.findData(
+                current_id, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index < 0 and cleaned:
+                index = 0
+            if index >= 0:
+                self.module.setCurrentIndex(index)
+
     @contextmanager
     def _suspend_updates(self):
         self._updating = True
@@ -220,10 +260,15 @@ class RecipeEditorDock(QDockWidget):
 
     def _update_ui_from_recipe(self):
         with self._suspend_updates():
-            module = self.recipe.module
-            if module not in [self.module.itemText(i) for i in range(self.module.count())]:
-                self.module.addItem(module)
-            self.module.setCurrentText(module)
+            module = (self.recipe.module or "uvvis").strip().lower()
+            index = self.module.findData(module, QtCore.Qt.ItemDataRole.UserRole)
+            if index < 0:
+                self.module.addItem(module, module)
+                index = self.module.findData(
+                    module, QtCore.Qt.ItemDataRole.UserRole
+                )
+            if index >= 0:
+                self.module.setCurrentIndex(index)
 
             params = self.recipe.params if isinstance(self.recipe.params, dict) else {}
             smoothing = params.get("smoothing", {}) if isinstance(params.get("smoothing"), dict) else {}
@@ -325,7 +370,9 @@ class RecipeEditorDock(QDockWidget):
         drift_cfg["max_delta"] = self._parse_optional_float(self.drift_max_delta.text())
         drift_cfg["max_residual"] = self._parse_optional_float(self.drift_max_residual.text())
 
-        self.recipe.module = self.module.currentText()
+        module_id = self.module.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(module_id, str) and module_id:
+            self.recipe.module = module_id
         self.recipe.params = params
         self._mark_custom_preset()
         self._run_validation()
