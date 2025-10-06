@@ -94,6 +94,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         self.enable_manifest = bool(enable_manifest)
         self._last_calibration_results: Dict[str, Any] | None = None
         self._report_context: Dict[str, Dict[str, Any]] = {}
+        self._queue_overrides: Dict[str, Dict[str, object]] = {}
         self._reset_report_context()
 
     def _reset_report_context(self) -> None:
@@ -113,6 +114,66 @@ class UvVisPlugin(SpectroscopyPlugin):
             "analysis": {},
             "results": {},
         }
+
+    def set_queue_overrides(self, overrides: Mapping[str, Mapping[str, object]] | None) -> None:
+        normalized: Dict[str, Dict[str, object]] = {}
+        if overrides:
+            for path, values in overrides.items():
+                sanitized: Dict[str, object] = {}
+                if isinstance(values, Mapping):
+                    for key, value in values.items():
+                        if value is None:
+                            continue
+                        key_str = str(key)
+                        if not key_str:
+                            continue
+                        if isinstance(value, str):
+                            trimmed = value.strip()
+                            if not trimmed:
+                                continue
+                            if key_str == "role":
+                                sanitized[key_str] = trimmed.lower()
+                            else:
+                                sanitized[key_str] = trimmed
+                        else:
+                            sanitized[key_str] = value
+                if not sanitized:
+                    continue
+                for candidate in self._queue_override_keys(path):
+                    normalized[candidate] = dict(sanitized)
+        self._queue_overrides = normalized
+
+    def _queue_override_keys(self, path: object) -> List[str]:
+        keys: List[str] = []
+        try:
+            path_obj = Path(path)
+        except Exception:
+            text = str(path)
+            if text:
+                keys.append(text)
+            return keys
+        text = str(path_obj)
+        if text:
+            keys.append(text)
+        try:
+            resolved = path_obj.resolve()
+        except FileNotFoundError:
+            resolved = path_obj
+        except RuntimeError:
+            resolved = path_obj
+        resolved_text = str(resolved)
+        if resolved_text and resolved_text not in keys:
+            keys.append(resolved_text)
+        return keys
+
+    def _lookup_queue_override(self, path: Path) -> Optional[Dict[str, object]]:
+        if not self._queue_overrides:
+            return None
+        for key in self._queue_override_keys(path):
+            override = self._queue_overrides.get(key)
+            if override:
+                return dict(override)
+        return None
 
     @staticmethod
     def _summarise_sequence(values: Sequence[float]) -> Dict[str, float]:
@@ -312,6 +373,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta = dict(record.get("meta", {}))
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
+                override_meta = self._lookup_queue_override(path)
+                if override_meta:
+                    for key, value in override_meta.items():
+                        if key == "role" and isinstance(value, str):
+                            meta[key] = value.strip().lower()
+                        elif value is not None:
+                            meta[key] = value
                 index_hit = False
                 lookup_hit = False
                 if self.enable_manifest and manifest_index:
@@ -341,6 +409,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                         meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
                 if meta.get("role") == "blank":
+                    if not meta.get("blank_id"):
+                        meta["blank_id"] = (
+                            meta.get("sample_id")
+                            or meta.get("channel")
+                            or path.stem
+                        )
                     blank_count += 1
                 if index_hit:
                     manifest_index_hits += 1
