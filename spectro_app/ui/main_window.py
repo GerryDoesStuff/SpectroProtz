@@ -65,6 +65,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_run_controller()
 
         self._queued_paths: List[str] = []
+        self._queue_overrides: Dict[str, Dict[str, object]] = {}
         self._recipe_data: Dict[str, Any] = self._normalise_recipe_data({})
         self.fileDock.set_plugin_resolver(
             lambda paths: self._resolve_plugin(paths, self._recipe_data.get("module"))
@@ -93,6 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.inspect_requested.connect(self._on_queue_inspect_requested)
         self.fileDock.preview_requested.connect(self._on_queue_preview_requested)
         self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
+        self.fileDock.overrides_changed.connect(self._on_queue_overrides_changed)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.fileDock)
         self.recipeDock = RecipeEditorDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.recipeDock)
@@ -558,6 +560,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_result = None
         self._update_action_states()
         self.status.showMessage(f"Running {plugin.label} pipeline...")
+        if hasattr(plugin, "set_queue_overrides"):
+            overrides = self._queue_overrides if isinstance(self._queue_overrides, dict) else {}
+            try:
+                plugin.set_queue_overrides(overrides)
+            except Exception:
+                try:
+                    plugin.set_queue_overrides({})
+                except Exception:
+                    pass
         self.runctl.start(plugin, self._queued_paths, recipe_payload)
 
     def on_cancel(self):
@@ -919,6 +930,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         directory = target.parent if target.is_file() else target
         QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory.resolve())))
+
+    def _on_queue_overrides_changed(self, overrides: Dict[str, Dict[str, object]]):
+        if overrides is None:
+            self._queue_overrides = {}
+        else:
+            self._queue_overrides = {
+                str(Path(path)): dict(values)
+                for path, values in overrides.items()
+            }
+        self.appctx.set_dirty(True)
 
     def _open_file_preview(self, path: Path, title: str, max_bytes: int):
         if not path.exists():

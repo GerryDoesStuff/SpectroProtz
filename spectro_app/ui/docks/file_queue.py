@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
 
@@ -25,6 +25,7 @@ class QueueEntry:
     manifest_status: Optional[str] = None
     is_manifest: bool = False
     metadata: Dict[str, object] = field(default_factory=dict)
+    overrides: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -190,6 +191,7 @@ class FileQueueDock(QDockWidget):
     inspect_requested = QtCore.pyqtSignal(str)
     preview_requested = QtCore.pyqtSignal(str)
     locate_requested = QtCore.pyqtSignal(str)
+    overrides_changed = QtCore.pyqtSignal(dict)
 
     def __init__(
         self,
@@ -207,6 +209,8 @@ class FileQueueDock(QDockWidget):
         self.setAcceptDrops(True)
         self._plugin_resolver = plugin_resolver
         self._entries: List[QueueEntry] = []
+        self._raw_entries: List[QueueEntry] = []
+        self._overrides: Dict[str, Dict[str, object]] = {}
 
     def set_plugin_resolver(
         self, resolver: Optional[Callable[[List[str]], object]]
@@ -216,20 +220,13 @@ class FileQueueDock(QDockWidget):
     def set_entries(self, entries: List[QueueEntry]) -> None:
         selected_path = self._selected_path()
         self.list.clear()
-        self._entries = list(entries)
-        for entry in self._entries:
-            item = QtWidgets.QListWidgetItem(entry.display_name)
-            item.setData(QUEUE_ENTRY_ROLE, entry)
-            tooltip_lines = [entry.path]
-            if entry.manifest_status:
-                tooltip_lines.append(f"Manifest: {entry.manifest_status}")
-            if entry.metadata:
-                for key, value in entry.metadata.items():
-                    tooltip_lines.append(f"{key}: {value}")
-            item.setToolTip("\n".join(tooltip_lines))
-            self.list.addItem(item)
-            if selected_path and entry.path == selected_path:
-                item.setSelected(True)
+        self._raw_entries = [
+            replace(entry, metadata=dict(entry.metadata), overrides=dict(entry.overrides))
+            for entry in entries
+        ]
+        self._prune_overrides()
+        self._entries = [self._apply_overrides(entry) for entry in self._raw_entries]
+        self._refresh_list_widget(selected_path)
 
     def apply_metadata(self, entries: List[QueueEntry]) -> None:
         if not self._entries:
@@ -466,12 +463,23 @@ class FileQueueDock(QDockWidget):
         inspect_action = menu.addAction("Inspect Header…")
         preview_action = menu.addAction("Preview…")
         menu.addSeparator()
+        role_menu = menu.addMenu("Set Role")
+        auto_role_action = role_menu.addAction("Auto-detect")
+        sample_role_action = role_menu.addAction("Sample")
+        blank_role_action = role_menu.addAction("Blank…")
+        standard_role_action = role_menu.addAction("Standard")
+        edit_blank_id_action = menu.addAction("Edit Blank ID…")
+        menu.addSeparator()
         locate_action = menu.addAction("Show in File Manager")
 
         enabled = bool(selected_path)
         inspect_action.setEnabled(enabled)
         preview_action.setEnabled(enabled)
+        role_menu.setEnabled(enabled)
         locate_action.setEnabled(enabled)
+        entry = self._entry_for_path(selected_path) if selected_path else None
+        is_blank = bool(entry and (entry.role == "blank"))
+        edit_blank_id_action.setEnabled(enabled and is_blank)
 
         action = menu.exec(event.globalPos()) if menu.actions() else None
         if not action or not selected_path:
@@ -481,6 +489,16 @@ class FileQueueDock(QDockWidget):
             self.inspect_requested.emit(path)
         elif action is preview_action:
             self.preview_requested.emit(path)
+        elif action is auto_role_action:
+            self._set_role_auto(path)
+        elif action is sample_role_action:
+            self._set_role_override(path, "sample")
+        elif action is blank_role_action:
+            self._set_role_blank(path)
+        elif action is standard_role_action:
+            self._set_role_override(path, "standard")
+        elif action is edit_blank_id_action:
+            self._edit_blank_id(path)
         elif action is locate_action:
             self.locate_requested.emit(path)
 
@@ -496,3 +514,170 @@ class FileQueueDock(QDockWidget):
         if isinstance(data, str):
             return data
         return item.text()
+
+    # ------------------------------------------------------------------
+    # Override management helpers
+    def _apply_overrides(self, entry: QueueEntry) -> QueueEntry:
+        normalized = self._normalize_path(entry.path)
+        overrides = self._overrides.get(normalized)
+        if not overrides:
+            return replace(entry, overrides={})
+
+        updated = replace(entry)
+        updated.metadata = dict(entry.metadata)
+        updated.overrides = dict(overrides)
+
+        role_override = overrides.get("role")
+        if isinstance(role_override, str):
+            normalized_role = role_override.strip().lower()
+            updated.role = normalized_role or None
+            if normalized_role:
+                updated.metadata["role"] = normalized_role
+        blank_id_override = overrides.get("blank_id")
+        if isinstance(blank_id_override, str) and blank_id_override.strip():
+            updated.metadata["blank_id"] = blank_id_override.strip()
+        return updated
+
+    def _entry_for_path(self, path: Optional[str]) -> Optional[QueueEntry]:
+        if not path:
+            return None
+        for entry in self._entries:
+            if entry.path == path:
+                return entry
+        return None
+
+    def _normalize_path(self, path: str) -> str:
+        try:
+            return str(Path(path))
+        except Exception:
+            return str(path)
+
+    def _update_overrides(self, path: str, values: Dict[str, object], *, clear: Iterable[str] = ()) -> None:
+        normalized = self._normalize_path(path)
+        current = dict(self._overrides.get(normalized, {}))
+        changed = False
+
+        for key in clear:
+            if key in current:
+                current.pop(key)
+                changed = True
+
+        for key, value in values.items():
+            if value is None or (isinstance(value, str) and not value.strip()):
+                if key in current:
+                    current.pop(key)
+                    changed = True
+                continue
+            if current.get(key) != value:
+                current[key] = value
+                changed = True
+
+        if current:
+            self._overrides[normalized] = current
+        elif normalized in self._overrides:
+            self._overrides.pop(normalized, None)
+            changed = True
+
+        if changed:
+            self._emit_overrides_changed()
+        self._entries = [self._apply_overrides(entry) for entry in self._raw_entries]
+        self._refresh_list_widget()
+
+    def _refresh_list_widget(self, selected: Optional[str] = None) -> None:
+        if selected is None:
+            selected = self._selected_path()
+        self.list.clear()
+        for entry in self._entries:
+            item = QtWidgets.QListWidgetItem(entry.display_name)
+            item.setData(QUEUE_ENTRY_ROLE, entry)
+            tooltip_lines = [entry.path]
+            if entry.manifest_status:
+                tooltip_lines.append(f"Manifest: {entry.manifest_status}")
+            if entry.metadata:
+                for key, value in entry.metadata.items():
+                    tooltip_lines.append(f"{key}: {value}")
+            if entry.overrides:
+                for key, value in entry.overrides.items():
+                    tooltip_lines.append(f"Override {key}: {value}")
+            item.setToolTip("\n".join(tooltip_lines))
+            self.list.addItem(item)
+            if selected and entry.path == selected:
+                item.setSelected(True)
+
+    def _set_role_auto(self, path: str) -> None:
+        self._update_overrides(path, {}, clear=("role", "blank_id"))
+
+    def _set_role_override(self, path: str, role: str) -> None:
+        normalized_role = role.strip().lower()
+        clears = ("blank_id",) if normalized_role != "blank" else ()
+        self._update_overrides(path, {"role": normalized_role}, clear=clears)
+
+    def _set_role_blank(self, path: str) -> None:
+        entry = self._entry_for_path(path)
+        current_override = self._overrides.get(self._normalize_path(path), {})
+        default_blank = (
+            current_override.get("blank_id")
+            or (entry.metadata.get("blank_id") if entry else None)
+        )
+        if not default_blank:
+            try:
+                default_blank = Path(path).stem
+            except Exception:
+                default_blank = ""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Set Blank Identifier",
+            "Blank identifier (used to pair samples with this blank):",
+            text=str(default_blank or ""),
+        )
+        if not ok:
+            return
+        value = text.strip()
+        if not value and default_blank:
+            value = str(default_blank)
+        overrides = {"role": "blank"}
+        clears: tuple[str, ...] = ()
+        if value:
+            overrides["blank_id"] = value
+        else:
+            clears = ("blank_id",)
+        self._update_overrides(path, overrides, clear=clears)
+
+    def _edit_blank_id(self, path: str) -> None:
+        entry = self._entry_for_path(path)
+        if not entry:
+            return
+        current = (
+            self._overrides.get(self._normalize_path(path), {}).get("blank_id")
+            or entry.metadata.get("blank_id")
+            or ""
+        )
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Edit Blank Identifier",
+            "Blank identifier (used to pair samples with this blank):",
+            text=str(current or ""),
+        )
+        if not ok:
+            return
+        value = text.strip()
+        overrides = {"role": "blank"}
+        clears: tuple[str, ...] = ()
+        if value:
+            overrides["blank_id"] = value
+        else:
+            clears = ("blank_id",)
+        self._update_overrides(path, overrides, clear=clears)
+
+    def _prune_overrides(self) -> None:
+        valid_paths = {self._normalize_path(entry.path) for entry in self._raw_entries}
+        removed = [key for key in self._overrides if key not in valid_paths]
+        if not removed:
+            return
+        for key in removed:
+            self._overrides.pop(key, None)
+        self._emit_overrides_changed()
+
+    def _emit_overrides_changed(self) -> None:
+        payload = {path: dict(values) for path, values in self._overrides.items()}
+        self.overrides_changed.emit(payload)
