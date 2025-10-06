@@ -170,7 +170,6 @@ class RecipeEditorDock(QDockWidget):
         self._refresh_preset_list()
         self._connect_signals()
         self._update_ui_from_recipe()
-        self._run_validation()
 
     def _connect_signals(self):
         self.load_preset_button.clicked.connect(self._load_selected_preset)
@@ -248,7 +247,6 @@ class RecipeEditorDock(QDockWidget):
         else:
             raise TypeError("Recipe data must be a Recipe instance or mapping")
         self._update_ui_from_recipe()
-        self._run_validation()
 
     def recipe_dict(self) -> dict[str, object]:
         params = self.recipe.params if isinstance(self.recipe.params, dict) else {}
@@ -304,13 +302,19 @@ class RecipeEditorDock(QDockWidget):
             self.drift_max_delta.setText(self._format_optional(drift_cfg.get("max_delta")))
             self.drift_max_residual.setText(self._format_optional(drift_cfg.get("max_residual")))
 
+        self._sync_recipe_from_ui()
+
     def _format_optional(self, value) -> str:
         if value is None:
             return ""
         return str(value)
 
-    def _update_model_from_ui(self):
-        if self._updating:
+    def _sync_recipe_from_ui(self) -> None:
+        with self._suspend_updates():
+            self._update_model_from_ui(force=True)
+
+    def _update_model_from_ui(self, *_, force: bool = False, run_validation: bool = True):
+        if self._updating and not force:
             return
 
         params_source = self.recipe.params if isinstance(self.recipe.params, dict) else {}
@@ -375,7 +379,8 @@ class RecipeEditorDock(QDockWidget):
             self.recipe.module = module_id
         self.recipe.params = params
         self._mark_custom_preset()
-        self._run_validation()
+        if run_validation:
+            self._run_validation()
 
     def _parse_optional_float(self, text: str):
         value = text.strip()
