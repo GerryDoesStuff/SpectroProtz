@@ -1102,7 +1102,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_result = result
             self.previewDock.show_batch_result(result)
             self.qcDock.show_qc_table(result.qc_table)
+            narrative_displayed = False
+            if result.report_text:
+                for line in result.report_text.splitlines():
+                    self.loggerDock.append_line(line)
+                narrative_displayed = True
             if result.audit:
+                if narrative_displayed:
+                    self.loggerDock.append_line("")
                 self.loggerDock.stream_lines(result.audit)
             else:
                 self.loggerDock.append_line("No audit messages were produced.")

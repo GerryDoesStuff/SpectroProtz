@@ -148,6 +148,9 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert result.figures, "Export should include generated plots"
     assert "qc_summary_noise.png" in result.figures
     assert any("Workbook written" in entry for entry in result.audit)
+    assert result.report_text, "Narrative report text should be populated"
+    for heading in ("Ingestion", "Pre-processing", "Analysis", "Results"):
+        assert heading in result.report_text
 
 
 def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):

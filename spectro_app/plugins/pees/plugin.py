@@ -19,4 +19,10 @@ class PeesPlugin(SpectroscopyPlugin):
         return specs
 
     def export(self, specs, qc, recipe):
-        return BatchResult(processed=specs, qc_table=qc, figures={}, audit=["PEES export stub"])
+        return BatchResult(
+            processed=specs,
+            qc_table=qc,
+            figures={},
+            audit=["PEES export stub"],
+            report_text=None,
+        )

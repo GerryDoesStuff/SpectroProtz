@@ -14,6 +14,7 @@ class BatchResult:
     qc_table: List[Dict[str, Any]]
     figures: Dict[str, bytes]       # PNG/SVG bytes
     audit: List[str]
+    report_text: Optional[str] = None
 
 class SpectroscopyPlugin:
     id: str = "base"
