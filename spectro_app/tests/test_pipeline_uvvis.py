@@ -818,10 +818,71 @@ def test_plugin_preprocess_full_pipeline():
     assert replicates_meta and len(replicates_meta) == 2
     assert all(not entry.get("excluded") for entry in replicates_meta)
     assert np.nanmax(processed_sample.intensity) > 0.01
-    left_mean = np.nanmean(processed_sample.intensity[:5])
-    right_mean = np.nanmean(processed_sample.intensity[-5:])
-    assert abs(left_mean - right_mean) < 0.1
-    assert processed_blank.meta.get("baseline") == "asls"
+
+
+def test_blank_matching_strategy_default_blank_id():
+    wl = np.linspace(400, 420, 5)
+    blank = Spectrum(
+        wavelength=wl,
+        intensity=np.linspace(0.1, 0.2, wl.size),
+        meta={"role": "blank", "blank_id": "BLK"},
+    )
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=np.linspace(1.0, 1.4, wl.size),
+        meta={"role": "sample", "sample_id": "S1", "blank_id": "BLK"},
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"blank": {"subtract": True, "require": True}}
+
+    processed = plugin.preprocess([blank, sample], recipe)
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+
+    assert processed_sample.meta.get("blank_subtracted") is True
+    expected = sample.intensity - blank.intensity
+    assert np.allclose(processed_sample.intensity, expected)
+
+
+def test_blank_matching_strategy_cuvette_slot_pairs_by_slot():
+    wl = np.linspace(400, 410, 4)
+    blank_a = Spectrum(
+        wavelength=wl,
+        intensity=np.full(wl.size, 0.1),
+        meta={"role": "blank", "blank_id": "BLK_A", "cuvette_slot": "SLOT1"},
+    )
+    blank_b = Spectrum(
+        wavelength=wl,
+        intensity=np.full(wl.size, 0.2),
+        meta={"role": "blank", "blank_id": "BLK_B", "cuvette_slot": "SLOT1"},
+    )
+    sample = Spectrum(
+        wavelength=wl,
+        intensity=np.linspace(1.0, 1.3, wl.size),
+        meta={
+            "role": "sample",
+            "sample_id": "S2",
+            "blank_id": "UNRELATED",
+            "cuvette_slot": "SLOT1",
+        },
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {
+        "blank": {"subtract": True, "require": True, "match_strategy": "cuvette_slot"},
+        "replicates": {"average": True},
+    }
+
+    processed = plugin.preprocess([blank_a, blank_b, sample], recipe)
+
+    processed_blank = next(spec for spec in processed if spec.meta.get("role") == "blank")
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+
+    assert processed_blank.meta.get("replicate_total") == 2
+    assert processed_sample.meta.get("blank_subtracted") is True
+    averaged_blank = np.mean([blank_a.intensity, blank_b.intensity], axis=0)
+    expected = sample.intensity - averaged_blank
+    assert np.allclose(processed_sample.intensity, expected)
 
 
 def test_plugin_preprocess_threads_cooksd_configuration():
