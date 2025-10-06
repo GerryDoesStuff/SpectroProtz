@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -66,11 +66,19 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
         self._stage_controls: Dict[str, QtWidgets.QCheckBox] = {}
         self._stage_datasets: Dict[str, List[_StageDataset]] = {}
+        self._all_stage_datasets: Dict[str, List[_StageDataset]] = {}
         self._curve_items: Dict[str, List[pg.PlotDataItem]] = {}
         self._visible_stages: set[str] = set()
         self._color_map: Dict[str, QtGui.QColor] = {}
         self._legend: Optional[pg.LegendItem] = None
         self._last_cursor_result: Optional[tuple[_StageDataset, int, float, float]] = None
+
+        self._sample_labels: List[str] = []
+        self._single_mode: bool = False
+        self._single_window_start: int = 0
+        self._single_window_size: int = 1
+
+        self._total_spectra: int = 0
 
         self._build_ui()
 
@@ -82,23 +90,64 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         layout.setSpacing(0)
 
         controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QHBoxLayout(controls)
+        controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(12, 8, 12, 4)
-        controls_layout.setSpacing(8)
+        controls_layout.setSpacing(4)
+
+        stages_row = QtWidgets.QHBoxLayout()
+        stages_row.setSpacing(8)
 
         for key in self.STAGE_LABELS:
             checkbox = QtWidgets.QCheckBox(self.STAGE_LABELS[key])
             checkbox.setEnabled(False)
             checkbox.toggled.connect(lambda checked, stage=key: self._on_stage_toggled(stage, checked))
-            controls_layout.addWidget(checkbox)
+            stages_row.addWidget(checkbox)
             self._stage_controls[key] = checkbox
 
-        controls_layout.addStretch(1)
+        stages_row.addStretch(1)
 
         self.reset_button = QtWidgets.QToolButton()
         self.reset_button.setText("Reset view")
         self.reset_button.clicked.connect(self._reset_view)
-        controls_layout.addWidget(self.reset_button)
+        stages_row.addWidget(self.reset_button)
+
+        controls_layout.addLayout(stages_row)
+
+        navigation_row = QtWidgets.QHBoxLayout()
+        navigation_row.setSpacing(8)
+
+        self.view_mode_button = QtWidgets.QToolButton()
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.view_mode_button.toggled.connect(self._on_view_mode_toggled)
+        navigation_row.addWidget(self.view_mode_button)
+
+        self.previous_button = QtWidgets.QToolButton()
+        self.previous_button.setText("Previous")
+        self.previous_button.clicked.connect(self._on_previous_clicked)
+        navigation_row.addWidget(self.previous_button)
+
+        self.next_button = QtWidgets.QToolButton()
+        self.next_button.setText("Next")
+        self.next_button.clicked.connect(self._on_next_clicked)
+        navigation_row.addWidget(self.next_button)
+
+        self.remove_button = QtWidgets.QToolButton()
+        self.remove_button.setText("Remove spectrum")
+        self.remove_button.clicked.connect(self._on_remove_clicked)
+        navigation_row.addWidget(self.remove_button)
+
+        self.add_button = QtWidgets.QToolButton()
+        self.add_button.setText("Add spectrum")
+        self.add_button.clicked.connect(self._on_add_clicked)
+        navigation_row.addWidget(self.add_button)
+
+        navigation_row.addStretch(1)
+
+        self.selection_label = QtWidgets.QLabel()
+        navigation_row.addWidget(self.selection_label)
+
+        controls_layout.addLayout(navigation_row)
 
         layout.addWidget(controls)
 
@@ -133,6 +182,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved
         )
+
+        self._update_navigation_ui()
 
     # ------------------------------------------------------------------
     # Public API
@@ -201,6 +252,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     any_data = True
 
         if not any_data:
+            self._all_stage_datasets = {stage: [] for stage in self.STAGE_LABELS}
+            self._sample_labels = []
+            self._total_spectra = 0
+            self._single_mode = False
             for checkbox in self._stage_controls.values():
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
@@ -209,9 +264,14 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self.cursor_label.setText("λ: ––– | I: –––")
             self.plot.setTitle("No spectra available")
             self.reset_button.setEnabled(False)
+            self._update_navigation_ui()
             return False
 
         if not has_stepwise:
+            self._all_stage_datasets = {stage: [] for stage in self.STAGE_LABELS}
+            self._sample_labels = []
+            self._total_spectra = 0
+            self._single_mode = False
             for checkbox in self._stage_controls.values():
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
@@ -220,52 +280,224 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self.cursor_label.setText("λ: ––– | I: –––")
             self.plot.setTitle("Stepwise spectra unavailable; use exported overlays.")
             self.reset_button.setEnabled(False)
+            self._update_navigation_ui()
             return False
 
         if smoothed_fallbacks:
             stage_datasets.setdefault("smoothed", []).extend(smoothed_fallbacks)
 
-        self._stage_datasets = stage_datasets
+        self._all_stage_datasets = {stage: list(datasets) for stage, datasets in stage_datasets.items()}
         self.reset_button.setEnabled(True)
 
-        # Build a colour palette per sample label
-        labels: List[str] = []
-        for datasets in self._stage_datasets.values():
-            for dataset in datasets:
-                if dataset.label not in labels:
-                    labels.append(dataset.label)
-        hues = max(len(labels), 8)
-        for idx, label in enumerate(labels):
-            color = pg.intColor(idx, hues=hues, values=255)
-            self._color_map[label] = pg.mkColor(color)
+        self._sample_labels = self._collect_labels(self._all_stage_datasets)
+        self._total_spectra = len(self._sample_labels)
 
-        for stage, checkbox in self._stage_controls.items():
-            has_stage = bool(self._stage_datasets.get(stage))
-            checkbox.blockSignals(True)
-            checkbox.setEnabled(has_stage)
-            checkbox.setChecked(False)
-            checkbox.blockSignals(False)
-            self._curve_items[stage] = []
+        self._color_map.clear()
+        if self._sample_labels:
+            hues = max(len(self._sample_labels), 8)
+            for idx, label in enumerate(self._sample_labels):
+                color = pg.intColor(idx, hues=hues, values=255)
+                self._color_map[label] = pg.mkColor(color)
 
-        default_stage = self._choose_default_stage()
-        if default_stage:
-            self._stage_controls[default_stage].setChecked(True)
-            self._visible_stages.add(default_stage)
+        if self._total_spectra == 0:
+            self._single_window_start = 0
+            self._single_window_size = 1
+            self._single_mode = False
+        else:
+            self._single_window_start %= self._total_spectra
+            self._single_window_size = min(max(1, self._single_window_size), self._total_spectra)
+            self._single_mode = self.view_mode_button.isChecked()
 
         self.plot.setTitle("")
-        self._render_curves()
-        self._reset_view()
+        self._apply_view_mode(initial=True)
         self.cursor_label.setText("λ: ––– | I: –––")
         return True
 
     # ------------------------------------------------------------------
     # Internal helpers
-    def _choose_default_stage(self) -> Optional[str]:
-        available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
+    def _choose_default_stage(self, available: Optional[Set[str]] = None) -> Optional[str]:
+        if available is None:
+            available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
         for stage in self.DEFAULT_STAGE_PRIORITY:
             if stage in available:
                 return stage
         return next(iter(available), None)
+
+    def _collect_labels(self, stage_datasets: Dict[str, List[_StageDataset]]) -> List[str]:
+        labels: List[str] = []
+        for datasets in stage_datasets.values():
+            for dataset in datasets:
+                if dataset.label not in labels:
+                    labels.append(dataset.label)
+        return labels
+
+    def _current_single_labels(self) -> List[str]:
+        if not self._sample_labels or self._total_spectra == 0:
+            return []
+        labels: List[str] = []
+        total = self._total_spectra
+        start = self._single_window_start % total
+        for offset in range(min(self._single_window_size, total)):
+            index = (start + offset) % total
+            label = self._sample_labels[index]
+            labels.append(label)
+        return labels
+
+    def _apply_view_mode(self, *, initial: bool = False) -> None:
+        if self._total_spectra == 0:
+            self._single_mode = False
+
+        stage_datasets: Dict[str, List[_StageDataset]] = {stage: [] for stage in self.STAGE_LABELS}
+        if self._single_mode and self._total_spectra > 0:
+            selected_labels = set(self._current_single_labels())
+            for stage in self.STAGE_LABELS:
+                stage_datasets[stage] = [
+                    dataset
+                    for dataset in self._all_stage_datasets.get(stage, [])
+                    if dataset.label in selected_labels
+                ]
+        else:
+            for stage in self.STAGE_LABELS:
+                stage_datasets[stage] = list(self._all_stage_datasets.get(stage, []))
+
+        self._stage_datasets = stage_datasets
+        self._rebuild_plot(initial=initial)
+        self._update_navigation_ui()
+
+    def _rebuild_plot(self, *, initial: bool) -> None:
+        for curves in self._curve_items.values():
+            for curve in curves:
+                try:
+                    self.plot.removeItem(curve)
+                except Exception:
+                    pass
+        self._curve_items = {stage: [] for stage in self.STAGE_LABELS}
+
+        self._update_stage_controls(initial=initial)
+        self._render_curves()
+        self._sync_visible_stages()
+        self._update_cursor_label(None)
+        if initial:
+            self._reset_view()
+
+    def _update_stage_controls(self, *, initial: bool) -> None:
+        available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
+        desired_visible: Set[str] = set()
+        default_stage = self._choose_default_stage(available) if initial else None
+
+        for stage, checkbox in self._stage_controls.items():
+            has_stage = stage in available
+            checkbox.blockSignals(True)
+            if not has_stage:
+                checkbox.setChecked(False)
+            elif initial:
+                should_check = default_stage is not None and stage == default_stage
+                checkbox.setChecked(should_check)
+                if should_check:
+                    desired_visible.add(stage)
+            else:
+                should_check = checkbox.isChecked() or stage in self._visible_stages
+                should_check = should_check and has_stage
+                checkbox.setChecked(should_check)
+                if should_check:
+                    desired_visible.add(stage)
+            checkbox.setEnabled(has_stage)
+            checkbox.blockSignals(False)
+
+        if not desired_visible and available:
+            fallback = self._choose_default_stage(available)
+            if fallback:
+                checkbox = self._stage_controls[fallback]
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+                desired_visible.add(fallback)
+
+        self._visible_stages = desired_visible
+
+    def _sync_visible_stages(self) -> None:
+        self._visible_stages = {
+            stage
+            for stage, checkbox in self._stage_controls.items()
+            if checkbox.isEnabled() and checkbox.isChecked()
+        }
+        for stage, curves in self._curve_items.items():
+            visible = stage in self._visible_stages
+            for curve in curves:
+                curve.setVisible(visible)
+
+    def _update_navigation_ui(self) -> None:
+        total = self._total_spectra
+        is_single = self._single_mode and total > 0
+
+        self.view_mode_button.blockSignals(True)
+        self.view_mode_button.setChecked(is_single)
+        self.view_mode_button.blockSignals(False)
+        self.view_mode_button.setEnabled(total > 0)
+        self.view_mode_button.setText("Show all spectra" if is_single else "Single spectrum view")
+
+        self.previous_button.setEnabled(is_single and total > 1)
+        self.next_button.setEnabled(is_single and total > 1)
+        self.add_button.setEnabled(is_single and self._single_window_size < total)
+        self.remove_button.setEnabled(is_single and self._single_window_size > 1)
+
+        if is_single:
+            labels = self._current_single_labels()
+            if not labels:
+                summary = f"Showing 0 of {total} spectra"
+            elif len(labels) == 1:
+                summary = f"Showing 1 of {total}: {labels[0]}"
+            else:
+                summary = f"Showing {len(labels)} of {total}: {', '.join(labels)}"
+        else:
+            if total == 0:
+                summary = "No spectra available"
+            elif total == 1:
+                summary = "Showing the only spectrum"
+            else:
+                summary = f"Showing all {total} spectra"
+
+        self.selection_label.setText(summary)
+
+    def _on_view_mode_toggled(self, checked: bool) -> None:
+        if self._total_spectra == 0:
+            self.view_mode_button.blockSignals(True)
+            self.view_mode_button.setChecked(False)
+            self.view_mode_button.blockSignals(False)
+            self._single_mode = False
+            self._update_navigation_ui()
+            return
+
+        self._single_mode = checked
+        if self._single_mode:
+            self._single_window_size = min(max(1, self._single_window_size), self._total_spectra)
+        self._apply_view_mode()
+
+    def _on_previous_clicked(self) -> None:
+        if not self._single_mode or self._total_spectra <= 1:
+            return
+        self._single_window_start = (self._single_window_start - 1) % self._total_spectra
+        self._apply_view_mode()
+
+    def _on_next_clicked(self) -> None:
+        if not self._single_mode or self._total_spectra <= 1:
+            return
+        self._single_window_start = (self._single_window_start + 1) % self._total_spectra
+        self._apply_view_mode()
+
+    def _on_add_clicked(self) -> None:
+        if not self._single_mode or self._total_spectra == 0:
+            return
+        if self._single_window_size >= self._total_spectra:
+            return
+        self._single_window_size += 1
+        self._apply_view_mode()
+
+    def _on_remove_clicked(self) -> None:
+        if not self._single_mode or self._single_window_size <= 1:
+            return
+        self._single_window_size -= 1
+        self._apply_view_mode()
 
     def _render_curves(self) -> None:
         if self._legend is not None:
