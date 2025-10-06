@@ -61,7 +61,7 @@
 ## Replicate Management
 
 ### `replicate_key`
-- Builds a `(role, identifier)` tuple so blanks and samples group independently even when metadata is sparse.
+- Builds a `(role, identifier)` tuple so blanks and samples group independently even when metadata is sparse, defaulting to blank identifiers unless a slot-based strategy is supplied via the higher-level helpers.
 
 ### `_replicate_feature_matrix`
 - Generates robust summary features (bias, mean, spread, slope, energy, area) for each replicate, normalising feature columns to stabilise downstream scoring.
@@ -70,12 +70,24 @@
 - Fills missing intensity values, derives the replicate feature matrix, computes leverage, fits a multivariate least squares model, and produces Cook’s distance scores for outlier screening.
 
 ### `average_replicates`
-- Groups spectra by replicate key, applies optional MAD- or Cook’s-distance outlier rejection, averages the retained traces, and records provenance, outlier metrics, and segment metadata for each group.
+- Groups spectra by replicate key, applies optional MAD- or Cook’s-distance outlier rejection, averages the retained traces, and records provenance, outlier metrics, and segment metadata for each group. Callers may supply a custom key function so blanks can be grouped using cuvette slots instead of legacy identifiers.
+
+### `blank_match_identifier`
+- Returns the primary identifier for a blank spectrum according to the configured match strategy, preferring cuvette slots when requested and gracefully falling back to legacy identifiers when slot metadata is absent.
+
+### `blank_match_identifiers`
+- Enumerates all viable identifiers for matching a blank (slot, explicit blank ID, sample ID, channel), enabling downstream lookups to support both slot-based and legacy association in a single pass.
+
+### `blank_replicate_key`
+- Builds replicate keys for blanks using the active match strategy so that averaging collapses slot-based replicates even when their `blank_id` values differ.
+
+### `normalize_blank_match_strategy`
+- Canonicalises user-provided strategy strings (e.g. `"slot"`, `"cuvette-slot"`) into the supported tokens (`"blank_id"` or `"cuvette_slot"`).
 
 ## Blank Identification
 
 ### `blank_identifier`
-- Emits a stable identifier for blank spectra based on blank, sample, or channel metadata when the role is “blank,” returning `None` otherwise.
+- Emits a stable identifier for blank spectra based on the selected match strategy—preferring cuvette slots when enabled and otherwise using blank/sample/channel metadata—returning `None` for non-blank roles.
 
 ## Intensity Mode Harmonisation
 

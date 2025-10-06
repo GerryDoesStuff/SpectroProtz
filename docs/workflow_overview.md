@@ -111,10 +111,14 @@ The preprocessing stage honours the following recipe keys:
   `ValueError`s.【F:spectro_app/plugins/uvvis/plugin.py†L80-L188】【F:spectro_app/plugins/uvvis/plugin.py†L927-L978】
 - **Blank handling** – `blank.subtract`, `blank.require`,
   `blank.validate_metadata`, `blank.default`/`blank.fallback`,
-  `blank.max_time_delta_minutes` (default 240 minutes) and
-  `blank.pathlength_tolerance_cm` (default 0.01 cm) govern subtraction and
-  guard-rails. Time windows should reflect instrument drift; stick to
-  sub-day spans unless long acquisitions demand otherwise.【F:spectro_app/plugins/uvvis/plugin.py†L60-L78】【F:spectro_app/plugins/uvvis/plugin.py†L978-L1050】
+  `blank.match_strategy`, `blank.max_time_delta_minutes`
+  (default 240 minutes) and `blank.pathlength_tolerance_cm` (default 0.01 cm)
+  govern subtraction and guard-rails. Time windows should reflect instrument
+  drift; stick to sub-day spans unless long acquisitions demand otherwise.
+  Set `blank.match_strategy` to `cuvette_slot` when blanks should be grouped
+  and matched via `meta["cuvette_slot"]`; the pipeline automatically falls
+  back to legacy blank identifiers when slot metadata is unavailable so
+  existing recipes continue to work.【F:spectro_app/plugins/uvvis/plugin.py†L60-L78】【F:spectro_app/plugins/uvvis/plugin.py†L978-L1268】
 - **Join detection/correction** – `join.enabled`, `join.window`,
   `join.threshold`, `join.windows`, `join.offset_bounds`, `join.min_offset` and
   `join.max_offset` manage detector stitching. Windows are provided per

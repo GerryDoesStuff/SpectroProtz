@@ -123,10 +123,15 @@ class RecipeEditorDock(QDockWidget):
         self.blank_fallback = QLineEdit()
         self.blank_fallback.setPlaceholderText("Optional fallback/default blank path")
         self.blank_fallback.setClearButtonEnabled(True)
+        self.blank_match_strategy = QComboBox()
+        self.blank_match_strategy.addItem("Match by blank identifier", "blank_id")
+        self.blank_match_strategy.addItem("Match by cuvette slot", "cuvette_slot")
+        self.blank_match_strategy.setToolTip("Choose how blanks are paired with samples")
 
         blank_form.addRow(self.blank_subtract)
         blank_form.addRow(self.blank_require)
         blank_form.addRow("Fallback", self.blank_fallback)
+        blank_form.addRow("Match strategy", self.blank_match_strategy)
         layout.addWidget(blank_group)
 
         # --- QC / Drift ---
@@ -185,6 +190,7 @@ class RecipeEditorDock(QDockWidget):
             self.blank_subtract.toggled,
             self.blank_require.toggled,
             self.blank_fallback.textChanged,
+            self.blank_match_strategy.currentIndexChanged,
             self.drift_enable.toggled,
             self.drift_window_min.textChanged,
             self.drift_window_max.textChanged,
@@ -291,6 +297,20 @@ class RecipeEditorDock(QDockWidget):
             self.blank_require.setChecked(bool(blank_cfg.get("require", subtract)))
             fallback_value = blank_cfg.get("default", blank_cfg.get("fallback"))
             self.blank_fallback.setText(self._format_optional(fallback_value))
+            match_strategy = str(blank_cfg.get("match_strategy") or "blank_id").strip().lower()
+            match_strategy = match_strategy.replace("-", "_")
+            if match_strategy not in {"blank_id", "cuvette_slot"}:
+                match_strategy = "blank_id"
+            index = self.blank_match_strategy.findData(
+                match_strategy, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index < 0:
+                self.blank_match_strategy.addItem(match_strategy, match_strategy)
+                index = self.blank_match_strategy.findData(
+                    match_strategy, QtCore.Qt.ItemDataRole.UserRole
+                )
+            if index >= 0:
+                self.blank_match_strategy.setCurrentIndex(index)
 
             qc_cfg = params.get("qc", {}) if isinstance(params.get("qc"), dict) else {}
             drift_cfg = qc_cfg.get("drift", {}) if isinstance(qc_cfg.get("drift"), dict) else {}
@@ -362,6 +382,14 @@ class RecipeEditorDock(QDockWidget):
         else:
             blank_cfg.pop("default", None)
             blank_cfg.pop("fallback", None)
+        match_data = self.blank_match_strategy.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        match_value = str(match_data).strip().lower().replace("-", "_") if match_data is not None else ""
+        if match_value not in {"blank_id", "cuvette_slot"}:
+            match_value = "blank_id"
+        if match_value:
+            blank_cfg["match_strategy"] = match_value
+        else:
+            blank_cfg.pop("match_strategy", None)
 
         qc_cfg = self._ensure_dict(params, "qc")
         drift_cfg = self._ensure_dict(qc_cfg, "drift")

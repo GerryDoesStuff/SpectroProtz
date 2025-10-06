@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -23,6 +23,10 @@ __all__ = [
     "average_replicates",
     "replicate_key",
     "blank_identifier",
+    "blank_match_identifier",
+    "blank_match_identifiers",
+    "blank_replicate_key",
+    "normalize_blank_match_strategy",
 ]
 
 
@@ -1145,12 +1149,81 @@ def smooth_spectrum(
     )
 
 
+def normalize_blank_match_strategy(strategy: object | None) -> str:
+    if isinstance(strategy, str):
+        text = strategy.strip().lower().replace("-", "_")
+    else:
+        text = ""
+    if text in {"cuvette_slot", "slot", "cuvette"}:
+        return "cuvette_slot"
+    return "blank_id"
+
+
+def _coerce_identifier(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def blank_match_identifiers(spec: Spectrum, strategy: str | None = None) -> List[str]:
+    role = str(spec.meta.get("role", "sample"))
+    if role != "blank":
+        return []
+
+    canonical = normalize_blank_match_strategy(strategy)
+    identifiers: List[str] = []
+
+    if canonical == "cuvette_slot":
+        slot = _coerce_identifier(spec.meta.get("cuvette_slot"))
+        if slot is not None:
+            identifiers.append(slot)
+
+    for candidate in (
+        spec.meta.get("blank_id"),
+        spec.meta.get("sample_id"),
+        spec.meta.get("channel"),
+    ):
+        coerced = _coerce_identifier(candidate)
+        if coerced is None:
+            continue
+        if coerced not in identifiers:
+            identifiers.append(coerced)
+
+    return identifiers
+
+
+def blank_match_identifier(spec: Spectrum, strategy: str | None = None) -> str | None:
+    identifiers = blank_match_identifiers(spec, strategy)
+    return identifiers[0] if identifiers else None
+
+
+def blank_replicate_key(spec: Spectrum, strategy: str | None = None) -> Tuple[str, str]:
+    role = str(spec.meta.get("role", "sample"))
+    if role != "blank":
+        return replicate_key(spec)
+
+    identifiers = blank_match_identifiers(spec, strategy)
+    ident: str | None
+    if identifiers:
+        ident = identifiers[0]
+    else:
+        ident = None
+    if ident is None:
+        ident = f"blank_{id(spec)}"
+    return "blank", ident
+
+
 def replicate_key(spec: Spectrum) -> Tuple[str, str]:
     role = str(spec.meta.get("role", "sample"))
     if role == "blank":
-        ident = spec.meta.get("blank_id") or spec.meta.get("sample_id") or spec.meta.get("channel")
+        ident = blank_match_identifier(spec)
     else:
-        ident = spec.meta.get("sample_id") or spec.meta.get("channel") or spec.meta.get("id")
+        ident = _coerce_identifier(spec.meta.get("sample_id"))
+        if ident is None:
+            ident = _coerce_identifier(spec.meta.get("channel"))
+        if ident is None:
+            ident = _coerce_identifier(spec.meta.get("id"))
     if ident is None:
         ident = f"{role}_{id(spec)}"
     return role, str(ident)
@@ -1267,6 +1340,7 @@ def average_replicates(
     *,
     return_mapping: bool = False,
     outlier: Dict[str, object] | bool | None = None,
+    key_func: Callable[[Spectrum], Tuple[str, str]] | None = None,
 ) -> Tuple[List[Spectrum], Dict[Tuple[str, str], Spectrum]] | List[Spectrum]:
     """Average replicate spectra with optional outlier rejection.
 
@@ -1301,7 +1375,7 @@ def average_replicates(
 
     groups: "OrderedDict[Tuple[str, str], List[Spectrum]]" = OrderedDict()
     for spec in specs:
-        key = replicate_key(spec)
+        key = key_func(spec) if key_func is not None else replicate_key(spec)
         groups.setdefault(key, []).append(spec)
 
     outputs: List[Spectrum] = []
@@ -1419,9 +1493,8 @@ def average_replicates(
     return outputs
 
 
-def blank_identifier(spec: Spectrum) -> str | None:
-    role = spec.meta.get("role")
+def blank_identifier(spec: Spectrum, strategy: str | None = None) -> str | None:
+    role = str(spec.meta.get("role", "sample"))
     if role != "blank":
         return None
-    ident = spec.meta.get("blank_id") or spec.meta.get("sample_id") or spec.meta.get("channel")
-    return str(ident) if ident is not None else None
+    return blank_match_identifier(spec, strategy)

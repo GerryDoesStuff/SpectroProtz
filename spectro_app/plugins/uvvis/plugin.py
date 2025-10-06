@@ -1076,7 +1076,14 @@ class UvVisPlugin(SpectroscopyPlugin):
             domain_cfg = dict(domain_cfg_raw)
         else:
             raise TypeError("Domain configuration must be a mapping")
-        blank_cfg = recipe.get("blank", {})
+        blank_cfg_raw = recipe.get("blank", {})
+        if isinstance(blank_cfg_raw, Mapping):
+            blank_cfg = dict(blank_cfg_raw)
+        else:
+            blank_cfg = {}
+        match_strategy = pipeline.normalize_blank_match_strategy(
+            blank_cfg.get("match_strategy")
+        )
         baseline_cfg = recipe.get("baseline", {})
         join_cfg = dict(recipe.get("join", {}))
         despike_cfg = recipe.get("despike", {})
@@ -1096,6 +1103,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             "require": bool(blank_cfg.get("require", blank_cfg.get("subtract", blank_cfg.get("enabled", True)))),
             "default_blank": blank_cfg.get("default") or blank_cfg.get("fallback"),
             "validate_metadata": bool(blank_cfg.get("validate_metadata", True)),
+            "match_strategy": match_strategy,
         }
         pre_ctx["baseline"] = {
             "method": baseline_cfg.get("method"),
@@ -1154,6 +1162,12 @@ class UvVisPlugin(SpectroscopyPlugin):
         average_replicates = bool(replicate_cfg.get("average", True))
         outlier_cfg = replicate_cfg.get("outlier")
 
+        def _normalize_identifier(value: object | None) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
         stage_one: list[Spectrum] = []
         for spec in specs:
             effective_domain = self._effective_domain(domain_cfg, spec)
@@ -1200,16 +1214,24 @@ class UvVisPlugin(SpectroscopyPlugin):
                 blanks_stage,
                 return_mapping=True,
                 outlier=outlier_cfg,
+                key_func=lambda spec, strategy=match_strategy: pipeline.blank_replicate_key(
+                    spec, strategy
+                ),
             )
         else:
             blanks_avg = blanks_stage
-            blank_map_by_key = {pipeline.replicate_key(b): b for b in blanks_stage}
+            blank_map_by_key = {
+                pipeline.blank_replicate_key(b, match_strategy): b for b in blanks_stage
+            }
 
         blank_lookup: dict[str, Spectrum] = {}
         for blank_spec in blanks_avg:
-            ident = pipeline.blank_identifier(blank_spec)
-            if ident:
-                blank_lookup[ident] = blank_spec
+            identifiers = pipeline.blank_match_identifiers(blank_spec, match_strategy)
+            if not identifiers:
+                continue
+            for ident in identifiers:
+                if ident not in blank_lookup:
+                    blank_lookup[ident] = blank_spec
 
         subtract_blank = blank_cfg.get("subtract", blank_cfg.get("enabled", True))
         require_blank = blank_cfg.get("require", subtract_blank)
@@ -1221,12 +1243,28 @@ class UvVisPlugin(SpectroscopyPlugin):
         fallback_blank = blank_cfg.get("default") or blank_cfg.get("fallback")
 
         processed_samples: list[Spectrum] = []
+        fallback_identifier = _normalize_identifier(fallback_blank)
         for spec in samples_stage:
             working = spec
-            blank_identifier = spec.meta.get("blank_id") or fallback_blank
+            candidates: list[str] = []
+            if match_strategy == "cuvette_slot":
+                slot_value = _normalize_identifier(spec.meta.get("cuvette_slot"))
+                if slot_value:
+                    candidates.append(slot_value)
+            blank_id_value = _normalize_identifier(spec.meta.get("blank_id"))
+            if blank_id_value and blank_id_value not in candidates:
+                candidates.append(blank_id_value)
+            if fallback_identifier and fallback_identifier not in candidates:
+                candidates.append(fallback_identifier)
+
+            selected_identifier = candidates[0] if candidates else None
             blank_spec = None
-            if blank_identifier:
-                blank_spec = blank_lookup.get(str(blank_identifier))
+            for candidate in candidates:
+                lookup = blank_lookup.get(candidate)
+                if lookup is not None:
+                    blank_spec = lookup
+                    selected_identifier = candidate
+                    break
 
             if subtract_blank:
                 if blank_spec is not None:
@@ -1237,12 +1275,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                         enforce=validate_flag,
                     )
                     working = pipeline.subtract_blank(working, blank_spec, audit=audit)
-                elif blank_identifier:
+                elif selected_identifier:
                     if require_blank:
                         raise ValueError(
-                            f"No blank spectrum available for blank_id '{blank_identifier}'"
+                            f"No blank spectrum available for identifier '{selected_identifier}'"
                         )
-                    audit = self._build_missing_blank_audit(working, blank_identifier)
+                    audit = self._build_missing_blank_audit(working, selected_identifier)
                     working = self._attach_blank_audit(working, audit)
                 elif require_blank:
                     sample_id = spec.meta.get("sample_id") or spec.meta.get("channel")
@@ -1258,8 +1296,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                         enforce=False,
                     )
                     working = self._attach_blank_audit(working, audit)
-                elif blank_identifier:
-                    audit = self._build_missing_blank_audit(working, blank_identifier)
+                elif selected_identifier:
+                    audit = self._build_missing_blank_audit(working, selected_identifier)
                     working = self._attach_blank_audit(working, audit)
 
             if baseline_cfg.get("method"):
@@ -1333,12 +1371,16 @@ class UvVisPlugin(SpectroscopyPlugin):
                 ]
             blanks_final = blanks_working
             blank_map_by_key = {
-                pipeline.replicate_key(blank): blank for blank in blanks_final
+                pipeline.blank_replicate_key(blank, match_strategy): blank
+                for blank in blanks_final
             }
 
-        order_keys = []
+        order_keys: list[tuple[str, str]] = []
         for spec in stage_one:
-            key = pipeline.replicate_key(spec)
+            if spec.meta.get("role") == "blank":
+                key = pipeline.blank_replicate_key(spec, match_strategy)
+            else:
+                key = pipeline.replicate_key(spec)
             if key not in order_keys:
                 order_keys.append(key)
 
@@ -1355,7 +1397,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         }
         blank_identifiers: Set[str] = set()
         for spec in processed_blanks:
-            ident = pipeline.blank_identifier(spec)
+            ident = pipeline.blank_identifier(spec, match_strategy)
             if ident:
                 blank_identifiers.add(str(ident))
         pre_ctx["blank_ids"] = sorted(blank_identifiers)
@@ -3739,6 +3781,12 @@ class UvVisPlugin(SpectroscopyPlugin):
         default_blank = blank_cfg.get("default_blank")
         if default_blank:
             blank_line += f"; default blank {default_blank}"
+        match_strategy_summary = str(blank_cfg.get("match_strategy") or "blank_id")
+        match_strategy_summary = match_strategy_summary.replace("-", "_")
+        if match_strategy_summary == "cuvette_slot":
+            blank_line += "; match via cuvette slot"
+        else:
+            blank_line += "; match via blank identifier"
         blank_line += "."
         preprocessing_lines.append(blank_line)
         if not blank_cfg.get("validate_metadata", True):
