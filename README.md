@@ -91,3 +91,29 @@ resetting settings, review the default configuration in
 [`spectro_app/config/defaults.yaml`](spectro_app/config/defaults.yaml) and the
 workflow reference in [`docs/workflow_overview.md`](docs/workflow_overview.md)
 for guidance on expected processing behaviour.
+
+## Utilities
+Analysts can generate a searchable index of the JCAMP-DX headers bundled in
+`IR_referenceDatabase/` with the `index_ir_metadata.py` helper. The script
+walks every `.jdx` file, normalises header names to snake case, merges
+continuation lines, and emits a deterministic record set that is convenient for
+diffing or downstream processing.
+
+List the available metadata fields that can be projected into the report:
+
+```bash
+python scripts/index_ir_metadata.py --list-fields
+```
+
+Write the complete index as JSON (default format) with paths relative to the
+database root:
+
+```bash
+python scripts/index_ir_metadata.py > ir_metadata.json
+```
+
+Emit a compact CSV that only keeps a handful of high-value metadata fields:
+
+```bash
+python scripts/index_ir_metadata.py --format csv --fields title cas_registry_no molform owner > ir_metadata.csv
+```
