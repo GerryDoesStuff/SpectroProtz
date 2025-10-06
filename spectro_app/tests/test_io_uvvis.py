@@ -173,6 +173,7 @@ VISIONlite Scan Version 2.1
     assert spec.meta["operator"] == "Operator Name"
     assert spec.meta["instrument_model"] == "GAMMA"
     assert spec.meta["software"] == "VISIONlite Scan Version 2.1"
+    assert spec.meta["cuvette_slot"] == 7
     assert spec.meta.get("acquired_datetime") == "2024-05-01T10:00:00"
 
 

@@ -332,7 +332,12 @@ def _parse_visionlite_dsp(path: Path, text: str) -> Optional[List[Dict[str, Any]
             meta["instrument_serial"] = instrument_block[2]
 
     if len(metadata_blocks) > 4 and metadata_blocks[4]:
-        meta["software"] = metadata_blocks[4][-1]
+        software_block = metadata_blocks[4]
+        slot_value = _parse_float(software_block[0]) if software_block else None
+        if slot_value is not None:
+            rounded = int(round(slot_value))
+            meta["cuvette_slot"] = rounded if abs(slot_value - rounded) < 1e-6 else slot_value
+        meta["software"] = software_block[-1]
 
     raw_trace = intensity.copy()
     converted, channel_key, updated_mode, original_mode = convert_intensity_to_absorbance(
