@@ -14,6 +14,17 @@ pool. Each run executes the following stages in order:
 1. **Load** – the plugin's `load` hook reads spectra from the supplied paths and
    normalises metadata. The stage is responsible for optional manifest joins
    and raw file decoding.【F:spectro_app/engine/run_controller.py†L10-L38】【F:spectro_app/plugins/uvvis/plugin.py†L171-L313】
+   - *Normalises metadata* means that each spectrum's `meta` dict is cleaned so
+     keys/values follow a predictable format (e.g. lower-casing roles,
+     back-filling `blank_id`, defaulting the technique and source file). This
+     prevents downstream code from juggling per-file quirks.【F:spectro_app/plugins/uvvis/plugin.py†L232-L309】
+   - *Manifest join* refers to the merge between parsed manifest rows and the
+     instrument metadata. The loader builds lookups by file, sample and channel
+     so that the most specific manifest entry wins before copying its fields
+     into each spectrum.【F:spectro_app/plugins/uvvis/plugin.py†L214-L355】
+   - *Raw file decoding* covers the family of readers that convert vendor CSV,
+     Excel or Helios `.dsp` exports into wavelength/intensity arrays while
+     extracting header metadata and inferring blanks/modes.【F:spectro_app/plugins/uvvis/plugin.py†L248-L309】【F:spectro_app/plugins/uvvis/plugin.py†L758-L868】
 2. **Validate** – `validate` checks recipe compatibility and returns any fatal
    issues. When errors are reported the run aborts without touching the
    remaining steps.【F:spectro_app/engine/run_controller.py†L16-L24】
@@ -55,12 +66,32 @@ per-batch bases.【F:spectro_app/config/defaults.yaml†L7-L24】
 
 ### Recipe defaults and overrides
 
-`UvVisPlugin._apply_recipe_defaults` injects sensible defaults for join and QC
-configuration when a recipe omits them. Join correction is enabled by default
-with a three-point window and instrument-specific overlap windows. QC gets a
-quiet-window fallback spanning 850–900 nm. Recipes can override any of these
-values by supplying `join.enabled`, `join.window`, `join.threshold`, custom
-`join.windows`, or alternate `qc.quiet_window` ranges.【F:spectro_app/plugins/uvvis/plugin.py†L103-L151】
+`UvVisPlugin._apply_recipe_defaults` injects sensible defaults—baseline
+configuration that matches expected instrument behaviour—when a recipe omits
+them. Defaults include enabling join correction with a three-point window,
+providing Helios overlap windows, and seeding QC with an 850–900 nm quiet
+range. These values are considered “sensible” because they mirror the plugin's
+internal constants; the helper only fills blanks so any values you set in the
+recipe win.【F:spectro_app/plugins/uvvis/plugin.py†L90-L151】
+
+Baseline-oriented parameters appear in several recipe blocks:
+
+- `baseline.lambda` / `baseline.lam` – smoothness penalty for the AsLS solver;
+  larger numbers enforce flatter baselines. Start from the default `1e5` and
+  explore roughly `1e3–1e7` depending on how aggressive the background drift
+  is.【F:spectro_app/config/defaults.yaml†L17-L22】【F:spectro_app/tests/test_pipeline_uvvis.py†L118-L151】
+- `baseline.p` – asymmetry weight that decides how strongly positive residuals
+  are penalised. Typical UV-Vis data works between `0.001` and `0.05`; lower
+  values cling to peaks while higher values suppress them faster.【F:spectro_app/config/defaults.yaml†L17-L22】【F:spectro_app/tests/test_pipeline_uvvis.py†L118-L151】
+- `baseline.niter` – number of AsLS refinement passes. Keep this in the
+  `10–30` range to balance speed and convergence.【F:spectro_app/plugins/uvvis/pipeline.py†L282-L318】【F:spectro_app/tests/test_pipeline_uvvis.py†L118-L151】
+- `baseline.iterations` – iteration count used by SNIP baselines; defaults to
+  `24`, and values between `20` and `60` cover most fluorescence-contaminated
+  spectra.【F:spectro_app/plugins/uvvis/pipeline.py†L282-L318】
+- Anchor helpers (`baseline.anchor`, `baseline.anchor_windows`,
+  `baseline.anchors`, `baseline.zeroing`) let you pin corrected spectra to
+  specific windows/targets; provide ranges as `min`/`max` pairs with optional
+  `target` intensity to zero or level-shift outputs.【F:spectro_app/plugins/uvvis/plugin.py†L1057-L1126】【F:spectro_app/plugins/uvvis/pipeline.py†L323-L420】
 
 ### Relaxing blank enforcement
 
@@ -75,39 +106,52 @@ captures.【F:spectro_app/plugins/uvvis/plugin.py†L12-L74】
 The preprocessing stage honours the following recipe keys:
 
 - **Domain limiting** – `domain.min` / `domain.max` trim spectra to the desired
-  wavelength span while respecting instrument limits.【F:spectro_app/plugins/uvvis/plugin.py†L927-L978】
-- **Blank handling** – `blank.subtract`, `blank.require`, `blank.validate_metadata`,
-  `blank.default`/`blank.fallback`, `blank.max_time_delta_minutes` and
-  `blank.pathlength_tolerance_cm` govern subtraction, enforcement windows and
-  metadata validation.【F:spectro_app/plugins/uvvis/plugin.py†L978-L1153】
-- **Join detection/correction** – `join.enabled`, `join.window`, `join.threshold`,
-  `join.windows`, `join.offset_bounds`, `join.min_offset` and `join.max_offset`
-  manage detector stitching across channel joins.【F:spectro_app/plugins/uvvis/plugin.py†L951-L1015】
-- **Despiking** – `despike.enabled`, `despike.zscore` and `despike.window` remove
-  impulsive noise, optionally respecting join indices.【F:spectro_app/plugins/uvvis/plugin.py†L1015-L1037】
-- **Baseline correction** – `baseline.method` toggles the algorithm; supporting
-  parameters like `baseline.lambda`, `baseline.p`, `baseline.niter`,
-  `baseline.iterations` and anchor/zeroing options adjust behaviour.【F:spectro_app/plugins/uvvis/plugin.py†L1057-L1091】
+  wavelength span while respecting instrument limits (190–1100 nm for Helios
+  and generic drivers). Keep requested bounds inside those envelopes to avoid
+  `ValueError`s.【F:spectro_app/plugins/uvvis/plugin.py†L80-L188】【F:spectro_app/plugins/uvvis/plugin.py†L927-L978】
+- **Blank handling** – `blank.subtract`, `blank.require`,
+  `blank.validate_metadata`, `blank.default`/`blank.fallback`,
+  `blank.max_time_delta_minutes` (default 240 minutes) and
+  `blank.pathlength_tolerance_cm` (default 0.01 cm) govern subtraction and
+  guard-rails. Time windows should reflect instrument drift; stick to
+  sub-day spans unless long acquisitions demand otherwise.【F:spectro_app/plugins/uvvis/plugin.py†L60-L78】【F:spectro_app/plugins/uvvis/plugin.py†L978-L1050】
+- **Join detection/correction** – `join.enabled`, `join.window`,
+  `join.threshold`, `join.windows`, `join.offset_bounds`, `join.min_offset` and
+  `join.max_offset` manage detector stitching. Windows are provided per
+  instrument; detection defaults to a 10-point neighbourhood, so keep custom
+  values above `3` to ensure enough data for offset estimation.【F:spectro_app/plugins/uvvis/plugin.py†L60-L151】【F:spectro_app/plugins/uvvis/plugin.py†L951-L1015】【F:spectro_app/plugins/uvvis/pipeline.py†L700-L884】
+- **Despiking** – `despike.enabled`, `despike.zscore` and `despike.window`
+  remove impulsive noise. `zscore` is typically `2.5–6.0`; the default five
+  point window balances spike suppression with peak preservation.【F:spectro_app/plugins/uvvis/plugin.py†L1015-L1037】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L206】
+- **Baseline correction** – `baseline.method` selects `asls`, `rubberband` or
+  `snip`. Combine with the parameters listed above; choose `asls` when gradual
+  drift dominates, `rubberband` for broad curvature and `snip` for fluorescence
+  streaks requiring many iterations.【F:spectro_app/plugins/uvvis/pipeline.py†L282-L318】
 - **Smoothing** – `smoothing.enabled`, `smoothing.window` and
-  `smoothing.polyorder` drive Savitzky–Golay smoothing for samples and blanks.
-  Window length must be odd and exceed the polynomial order.【F:spectro_app/plugins/uvvis/plugin.py†L986-L1111】
+  `smoothing.polyorder` drive Savitzky–Golay smoothing (window must be odd and
+  larger than the polynomial order). Defaults of window `15`/polyorder `3`
+  suit 1 nm sampling; shrink for sparse data.【F:spectro_app/config/defaults.yaml†L12-L19】【F:spectro_app/plugins/uvvis/plugin.py†L986-L1111】
 - **Replicate handling** – `replicates.average` toggles averaging, while the
   nested `replicates.outlier` block is forwarded to the replicate pipeline for
-  robust aggregation.【F:spectro_app/plugins/uvvis/plugin.py†L990-L1054】
+  robust aggregation (supply thresholds such as Z-score cut-offs as needed).【F:spectro_app/plugins/uvvis/plugin.py†L990-L1054】
 
 ### Additional feature gates
 
-- **Manifest ingestion** – constructing `UvVisPlugin(enable_manifest=False)`
-  disables CSV/Excel manifest parsing for environments without curated sample
-  descriptors.【F:spectro_app/plugins/uvvis/plugin.py†L90-L263】
-- **Feature extraction** – `features` sections control peaks, band ratios,
-  integrals, derivatives, isosbestic checks and kinetics. Omitting them falls
-  back to built-in defaults for common UV-Vis reports.【F:spectro_app/plugins/uvvis/plugin.py†L2602-L2709】
-- **Calibration** – `calibration.enabled`, `calibration.targets`, `calibration.standards`,
-  `calibration.unknowns`, `calibration.bandwidth`, `calibration.pathlength_cm`,
-  `calibration.lod_multiplier`, `calibration.loq_multiplier`, and optional
-  `calibration.r2_threshold` tune the quantitation workflow and reporting
-  payloads.【F:spectro_app/plugins/uvvis/plugin.py†L2106-L2368】
+- **Manifest ingestion** – construct `UvVisPlugin(enable_manifest=False)` to
+  bypass manifest parsing. Leave it `True` (the default) to merge CSV/Excel
+  descriptors using the join precedence described above.【F:spectro_app/plugins/uvvis/plugin.py†L90-L355】
+- **Feature extraction** – populate the `features` section to override peak
+  detection (`prominence`, `min_distance`, `max_peaks`, `height`), band ratios
+  (`numerator`, `denominator`, `bandwidth`), integrals (`min`/`max` windows),
+  derivatives (toggle or provide `window`/`polyorder`), isosbestic checks
+  (wavelength pairs plus optional `tolerance`) and kinetics (`targets` with
+  `wavelength`/`bandwidth` and an optional `time_key`). Omit the block to fall
+  back to bundled defaults for nucleic-acid QC.【F:spectro_app/plugins/uvvis/plugin.py†L2600-L2811】【F:spectro_app/plugins/uvvis/plugin.py†L1669-L1934】
+- **Calibration** – enable by setting `calibration.enabled: true` and providing
+  target definitions (`calibration.targets`), standards and unknown IDs along
+  with instrument specifics (`bandwidth`, `pathlength_cm`, detection limits,
+  optional `r2_threshold`). Leaving `enabled` false skips quantitation entirely
+  but still records spectra-level QC.【F:spectro_app/plugins/uvvis/plugin.py†L2106-L2368】
 
 ## Presets and recipe authoring
 
