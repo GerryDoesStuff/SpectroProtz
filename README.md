@@ -47,6 +47,35 @@ This command bootstraps the Qt event loop and shows the main window immediately,
 allowing users to load recipes, configure processing options, and monitor batch
 runs.
 
+## Verifying processed spectra
+SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
+that processed traces remain representative of their raw counterparts:
+
+- **Stage-by-stage channels.** Each processing step writes its result into a
+  dedicated metadata channel (for example `raw`, `blanked`,
+  `baseline_corrected`, `joined`, `despiked`, `smoothed`). The original signal
+  stays available alongside every intermediate, enabling numerical and visual
+  comparisons at any point in the pipeline.
+- **Interactive stage toggles.** The preview dock in the UI lets you toggle the
+  visibility of stored stages so you can overlay the processed curve on top of
+  the raw trace or inspect any intermediate discrepancies.
+- **Quantitative QC metrics.** The QC engine computes diagnostics such as noise
+  levels, join offsets, spike counts, smoothing guards, drift, and per-stage
+  roughness deltas that compare processed spectra against their retained
+  channels. These metrics roll up into QC flags that highlight when processing
+  diverges too far from the source data.
+- **Workbook exports for auditing.** Exported workbooks bundle processed
+  spectra, metadata, QC flags, and an audit log so you can review the exact
+  sequence of operations and verify whether any QC thresholds were exceeded.
+- **Replicate-level scoring.** When averaging replicates, the pipeline can apply
+  MAD or Cook’s-distance screening to discard obvious outliers before
+  aggregation, keeping the representative trace faithful to the cluster of raw
+  measurements.
+
+Together, the retained channels, UI overlays, QC metrics and flags, exported
+logs, and replicate outlier scores provide both qualitative and quantitative
+checks that processed spectra remain valid stand-ins for their raw measurements.
+
 ## Troubleshooting settings and configuration
 SpectroProtz persists user preferences with
 [`QSettings("SpectroLab", "SpectroApp")`](spectro_app/app_context.py). On most
