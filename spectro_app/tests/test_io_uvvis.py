@@ -98,6 +98,84 @@ wavelength,Sample A,Blank Control
     assert blank_spec.meta["blank_id"] == "Blank Control"
 
 
+def test_visionlite_dsp_parsing(tmp_path):
+    dsp_text = """sinacsa
+Scan
+1
+Sample01.dsp
+nm
+400
+402
+1
+3
+A
+-0.1
+0.5
+0
+Operator Name
+
+2024.05.01. 10:00:00
+2024.05.01. 10:05:00
+2024.05.01. 09:55:00
+0
+version 1, 2024.05.01. 10:05:00, Operator Name: |Created; Method: ||
+
+1
+0
+0
+sec
+0
+0
+
+GAMMA
+v7.03 v4.80
+143309
+2
+0
+0
+0
+0
+0
+0
+
+7
+0
+0
+VISIONlite Scan Version 2.1
+
+#SPECIFIC1
+0
+0
+0.01
+
+#SPECIFIC2
+
+#SPECIFIC3
+
+#DATA
+0.1
+0.2
+0.3
+"""
+    path = tmp_path / "sample01.dsp"
+    path.write_text(dsp_text, encoding="utf-8")
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(path)])
+
+    assert len(spectra) == 1
+    spec = spectra[0]
+    assert np.allclose(spec.wavelength, [400.0, 401.0, 402.0])
+    assert np.allclose(spec.intensity, [0.1, 0.2, 0.3])
+    assert spec.meta["sample_id"] == "Sample01"
+    assert spec.meta["mode"] == "absorbance"
+    assert spec.meta["source_type"] == "visionlite_dsp"
+    assert spec.meta["operator"] == "Operator Name"
+    assert spec.meta["instrument_model"] == "GAMMA"
+    assert spec.meta["software"] == "VISIONlite Scan Version 2.1"
+    assert spec.meta.get("acquired_datetime") == "2024-05-01T10:00:00"
+
+
 def test_generic_reflectance_conversion(tmp_path):
     generic_csv = """Instrument: CustomSpec 2000
 Mode: Reflectance

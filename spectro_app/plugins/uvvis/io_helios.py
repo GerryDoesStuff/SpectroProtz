@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import numpy as np
 import pandas as pd
 
 from spectro_app.engine.io_common import sniff_locale
@@ -183,6 +184,11 @@ def parse_metadata_lines(lines: Iterable[str]) -> Dict[str, Any]:
 
 def _read_helios_text(path: Path) -> List[Dict[str, Any]]:
     text = path.read_text(encoding="utf-8", errors="ignore")
+    if path.suffix.lower() == ".dsp":
+        parsed = _parse_visionlite_dsp(path, text)
+        if parsed is not None:
+            return parsed
+
     locale = sniff_locale(text)
     lines = text.splitlines()
     header_idx, has_header, meta_lines = _locate_table(
@@ -202,6 +208,151 @@ def _read_helios_text(path: Path) -> List[Dict[str, Any]]:
 
     meta = parse_metadata_lines(meta_lines)
     return _dataframe_to_records(df, meta)
+
+
+def _parse_visionlite_dsp(path: Path, text: str) -> Optional[List[Dict[str, Any]]]:
+    if "#DATA" not in text:
+        return None
+
+    try:
+        header, data_section = text.split("#DATA", 1)
+    except ValueError:
+        return None
+
+    data_values: List[float] = []
+    for raw in data_section.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parsed = _parse_float(stripped)
+        if parsed is None:
+            continue
+        data_values.append(parsed)
+
+    if not data_values:
+        return None
+
+    intensity = np.asarray(data_values, dtype=float)
+
+    metadata_blocks: List[List[str]] = []
+    current_block: List[str] = []
+    for raw_line in header.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#SPECIFIC"):
+            break
+        if stripped:
+            current_block.append(stripped)
+        elif current_block:
+            metadata_blocks.append(current_block)
+            current_block = []
+    if current_block:
+        metadata_blocks.append(current_block)
+
+    if not metadata_blocks:
+        return None
+
+    primary = metadata_blocks[0]
+    sample_token = primary[3] if len(primary) > 3 else path.name
+    sample_name = Path(sample_token).stem or path.stem
+
+    start_nm = _parse_float(primary[5]) if len(primary) > 5 else None
+    end_nm = _parse_float(primary[6]) if len(primary) > 6 else None
+    step_nm = _parse_float(primary[7]) if len(primary) > 7 else None
+    point_count_float = _parse_float(primary[8]) if len(primary) > 8 else None
+    point_count = int(round(point_count_float)) if point_count_float else None
+    if point_count is None or point_count <= 0:
+        point_count = intensity.size
+    if point_count != intensity.size:
+        point_count = intensity.size
+
+    if step_nm is None and start_nm is not None and end_nm is not None and point_count > 1:
+        step_nm = (end_nm - start_nm) / float(point_count - 1)
+    if step_nm is None or step_nm == 0:
+        step_nm = 1.0
+    if start_nm is None:
+        start_nm = 0.0
+    if end_nm is None:
+        end_nm = start_nm + step_nm * float(max(point_count - 1, 0))
+
+    wavelength = start_nm + np.arange(intensity.size, dtype=float) * step_nm
+
+    mode_token = primary[9] if len(primary) > 9 else None
+    mapped_mode = _parse_visionlite_mode(mode_token)
+
+    meta: Dict[str, Any] = {
+        "channel": sample_name,
+        "sample_id": sample_name,
+        "role": "sample",
+        "wavelength_start_nm": start_nm,
+        "wavelength_end_nm": end_nm,
+        "wavelength_step_nm": step_nm,
+        "points": intensity.size,
+        "source_type": "visionlite_dsp",
+        "instrument": "Helios Gamma",
+    }
+
+    if mapped_mode:
+        normalised = normalise_mode(mapped_mode)
+        if normalised:
+            meta["mode"] = normalised
+        else:
+            meta["mode_raw"] = mapped_mode
+    elif mode_token:
+        meta["mode_raw"] = mode_token
+
+    if len(primary) > 13 and primary[13]:
+        meta["operator"] = primary[13]
+
+    if len(primary) > 4 and primary[4]:
+        meta["wavelength_units"] = primary[4]
+
+    if len(metadata_blocks) > 1:
+        timeline = metadata_blocks[1]
+        labels = ("acquired_datetime", "saved_datetime", "created_datetime")
+        for label, value in zip(labels, timeline):
+            parsed_dt = _parse_visionlite_datetime(value) or _parse_datetime(value)
+            if parsed_dt:
+                meta[label] = parsed_dt.isoformat()
+        for extra in timeline[len(labels):]:
+            lowered = extra.lower()
+            if lowered.startswith("version"):
+                meta["file_version"] = extra.split(",", 1)[0].strip()
+            if "method" in lowered:
+                method_part = extra.split("Method:", 1)[-1].strip().strip("|")
+                if method_part:
+                    meta["method"] = method_part
+
+    if len(metadata_blocks) > 3:
+        instrument_block = metadata_blocks[3]
+        if instrument_block:
+            meta.setdefault("instrument_model", instrument_block[0])
+        if len(instrument_block) > 1 and instrument_block[1]:
+            meta["instrument_firmware"] = instrument_block[1]
+        if len(instrument_block) > 2 and instrument_block[2]:
+            meta["instrument_serial"] = instrument_block[2]
+
+    if len(metadata_blocks) > 4 and metadata_blocks[4]:
+        meta["software"] = metadata_blocks[4][-1]
+
+    raw_trace = intensity.copy()
+    converted, channel_key, updated_mode, original_mode = convert_intensity_to_absorbance(
+        intensity, meta.get("mode")
+    )
+    intensity = converted
+    if channel_key:
+        channels = {channel_key: raw_trace}
+        meta["channels"] = channels
+        if original_mode:
+            meta["original_mode"] = original_mode
+    if updated_mode:
+        meta["mode"] = updated_mode
+
+    record = {
+        "wavelength": wavelength,
+        "intensity": intensity,
+        "meta": meta,
+    }
+    return [record]
 
 
 def _read_helios_excel(path: Path) -> List[Dict[str, Any]]:
@@ -359,6 +510,32 @@ def _parse_float(value: str | None) -> Optional[float]:
         return None
 
 
+def _parse_visionlite_mode(value: str | None) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    upper = text.upper()
+    mapping = {
+        "A": "absorbance",
+        "ABS": "absorbance",
+        "ABSORBANCE": "absorbance",
+        "%T": "transmittance",
+        "T": "transmittance",
+        "TRANS": "transmittance",
+        "TRANSMITTANCE": "transmittance",
+        "%R": "reflectance",
+        "R": "reflectance",
+        "REFLECTANCE": "reflectance",
+        "F": "fluorescence",
+        "FLUORESCENCE": "fluorescence",
+        "E": "emission",
+        "EMISSION": "emission",
+    }
+    return mapping.get(upper)
+
+
 def _parse_datetime(value: str | None) -> Optional[datetime]:
     if not value:
         return None
@@ -378,6 +555,25 @@ def _compose_datetime(date_value: Optional[str], time_value: Optional[str]) -> O
     if date_part and time_part:
         return datetime.combine(date_part.date(), time_part.time())
     return date_part or time_part
+
+
+def _parse_visionlite_datetime(value: str | None) -> Optional[datetime]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    patterns = (
+        "%Y.%m.%d. %H:%M:%S",
+        "%Y.%m.%d.%H:%M:%S",
+        "%Y.%m.%d.",
+    )
+    for pattern in patterns:
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    return None
 
 
 def _infer_role(column: str, meta: Dict[str, Any]) -> str:
