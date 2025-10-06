@@ -93,6 +93,40 @@ class UvVisPlugin(SpectroscopyPlugin):
     def __init__(self, *, enable_manifest: bool = True) -> None:
         self.enable_manifest = bool(enable_manifest)
         self._last_calibration_results: Dict[str, Any] | None = None
+        self._report_context: Dict[str, Dict[str, Any]] = {}
+        self._reset_report_context()
+
+    def _reset_report_context(self) -> None:
+        self._report_context = {
+            "ingestion": {
+                "requested_paths": [],
+                "data_files": [],
+                "manifest_files": [],
+                "spectra_count": 0,
+                "blank_count": 0,
+                "manifest_entry_count": 0,
+                "manifest_index_hits": 0,
+                "manifest_lookup_hits": 0,
+                "manifest_enabled": bool(self.enable_manifest),
+            },
+            "preprocessing": {},
+            "analysis": {},
+            "results": {},
+        }
+
+    @staticmethod
+    def _summarise_sequence(values: Sequence[float]) -> Dict[str, float]:
+        arr = np.asarray(list(values), dtype=float)
+        if arr.size == 0:
+            return {}
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return {}
+        return {
+            "min": float(np.min(finite)),
+            "max": float(np.max(finite)),
+            "mean": float(np.mean(finite)),
+        }
 
     @property
     def last_calibration_results(self) -> Dict[str, Any] | None:
@@ -210,13 +244,17 @@ class UvVisPlugin(SpectroscopyPlugin):
         )
 
     def load(self, paths: Iterable[str]) -> List[Spectrum]:
+        self._reset_report_context()
         spectra: List[Spectrum] = []
         path_objects = [Path(p) for p in paths]
+        ingestion_ctx = self._report_context["ingestion"]
+        ingestion_ctx["requested_paths"] = [str(path) for path in path_objects]
         manifest_files: Set[Path] = set()
         manifest_index: UvVisPlugin._ManifestIndex | None = None
 
         if self.enable_manifest:
             manifest_index, manifest_files = self._build_manifest_index(path_objects)
+        ingestion_ctx["manifest_files"] = sorted(str(path) for path in manifest_files)
 
         manifest_entries: List[Dict[str, object]] = []
         data_paths: List[Path] = []
@@ -238,12 +276,16 @@ class UvVisPlugin(SpectroscopyPlugin):
                 continue
             data_paths.append(path)
 
+        ingestion_ctx["data_files"] = [str(path) for path in data_paths]
         manifest_lookup = (
             self._build_manifest_lookup(manifest_entries)
             if self.enable_manifest
             else {}
         )
 
+        manifest_index_hits = 0
+        manifest_lookup_hits = 0
+        blank_count = 0
         for path in data_paths:
             suffix = path.suffix.lower()
             file_records: List[Dict[str, object]]
@@ -270,9 +312,12 @@ class UvVisPlugin(SpectroscopyPlugin):
                 meta = dict(record.get("meta", {}))
                 meta.setdefault("technique", "uvvis")
                 meta.setdefault("source_file", str(path))
+                index_hit = False
+                lookup_hit = False
                 if self.enable_manifest and manifest_index:
                     updates = self._lookup_manifest_index(manifest_index, path, meta)
                     if updates:
+                        index_hit = True
                         for key, value in updates.items():
                             if key == "role" and isinstance(value, str):
                                 meta[key] = value.lower()
@@ -292,9 +337,22 @@ class UvVisPlugin(SpectroscopyPlugin):
                         manifest_lookup, path, meta
                     )
                     if manifest_meta:
+                        lookup_hit = True
                         meta.update(manifest_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
+                if meta.get("role") == "blank":
+                    blank_count += 1
+                if index_hit:
+                    manifest_index_hits += 1
+                if lookup_hit:
+                    manifest_lookup_hits += 1
 
+        ingestion_ctx["manifest_entry_count"] = len(manifest_entries)
+        ingestion_ctx["manifest_index_hits"] = manifest_index_hits
+        ingestion_ctx["manifest_lookup_hits"] = manifest_lookup_hits
+        ingestion_ctx["spectra_count"] = len(spectra)
+        ingestion_ctx["blank_count"] = blank_count
+        ingestion_ctx["sample_count"] = max(len(spectra) - blank_count, 0)
         return spectra
 
     @staticmethod
@@ -925,9 +983,17 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def preprocess(self, specs, recipe):
         if not specs:
+            self._report_context["preprocessing"] = {}
             return []
 
         recipe = self._apply_recipe_defaults(recipe)
+        context = self._report_context
+        ingestion_ctx = context.setdefault("ingestion", {})
+        ingestion_ctx.setdefault("spectra_count", len(specs))
+        blank_inputs = sum(1 for spec in specs if spec.meta.get("role") == "blank")
+        ingestion_ctx.setdefault("blank_count", blank_inputs)
+        ingestion_ctx.setdefault("sample_count", max(len(specs) - blank_inputs, 0))
+        pre_ctx = context.setdefault("preprocessing", {})
 
         domain_cfg_raw = recipe.get("domain")
         if domain_cfg_raw is None:
@@ -942,6 +1008,54 @@ class UvVisPlugin(SpectroscopyPlugin):
         despike_cfg = recipe.get("despike", {})
         smoothing_cfg = recipe.get("smoothing", {})
         replicate_cfg = recipe.get("replicates", {})
+        qc_cfg = dict(recipe.get("qc", {})) if recipe else {}
+
+        if domain_cfg:
+            pre_ctx["domain"] = {
+                "min": float(domain_cfg.get("min")) if domain_cfg.get("min") is not None else None,
+                "max": float(domain_cfg.get("max")) if domain_cfg.get("max") is not None else None,
+            }
+        else:
+            pre_ctx["domain"] = None
+        pre_ctx["blank"] = {
+            "subtract": bool(blank_cfg.get("subtract", blank_cfg.get("enabled", True))),
+            "require": bool(blank_cfg.get("require", blank_cfg.get("subtract", blank_cfg.get("enabled", True)))),
+            "default_blank": blank_cfg.get("default") or blank_cfg.get("fallback"),
+            "validate_metadata": bool(blank_cfg.get("validate_metadata", True)),
+        }
+        pre_ctx["baseline"] = {
+            "method": baseline_cfg.get("method"),
+            "parameters": {
+                "lambda": baseline_cfg.get("lam", baseline_cfg.get("lambda")),
+                "p": baseline_cfg.get("p"),
+                "iterations": baseline_cfg.get("iterations", baseline_cfg.get("niter")),
+            },
+        }
+        pre_ctx["join"] = {
+            "enabled": bool(join_cfg.get("enabled")),
+            "window": int(join_cfg.get("window", 10)),
+            "threshold": self._coerce_float(join_cfg.get("threshold")),
+        }
+        pre_ctx["despike"] = {
+            "enabled": bool(despike_cfg.get("enabled")),
+            "window": despike_cfg.get("window"),
+            "zscore": self._coerce_float(despike_cfg.get("zscore")),
+        }
+        pre_ctx["smoothing"] = {
+            "enabled": bool(smoothing_cfg.get("enabled")),
+            "window": int(smoothing_cfg.get("window", 5)) if smoothing_cfg.get("window") is not None else None,
+            "polyorder": int(smoothing_cfg.get("polyorder", 2)) if smoothing_cfg.get("polyorder") is not None else None,
+        }
+        pre_ctx["replicates"] = {
+            "average": bool(replicate_cfg.get("average", True)),
+            "outlier": replicate_cfg.get("outlier"),
+        }
+        quiet_window_cfg = qc_cfg.get("quiet_window") if isinstance(qc_cfg.get("quiet_window"), dict) else None
+        if isinstance(quiet_window_cfg, dict):
+            pre_ctx["quiet_window"] = {
+                "min": self._coerce_float(quiet_window_cfg.get("min")),
+                "max": self._coerce_float(quiet_window_cfg.get("max")),
+            }
 
         if domain_cfg and domain_cfg.get("min") is not None and domain_cfg.get("max") is not None:
             if float(domain_cfg["min"]) >= float(domain_cfg["max"]):
@@ -1156,6 +1270,24 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         processed_map = {**blank_map_by_key, **sample_map}
         final_specs = [processed_map[key] for key in order_keys if key in processed_map]
+        processed_blanks = [spec for spec in final_specs if spec.meta.get("role") == "blank"]
+        processed_samples_only = [spec for spec in final_specs if spec.meta.get("role") != "blank"]
+        pre_ctx["counts"] = {
+            "input_samples": len(samples_stage),
+            "input_blanks": len(blanks_stage),
+            "processed_samples": len(processed_samples_only),
+            "processed_blanks": len(processed_blanks),
+            "replicate_groups": len(sample_map),
+        }
+        blank_identifiers: Set[str] = set()
+        for spec in processed_blanks:
+            ident = pipeline.blank_identifier(spec)
+            if ident:
+                blank_identifiers.add(str(ident))
+        pre_ctx["blank_ids"] = sorted(blank_identifiers)
+        context["ingestion"]["spectra_count"] = len(final_specs)
+        context["ingestion"]["blank_count"] = len(processed_blanks)
+        context["ingestion"]["sample_count"] = len(processed_samples_only)
         return final_specs
 
     def _validate_blank_pairing(
@@ -2597,6 +2729,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
 
         recipe = self._apply_recipe_defaults(recipe)
+        context = self._report_context
+        analysis_ctx = context.setdefault("analysis", {})
+        ingestion_ctx = context.setdefault("ingestion", {})
+        ingestion_ctx.setdefault("spectra_count", len(specs))
+        ingestion_ctx.setdefault(
+            "blank_count", sum(1 for spec in specs if spec.meta.get("role") == "blank")
+        )
+        ingestion_ctx.setdefault(
+            "sample_count", max(len(specs) - ingestion_ctx.get("blank_count", 0), 0)
+        )
 
         feature_cfg = dict(recipe.get("features", {})) if recipe else {}
         smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
@@ -2640,6 +2782,10 @@ class UvVisPlugin(SpectroscopyPlugin):
                 kinetics_time_field = str(raw_field)
 
         qc_rows = []
+        flag_counts: Dict[str, int] = {}
+        flagged_samples = 0
+        ratio_aggregates: Dict[str, List[float]] = {}
+        integral_aggregates: Dict[str, List[float]] = {}
         drift_map = compute_uvvis_drift_map(specs, recipe)
         processed_with_features: List[Spectrum] = []
         kinetics_records: List[Dict[str, object]] = []
@@ -2776,6 +2922,17 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "derivative_stats": derivative_stats,
                 "isosbestic": isosbestic_checks,
             }
+            if metrics["flags"]:
+                flagged_samples += 1
+            for flag in metrics["flags"]:
+                flag_counts[flag] = flag_counts.get(flag, 0) + 1
+            for name, payload in band_ratios.items():
+                value = payload.get("value")
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    ratio_aggregates.setdefault(name, []).append(float(value))
+            for name, value in integrals.items():
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    integral_aggregates.setdefault(name, []).append(float(value))
             qc_rows.append(row)
             meta = dict(spec.meta)
             meta.setdefault("features", {})
@@ -2834,6 +2991,23 @@ class UvVisPlugin(SpectroscopyPlugin):
             self._summarize_kinetics(kinetics_records, kinetics_targets)
         calibration_results = self._perform_calibration(processed_with_features, qc_rows, recipe)
         self._last_calibration_results = calibration_results
+        analysis_ctx["qc_total"] = len(qc_rows)
+        analysis_ctx["flag_counts"] = dict(sorted(flag_counts.items()))
+        analysis_ctx["flagged_samples"] = flagged_samples
+        feature_summary: Dict[str, Dict[str, Dict[str, float]]] = {
+            "band_ratios": {},
+            "integrals": {},
+        }
+        for name, values in ratio_aggregates.items():
+            summary = self._summarise_sequence(values)
+            if summary:
+                feature_summary["band_ratios"][name] = summary
+        for name, values in integral_aggregates.items():
+            summary = self._summarise_sequence(values)
+            if summary:
+                feature_summary["integrals"][name] = summary
+        analysis_ctx["feature_summary"] = feature_summary
+        analysis_ctx["calibration"] = calibration_results
         return processed_with_features, qc_rows
 
     def _build_audit_entries(
@@ -3424,6 +3598,254 @@ class UvVisPlugin(SpectroscopyPlugin):
         with recipe_path.open("w", encoding="utf-8") as handle:
             json.dump(serialisable, handle, indent=2, sort_keys=True)
 
+    def _build_text_report(self, audit_entries: Sequence[str]) -> Optional[str]:
+        context = self._report_context
+        ingestion = context.get("ingestion", {})
+        preprocessing = context.get("preprocessing", {})
+        analysis = context.get("analysis", {})
+        results = context.get("results", {})
+
+        def _fmt_float(value: object, precision: int = 2) -> Optional[str]:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(number):
+                return None
+            return f"{number:.{precision}f}"
+
+        ingestion_lines: List[str] = []
+        spectra_count = ingestion.get("spectra_count") or analysis.get("qc_total") or 0
+        data_files = ingestion.get("data_files") or []
+        if data_files:
+            file_names = ", ".join(sorted(Path(path).name for path in data_files))
+            ingestion_lines.append(
+                f"Processed {spectra_count} spectrum(s) from {len(data_files)} data file(s): {file_names}."
+            )
+        else:
+            ingestion_lines.append(f"Processed {spectra_count} spectrum(s).")
+        blank_count = ingestion.get("blank_count")
+        sample_count = ingestion.get("sample_count")
+        if blank_count is not None and sample_count is not None:
+            ingestion_lines.append(
+                f"Identified {sample_count} sample spectrum(s) and {blank_count} blank(s)."
+            )
+        manifest_files = ingestion.get("manifest_files") or []
+        manifest_entry_count = ingestion.get("manifest_entry_count", 0) or 0
+        manifest_hits = (ingestion.get("manifest_index_hits", 0) or 0) + (
+            ingestion.get("manifest_lookup_hits", 0) or 0
+        )
+        if manifest_files or manifest_entry_count:
+            if manifest_files:
+                manifest_names = ", ".join(sorted(Path(path).name for path in manifest_files))
+            else:
+                manifest_names = "None"
+            if manifest_entry_count:
+                ingestion_lines.append(
+                    f"Manifest files: {manifest_names} (matched {manifest_hits} of {manifest_entry_count} entries)."
+                )
+            else:
+                ingestion_lines.append(f"Manifest files: {manifest_names}.")
+        if not ingestion.get("manifest_enabled", True):
+            ingestion_lines.append("Manifest enrichment disabled for this run.")
+
+        preprocessing_lines: List[str] = []
+        domain_cfg = preprocessing.get("domain") or {}
+        domain_min = _fmt_float(domain_cfg.get("min"), 1)
+        domain_max = _fmt_float(domain_cfg.get("max"), 1)
+        if domain_min is not None and domain_max is not None:
+            preprocessing_lines.append(f"Domain restricted to {domain_min}–{domain_max} nm.")
+        else:
+            preprocessing_lines.append("Domain spans the full available wavelength range.")
+        blank_cfg = preprocessing.get("blank") or {}
+        subtract_enabled = bool(blank_cfg.get("subtract", True))
+        require_blank = bool(blank_cfg.get("require", subtract_enabled))
+        blank_line = "Blank subtraction " + ("enabled" if subtract_enabled else "disabled")
+        blank_line += " (blank required)" if require_blank else " (blank optional)"
+        default_blank = blank_cfg.get("default_blank")
+        if default_blank:
+            blank_line += f"; default blank {default_blank}"
+        blank_line += "."
+        preprocessing_lines.append(blank_line)
+        if not blank_cfg.get("validate_metadata", True):
+            preprocessing_lines.append("Blank pairing validation ran in advisory mode.")
+        baseline_cfg = preprocessing.get("baseline") or {}
+        baseline_method = baseline_cfg.get("method")
+        if baseline_method:
+            params = baseline_cfg.get("parameters") or {}
+            pieces: List[str] = []
+            lam_val = _fmt_float(params.get("lambda"))
+            if lam_val is not None:
+                pieces.append(f"λ={lam_val}")
+            p_val = _fmt_float(params.get("p"))
+            if p_val is not None:
+                pieces.append(f"p={p_val}")
+            iter_val = params.get("iterations")
+            if iter_val is not None:
+                pieces.append(f"iterations={iter_val}")
+            summary = ", ".join(pieces)
+            if summary:
+                preprocessing_lines.append(
+                    f"Baseline correction applied using {baseline_method} ({summary})."
+                )
+            else:
+                preprocessing_lines.append(
+                    f"Baseline correction applied using {baseline_method}."
+                )
+        else:
+            preprocessing_lines.append("Baseline correction was not applied.")
+        join_cfg = preprocessing.get("join") or {}
+        if join_cfg.get("enabled"):
+            join_window = join_cfg.get("window")
+            join_threshold = _fmt_float(join_cfg.get("threshold"))
+            detail_parts: List[str] = []
+            if join_window:
+                detail_parts.append(f"window={join_window}")
+            if join_threshold is not None:
+                detail_parts.append(f"threshold={join_threshold}")
+            detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            preprocessing_lines.append(f"Join correction enabled{detail}.")
+        else:
+            preprocessing_lines.append("Join correction disabled.")
+        despike_cfg = preprocessing.get("despike") or {}
+        if despike_cfg.get("enabled"):
+            detail_parts = []
+            if despike_cfg.get("window") is not None:
+                detail_parts.append(f"window={despike_cfg.get('window')}")
+            zscore_val = _fmt_float(despike_cfg.get("zscore"))
+            if zscore_val is not None:
+                detail_parts.append(f"z-score={zscore_val}")
+            detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            preprocessing_lines.append(f"Despiking enabled{detail}.")
+        smoothing_cfg = preprocessing.get("smoothing") or {}
+        if smoothing_cfg.get("enabled"):
+            detail_parts = []
+            if smoothing_cfg.get("window"):
+                detail_parts.append(f"window={smoothing_cfg.get('window')}")
+            if smoothing_cfg.get("polyorder") is not None:
+                detail_parts.append(f"polyorder={smoothing_cfg.get('polyorder')}")
+            detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            preprocessing_lines.append(f"Savitzky-Golay smoothing enabled{detail}.")
+        else:
+            preprocessing_lines.append("Smoothing disabled.")
+        replicates_cfg = preprocessing.get("replicates") or {}
+        if replicates_cfg.get("average", True):
+            replicate_line = "Replicate spectra averaged"
+        else:
+            replicate_line = "Replicate spectra kept separate"
+        if replicates_cfg.get("outlier"):
+            replicate_line += f" with outlier policy {replicates_cfg.get('outlier')}"
+        replicate_line += "."
+        preprocessing_lines.append(replicate_line)
+        quiet_window = preprocessing.get("quiet_window") or {}
+        quiet_min = _fmt_float(quiet_window.get("min"), 1)
+        quiet_max = _fmt_float(quiet_window.get("max"), 1)
+        if quiet_min is not None and quiet_max is not None:
+            preprocessing_lines.append(
+                f"Noise assessed in quiet window {quiet_min}–{quiet_max} nm."
+            )
+        counts = preprocessing.get("counts") or {}
+        if counts:
+            preprocessing_lines.append(
+                "Pre-processing yielded "
+                f"{counts.get('processed_samples', 0)} sample(s) and {counts.get('processed_blanks', 0)} blank(s)."
+            )
+        blank_ids = preprocessing.get("blank_ids") or []
+        if blank_ids:
+            preprocessing_lines.append("Blank identifiers observed: " + ", ".join(blank_ids) + ".")
+
+        analysis_lines: List[str] = []
+        qc_total = analysis.get("qc_total", 0)
+        analysis_lines.append(f"QC metrics computed for {qc_total} spectrum(s).")
+        flagged_samples = analysis.get("flagged_samples", 0)
+        if flagged_samples:
+            analysis_lines.append(f"{flagged_samples} spectrum(s) triggered one or more QC flags.")
+        flag_counts = analysis.get("flag_counts") or {}
+        if flag_counts:
+            ordered = ", ".join(
+                f"{flag} ({count})" for flag, count in sorted(flag_counts.items())
+            )
+            analysis_lines.append(f"QC flags observed: {ordered}.")
+        else:
+            analysis_lines.append("No QC flags were raised.")
+        feature_summary = analysis.get("feature_summary") or {}
+        ratio_summary = feature_summary.get("band_ratios") or {}
+        ratio_highlights: List[str] = []
+        for name, stats in sorted(ratio_summary.items())[:3]:
+            mean_val = _fmt_float(stats.get("mean"))
+            if mean_val is not None:
+                ratio_highlights.append(f"{name} mean {mean_val}")
+        if ratio_highlights:
+            analysis_lines.append("Key band ratios: " + ", ".join(ratio_highlights) + ".")
+        integral_summary = feature_summary.get("integrals") or {}
+        integral_highlights: List[str] = []
+        for name, stats in sorted(integral_summary.items())[:3]:
+            mean_val = _fmt_float(stats.get("mean"))
+            if mean_val is not None:
+                integral_highlights.append(f"{name} mean {mean_val}")
+        if integral_highlights:
+            analysis_lines.append("Representative integrals: " + ", ".join(integral_highlights) + ".")
+        calibration = analysis.get("calibration") or {}
+        if calibration:
+            if not calibration.get("enabled", True):
+                analysis_lines.append(
+                    f"Calibration skipped ({calibration.get('status', 'disabled')})."
+                )
+            else:
+                targets = calibration.get("targets") or []
+                if targets:
+                    status_counts: Dict[str, int] = {}
+                    for target in targets:
+                        status = str(target.get("status") or "unknown")
+                        status_counts[status] = status_counts.get(status, 0) + 1
+                    ordered_status = ", ".join(
+                        f"{status} ({count})" for status, count in sorted(status_counts.items())
+                    )
+                    analysis_lines.append(
+                        f"Calibration targets evaluated: {ordered_status}."
+                    )
+                else:
+                    analysis_lines.append("Calibration configured without defined targets.")
+
+        results_lines: List[str] = []
+        figure_count = results.get("figure_count", 0)
+        results_lines.append(
+            f"Generated {figure_count} figure(s) and {len(audit_entries)} audit message(s)."
+        )
+        outputs = results.get("export_targets") or {}
+        workbook_path = outputs.get("workbook")
+        if workbook_path:
+            results_lines.append(f"Workbook location: {workbook_path}.")
+        pdf_path = outputs.get("pdf")
+        if pdf_path:
+            results_lines.append(f"PDF report: {pdf_path}.")
+        recipe_path = outputs.get("recipe")
+        if recipe_path:
+            results_lines.append(f"Recipe sidecar: {recipe_path}.")
+        if audit_entries:
+            highlights = "; ".join(audit_entries[:3])
+            results_lines.append(f"Audit highlights: {highlights}.")
+
+        sections = [
+            ("Ingestion", ingestion_lines),
+            ("Pre-processing", preprocessing_lines),
+            ("Analysis", analysis_lines),
+            ("Results", results_lines),
+        ]
+
+        lines: List[str] = []
+        for title, body in sections:
+            lines.append(title)
+            lines.append("-" * len(title))
+            if body:
+                lines.extend(body)
+            else:
+                lines.append("No details available.")
+            lines.append("")
+
+        text = "\n".join(lines).strip()
+        return text or None
+
     def _write_pdf_report(
         self,
         pdf_path: Path,
@@ -3431,6 +3853,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         audit_entries: List[str],
         specs: List[Spectrum],
         qc: List[Dict[str, object]],
+        report_text: Optional[str] = None,
     ) -> None:
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         with PdfPages(pdf_path) as pdf:
@@ -3442,12 +3865,19 @@ class UvVisPlugin(SpectroscopyPlugin):
             ax.text(0.02, 0.9, f"Generated: {timestamp}", fontsize=10, va="top")
             ax.text(0.02, 0.85, f"Spectra processed: {len(specs)}", fontsize=10, va="top")
             ax.text(0.02, 0.82, f"QC rows: {len(qc)}", fontsize=10, va="top")
-            ax.text(0.02, 0.78, "Audit log:", fontsize=12, fontweight="bold", va="top")
+            narrative_lines: List[str] = []
+            if report_text:
+                narrative_lines.append("Summary")
+                narrative_lines.append("~~~~~~~")
+                narrative_lines.append(report_text)
+                narrative_lines.append("")
+            narrative_lines.append("Audit log")
+            narrative_lines.append("~~~~~~~~~")
             if audit_entries:
-                text = "\n".join(audit_entries)
+                narrative_lines.extend(audit_entries)
             else:
-                text = "No audit entries available."
-            ax.text(0.02, 0.76, text, fontsize=9, va="top", wrap=True)
+                narrative_lines.append("No audit entries available.")
+            ax.text(0.02, 0.75, "\n".join(narrative_lines), fontsize=9, va="top", wrap=True)
             pdf.savefig(summary_fig)
             plt.close(summary_fig)
             for _, figure in figures:
@@ -3479,6 +3909,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             or export_cfg.get("report"),
             workbook_default.with_suffix(".pdf") if workbook_default else None,
         )
+        results_ctx = self._report_context.setdefault("results", {})
+        results_ctx["figure_count"] = len(figures)
+        results_ctx["export_targets"] = {
+            "workbook": str(workbook_target) if workbook_target else None,
+            "pdf": str(pdf_target) if pdf_target else None,
+            "recipe": str(recipe_target) if recipe_target else None,
+        }
 
         try:
             if workbook_target:
@@ -3504,10 +3941,26 @@ class UvVisPlugin(SpectroscopyPlugin):
 
             if pdf_target:
                 audit_for_pdf = list(workbook_audit)
-                self._write_pdf_report(pdf_target, figure_objs, audit_for_pdf, specs, qc)
+                report_for_pdf = self._build_text_report(audit_for_pdf)
+                self._write_pdf_report(
+                    pdf_target,
+                    figure_objs,
+                    audit_for_pdf,
+                    specs,
+                    qc,
+                    report_for_pdf,
+                )
                 workbook_audit.append(f"PDF report written to {pdf_target}")
         finally:
             for _, fig in figure_objs:
                 plt.close(fig)
 
-        return BatchResult(processed=specs, qc_table=qc, figures=figures, audit=workbook_audit)
+        results_ctx["audit_messages"] = list(workbook_audit)
+        report_text = self._build_text_report(workbook_audit)
+        return BatchResult(
+            processed=specs,
+            qc_table=qc,
+            figures=figures,
+            audit=workbook_audit,
+            report_text=report_text,
+        )

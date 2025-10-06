@@ -48,6 +48,7 @@ class _DummyPlugin(SpectroscopyPlugin):
             qc_table=list(qc),
             figures={"Result": figure_bytes},
             audit=["analysis complete"],
+            report_text="Dummy narrative summary.",
         )
 
 
@@ -82,7 +83,9 @@ def test_run_controller_populates_docks(qt_app):
         assert window.qcDock.model.rowCount() == 1
 
         log_text = window.loggerDock.text.toPlainText()
+        assert "Dummy narrative summary." in log_text
         assert "analysis complete" in log_text
+        assert log_text.index("Dummy narrative summary.") < log_text.index("analysis complete")
     finally:
         window.close()
         window.deleteLater()
