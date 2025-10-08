@@ -18,7 +18,7 @@ Wavelength (nm);Absorbance
     path = tmp_path / "sample_helios.csv"
     path.write_text(helios_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin(enable_manifest=True)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -49,7 +49,7 @@ def test_helios_excel_parsing(tmp_path):
     path = tmp_path / "helios.xlsx"
     df.to_excel(path, index=False, header=False)
 
-    plugin = UvVisPlugin(enable_manifest=True)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -79,7 +79,7 @@ wavelength,Sample A,Blank Control
     path = tmp_path / "generic.csv"
     path.write_text(generic_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin(enable_manifest=True)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 2
@@ -160,7 +160,7 @@ VISIONlite Scan Version 2.1
     path = tmp_path / "sample01.dsp"
     path.write_text(dsp_text, encoding="utf-8")
 
-    plugin = UvVisPlugin(enable_manifest=True)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -189,7 +189,7 @@ wavelength,Sample
     path = tmp_path / "reflectance.csv"
     path.write_text(generic_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin(enable_manifest=True)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -270,7 +270,7 @@ priority.csv,Sample A,Treated-A,File-Blank,
     assert spec.meta.get("treatment") == "Default-Treatment"
 
 
-def test_manifest_metadata_ignored_when_disabled(tmp_path):
+def test_manifest_metadata_ignored_with_default_configuration(tmp_path):
     generic_csv = """wavelength,Sample A,Sample B,Blank Control
 200,0.100,0.200,0.010
 205,0.105,0.205,0.011
@@ -293,8 +293,8 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     assert "Treated-A" in enabled_by_id
     assert enabled_by_id["Treated-A"].meta["replicate_id"] == "rep-1"
 
-    disabled_plugin = UvVisPlugin(enable_manifest=False)
-    disabled_spectra = disabled_plugin.load([str(data_path), str(manifest_path)])
+    default_plugin = UvVisPlugin()
+    disabled_spectra = default_plugin.load([str(data_path), str(manifest_path)])
 
     assert len(disabled_spectra) == 3
     disabled_by_id = {spec.meta["sample_id"]: spec for spec in disabled_spectra}
@@ -377,7 +377,7 @@ def test_manifest_alias_assignments_from_excel(tmp_path):
     assert blank_spec.meta["group_id"] == "QC"
 
 
-def test_manifest_named_csv_when_disabled(tmp_path):
+def test_manifest_named_csv_with_default_settings(tmp_path):
     content = """wavelength,Sample
 200,0.100
 205,0.110
@@ -385,7 +385,7 @@ def test_manifest_named_csv_when_disabled(tmp_path):
     path = tmp_path / "sample_manifest.csv"
     path.write_text(content, encoding="utf-8")
 
-    plugin = UvVisPlugin(enable_manifest=False)
+    plugin = UvVisPlugin()
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1

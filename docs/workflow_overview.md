@@ -12,16 +12,17 @@ Batches started through `RunController` fan out work onto the global Qt thread
 pool. Each run executes the following stages in order:
 
 1. **Load** – the plugin's `load` hook reads spectra from the supplied paths and
-   normalises metadata. The stage is responsible for optional manifest joins
-   and raw file decoding.【F:spectro_app/engine/run_controller.py†L10-L38】【F:spectro_app/plugins/uvvis/plugin.py†L171-L313】
+   normalises metadata. The stage is responsible for optional (deprecated)
+   manifest joins and raw file decoding.【F:spectro_app/engine/run_controller.py†L10-L38】【F:spectro_app/plugins/uvvis/plugin.py†L171-L313】
    - *Normalises metadata* means that each spectrum's `meta` dict is cleaned so
      keys/values follow a predictable format (e.g. lower-casing roles,
      back-filling `blank_id`, defaulting the technique and source file). This
      prevents downstream code from juggling per-file quirks.【F:spectro_app/plugins/uvvis/plugin.py†L232-L309】
    - *Manifest join* refers to the merge between parsed manifest rows and the
-     instrument metadata. The loader builds lookups by file, sample and channel
-     so that the most specific manifest entry wins before copying its fields
-     into each spectrum.【F:spectro_app/plugins/uvvis/plugin.py†L214-L355】
+     instrument metadata when the deprecated manifest pathway is explicitly
+     enabled. The loader builds lookups by file, sample and channel so that the
+     most specific manifest entry wins before copying its fields into each
+     spectrum.【F:spectro_app/plugins/uvvis/plugin.py†L214-L355】
    - *Raw file decoding* covers the family of readers that convert vendor CSV,
      Excel or Helios `.dsp` exports into wavelength/intensity arrays while
      extracting header metadata and inferring blanks/modes.【F:spectro_app/plugins/uvvis/plugin.py†L248-L309】【F:spectro_app/plugins/uvvis/plugin.py†L758-L868】
@@ -141,8 +142,8 @@ The preprocessing stage honours the following recipe keys:
 
 ### Additional feature gates
 
-- **Manifest ingestion** – manifests are now opt-in. Instantiate
-  `UvVisPlugin(enable_manifest=True)` *and* enable the
+- **Manifest ingestion** – manifests are now deprecated and remain disabled by
+  default. Instantiate `UvVisPlugin(enable_manifest=True)` *and* enable the
   `manifest_enrichment` UI capability when CSV/Excel descriptors should be
   merged using the precedence described above. Leave the defaults in place to
   ignore manifests entirely.【F:spectro_app/plugins/uvvis/plugin.py†L90-L355】

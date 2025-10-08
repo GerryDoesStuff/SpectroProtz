@@ -324,11 +324,11 @@ class FileQueueDock(QDockWidget):
     @staticmethod
     def _manifest_badge(status: Optional[str]) -> Optional[QueueBadge]:
         mapping = {
-            "linked": QueueBadge(text="Manifest", category="manifest-ok", tooltip="Manifest metadata linked"),
-            "missing": QueueBadge(text="No Manifest", category="manifest-missing", tooltip="No manifest entry matched"),
-            "none": QueueBadge(text="No Manifest", category="manifest-na", tooltip="No manifest provided"),
-            "unsupported": QueueBadge(text="Manifest N/A", category="manifest-na", tooltip="Plugin does not support manifests"),
-            "manifest-error": QueueBadge(text="Manifest ⚠", category="manifest-error", tooltip="Manifest metadata unavailable"),
+            "linked": QueueBadge(text="Manifest (deprecated)", category="manifest-ok", tooltip="Legacy manifest metadata applied; feature is deprecated"),
+            "missing": QueueBadge(text="Manifest Missing", category="manifest-missing", tooltip="Deprecated manifest file provided but no rows matched"),
+            "none": QueueBadge(text="No Manifest", category="manifest-na", tooltip="Manifests are ignored unless explicitly enabled"),
+            "unsupported": QueueBadge(text="Manifest N/A", category="manifest-na", tooltip="Plugin does not expose the deprecated manifest feature"),
+            "manifest-error": QueueBadge(text="Manifest ⚠", category="manifest-error", tooltip="Deprecated manifest metadata could not be read"),
         }
         if not status:
             return None
@@ -432,14 +432,15 @@ class FileQueueDock(QDockWidget):
             names += "\n…"
         message = (
             "Manifest files were detected along with spectra.\n\n"
-            "Include the manifests when updating the queue?"
+            "Manifest ingestion is deprecated and disabled by default; include the"
+            " manifests anyway when updating the queue?"
         )
         if names:
             message += f"\n\nDetected manifests:\n{names}"
 
         choice = QtWidgets.QMessageBox.question(
             self,
-            "Include Manifest Files?",
+            "Include Deprecated Manifest Files?",
             message,
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No

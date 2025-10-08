@@ -18,7 +18,7 @@ Input & ingestion
 
 Drag-and-drop files/folders; file queue with badges (technique, A/%T, blank/sample).
 
-Manifest CSV for sample↔blank mapping, groupings (dose/site), replicate IDs (optional enrichment; enable via `UvVisPlugin(enable_manifest=True)` with the `manifest_enrichment` UI capability when manifests should be merged).
+Deprecated manifest CSV enrichment for sample↔blank mapping, groupings (dose/site), replicate IDs (opt-in only—standard workflows ignore manifests unless `UvVisPlugin(enable_manifest=True)` is used together with the `manifest_enrichment` UI capability).
   - Columns (case-insensitive): `file` (optional; basename or path), `channel`/`column` (optional; raw trace label),
     `sample_id` (final label), `blank_id`, `replicate`/`replicate_id`, `group`/`group_id`, `role`, `notes`.
   - Rows without `file` act as defaults; matching prefers file+channel, then file+sample, then global fallbacks.

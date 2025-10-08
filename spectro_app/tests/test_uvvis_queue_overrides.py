@@ -8,7 +8,7 @@ def _write_simple_csv(path):
 def test_queue_override_marks_blank(tmp_path):
     csv_path = tmp_path / "sample.csv"
     _write_simple_csv(csv_path)
-    plugin = UvVisPlugin(enable_manifest=False)
+    plugin = UvVisPlugin()
 
     specs = plugin.load([str(csv_path)])
     assert specs
@@ -23,7 +23,7 @@ def test_queue_override_marks_blank(tmp_path):
 def test_queue_override_blank_id_defaults(tmp_path):
     csv_path = tmp_path / "blank.csv"
     _write_simple_csv(csv_path)
-    plugin = UvVisPlugin(enable_manifest=False)
+    plugin = UvVisPlugin()
 
     plugin.set_queue_overrides({str(csv_path): {"role": "blank"}})
     specs = plugin.load([str(csv_path)])
