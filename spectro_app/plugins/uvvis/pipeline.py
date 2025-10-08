@@ -1179,6 +1179,7 @@ def blank_match_identifiers(spec: Spectrum, strategy: str | None = None) -> List
         if slot is not None:
             identifiers.append(slot)
 
+    suffix = "_indref"
     for candidate in (
         spec.meta.get("blank_id"),
         spec.meta.get("sample_id"),
@@ -1189,6 +1190,10 @@ def blank_match_identifiers(spec: Spectrum, strategy: str | None = None) -> List
             continue
         if coerced not in identifiers:
             identifiers.append(coerced)
+        if coerced.lower().endswith(suffix):
+            base = coerced[: -len(suffix)]
+            if base and base not in identifiers:
+                identifiers.append(base)
 
     return identifiers
 

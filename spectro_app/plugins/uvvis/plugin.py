@@ -1315,6 +1315,20 @@ class UvVisPlugin(SpectroscopyPlugin):
             blank_id_value = _normalize_identifier(spec.meta.get("blank_id"))
             if blank_id_value and blank_id_value not in candidates:
                 candidates.append(blank_id_value)
+            else:
+                derived_sources: list[str] = []
+                for key in ("sample_id", "channel"):
+                    derived = _normalize_identifier(spec.meta.get(key))
+                    if derived and derived not in derived_sources:
+                        derived_sources.append(derived)
+                suffix = "_indref"
+                for derived in derived_sources:
+                    if derived not in candidates:
+                        candidates.append(derived)
+                    if not derived.lower().endswith(suffix):
+                        indref_candidate = f"{derived}_indRef"
+                        if indref_candidate not in candidates:
+                            candidates.append(indref_candidate)
             if fallback_identifier and fallback_identifier not in candidates:
                 candidates.append(fallback_identifier)
 
