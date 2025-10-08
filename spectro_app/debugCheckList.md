@@ -40,7 +40,7 @@ PEES: minimal CSV with missing metadata field.
 
  Context menu: “Inspect header”, “Preview raw”, “Locate on disk” work.
 
- Manifest CSV loads; bad mappings warn but don’t crash; missing blank → fallback to nearest-in-time with warning.
+ If the deprecated manifest enrichment is enabled, CSV loads and bad mappings warn but don’t crash; missing blank → fallback to nearest-in-time with warning. Default runs should ignore manifests without disruption.
 
 4) Plugin detection & switching
 
@@ -92,7 +92,7 @@ PEES
 
 8) Blank & baseline
 
- Blank mapping by manifest; if absent, nearest-in-time within window; pathlength mismatch warns.
+ Blank mapping honours deprecated manifest enrichment when explicitly enabled; otherwise nearest-in-time within window; pathlength mismatch warns.
 
  After blank subtraction: negative A allowed but flagged; values preserved.
 
