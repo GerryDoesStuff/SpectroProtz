@@ -103,6 +103,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "requested_paths": [],
                 "data_files": [],
                 "manifest_files": [],
+                "warnings": [],
                 "spectra_count": 0,
                 "blank_count": 0,
                 "manifest_entry_count": 0,
@@ -315,27 +316,32 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         if self.enable_manifest:
             manifest_index, manifest_files = self._build_manifest_index(path_objects)
-        ingestion_ctx["manifest_files"] = sorted(str(path) for path in manifest_files)
 
         manifest_entries: List[Dict[str, object]] = []
         data_paths: List[Path] = []
         has_non_manifest_candidate = any(
             not self._is_manifest_file(path) for path in path_objects
         )
-
         for path_str in paths:
             path = Path(path_str)
             is_manifest = self._is_manifest_file(path)
-            if is_manifest and self.enable_manifest:
-                manifest_entries.extend(self._parse_manifest_file(path))
-                continue
-            if (
-                not self.enable_manifest
-                and is_manifest
-                and has_non_manifest_candidate
-            ):
-                continue
+            if is_manifest:
+                manifest_files.add(path)
+                if self.enable_manifest:
+                    manifest_entries.extend(self._parse_manifest_file(path))
+                    continue
+                else:
+                    if has_non_manifest_candidate:
+                        ingestion_ctx.setdefault("warnings", []).append(
+                            (
+                                f"Ignored manifest file {path.name} because manifest ingestion is disabled "
+                                "(deprecated opt-in)."
+                            )
+                        )
+                        continue
             data_paths.append(path)
+
+        ingestion_ctx["manifest_files"] = sorted(str(path) for path in manifest_files)
 
         ingestion_ctx["data_files"] = [str(path) for path in data_paths]
         manifest_lookup = (
@@ -3764,6 +3770,9 @@ class UvVisPlugin(SpectroscopyPlugin):
                 ingestion_lines.append(f"Manifest files: {manifest_names}.")
         if not ingestion.get("manifest_enabled", True):
             ingestion_lines.append("Manifest enrichment disabled for this run.")
+        warnings = ingestion.get("warnings") or []
+        for warning in warnings:
+            ingestion_lines.append(f"Warning: {warning}")
 
         preprocessing_lines: List[str] = []
         domain_cfg = preprocessing.get("domain") or {}
