@@ -387,6 +387,11 @@ class FileQueueDock(QDockWidget):
 
         manifest_paths: List[Path] = []
         data_paths: List[Path] = []
+        plugin = self._resolve_plugin_for_paths(ordered_paths)
+        manifest_supported = bool(
+            plugin and getattr(plugin, "manifest_ui_capability_enabled", False)
+        )
+
 
         if manifest_ui_enabled and plugin and hasattr(plugin, "_is_manifest_file"):
             for path in ordered_paths:

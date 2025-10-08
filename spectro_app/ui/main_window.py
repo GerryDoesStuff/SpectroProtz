@@ -782,6 +782,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             technique_label = None
 
+        manifest_supported = False
+        if active_plugin is not None:
+            manifest_supported = bool(
+                getattr(active_plugin, "manifest_ui_capability_enabled", False)
+            )
         manifest_detection_available = bool(
             active_plugin and hasattr(active_plugin, "_is_manifest_file")
         )
