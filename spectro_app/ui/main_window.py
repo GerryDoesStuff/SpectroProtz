@@ -787,12 +787,16 @@ class MainWindow(QtWidgets.QMainWindow):
             manifest_supported = bool(
                 getattr(active_plugin, "manifest_ui_capability_enabled", False)
             )
+        manifest_detection_available = bool(
+            active_plugin and hasattr(active_plugin, "_is_manifest_file")
+        )
+        manifest_supported = self._plugin_supports_manifest_ui(active_plugin)
         manifest_entries: List[Dict[str, object]] = []
         manifest_lookup: Dict[str, Dict[str, Dict[str, object]]] = {}
         manifest_files: set[str] = set()
         manifest_errors: set[str] = set()
 
-        if manifest_supported:
+        if manifest_detection_available:
             for path_str in normalized:
                 path_obj = Path(path_str)
                 try:
@@ -801,7 +805,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     is_manifest = False
                 if is_manifest:
                     manifest_files.add(path_str)
-                    if hasattr(active_plugin, "_parse_manifest_file"):
+                    if manifest_supported and hasattr(active_plugin, "_parse_manifest_file"):
                         try:
                             parsed = active_plugin._parse_manifest_file(path_obj)  # type: ignore[attr-defined]
                         except Exception:
@@ -809,7 +813,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         else:
                             if parsed:
                                 manifest_entries.extend(parsed)
-            if manifest_entries and hasattr(active_plugin, "_build_manifest_lookup"):
+            if (
+                manifest_supported
+                and manifest_entries
+                and hasattr(active_plugin, "_build_manifest_lookup")
+            ):
                 try:
                     manifest_lookup = active_plugin._build_manifest_lookup(manifest_entries)  # type: ignore[attr-defined]
                 except Exception:
@@ -818,12 +826,15 @@ class MainWindow(QtWidgets.QMainWindow):
         entries: List[QueueEntry] = []
         for path_str in normalized:
             path_obj = Path(path_str)
-            is_manifest = path_str in manifest_files
-            manifest_status: Optional[str]
+            is_manifest_candidate = path_str in manifest_files
+            is_manifest = bool(is_manifest_candidate and manifest_supported)
+            manifest_status: Optional[str] = None
             manifest_meta: Dict[str, object] = {}
 
             if active_plugin is None:
                 manifest_status = None
+            elif is_manifest_candidate and not manifest_supported:
+                manifest_status = "unsupported"
             elif is_manifest:
                 manifest_status = "manifest-error" if path_str in manifest_errors else "manifest"
             elif manifest_supported:
@@ -842,8 +853,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     manifest_status = "missing"
                 else:
                     manifest_status = "none"
-            else:
-                manifest_status = "unsupported"
 
             role: Optional[str] = None
             mode: Optional[str] = None
@@ -855,7 +864,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if isinstance(mode_value, str):
                     mode = mode_value.strip().lower() or None
 
-            metadata = dict(manifest_meta)
+            metadata = dict(manifest_meta) if manifest_supported else {}
             display_name = path_obj.name or path_str
             entries.append(
                 QueueEntry(
@@ -872,6 +881,27 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         return entries
+
+    @staticmethod
+    def _plugin_supports_manifest_ui(plugin: Optional[object]) -> bool:
+        if not plugin or not hasattr(plugin, "_is_manifest_file"):
+            return False
+
+        supports_manifest = getattr(plugin, "supports_manifest_ui", None)
+        if callable(supports_manifest):
+            try:
+                return bool(supports_manifest())
+            except Exception:
+                return True
+
+        expose_attr = getattr(plugin, "expose_manifest_ui", None)
+        if expose_attr is None:
+            return True
+
+        try:
+            return bool(expose_attr()) if callable(expose_attr) else bool(expose_attr)
+        except Exception:
+            return True
 
     def _refresh_queue_metadata(self) -> None:
         if not self._queued_paths:

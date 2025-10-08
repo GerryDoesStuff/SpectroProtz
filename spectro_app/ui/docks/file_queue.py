@@ -382,6 +382,9 @@ class FileQueueDock(QDockWidget):
         if not ordered_paths:
             return
 
+        plugin = self._resolve_plugin_for_paths(ordered_paths)
+        manifest_ui_enabled = self._plugin_supports_manifest_ui(plugin)
+
         manifest_paths: List[Path] = []
         data_paths: List[Path] = []
         plugin = self._resolve_plugin_for_paths(ordered_paths)
@@ -389,7 +392,8 @@ class FileQueueDock(QDockWidget):
             plugin and getattr(plugin, "manifest_ui_capability_enabled", False)
         )
 
-        if manifest_supported and hasattr(plugin, "_is_manifest_file"):
+
+        if manifest_ui_enabled and plugin and hasattr(plugin, "_is_manifest_file"):
             for path in ordered_paths:
                 try:
                     is_manifest = bool(plugin._is_manifest_file(path))  # type: ignore[attr-defined]
@@ -456,6 +460,27 @@ class FileQueueDock(QDockWidget):
             return self._plugin_resolver([str(p) for p in paths])
         except Exception:
             return None
+
+    @staticmethod
+    def _plugin_supports_manifest_ui(plugin: Optional[object]) -> bool:
+        if not plugin or not hasattr(plugin, "_is_manifest_file"):
+            return False
+
+        supports_manifest = getattr(plugin, "supports_manifest_ui", None)
+        if callable(supports_manifest):
+            try:
+                return bool(supports_manifest())
+            except Exception:
+                return True
+
+        expose_attr = getattr(plugin, "expose_manifest_ui", None)
+        if expose_attr is None:
+            return True
+
+        try:
+            return bool(expose_attr()) if callable(expose_attr) else bool(expose_attr)
+        except Exception:
+            return True
 
     # ------------------------------------------------------------------
     # Context menu actions

@@ -119,6 +119,11 @@ class UvVisPlugin(SpectroscopyPlugin):
             effective_caps = dict(ui_capabilities) if ui_capabilities else None
         self.set_ui_capabilities(effective_caps)
 
+    def supports_manifest_ui(self) -> bool:
+        """Return whether the plugin should expose manifest-related UI."""
+
+        return bool(self.enable_manifest)
+
     def _reset_report_context(self) -> None:
         self._report_context = {
             "ingestion": {
