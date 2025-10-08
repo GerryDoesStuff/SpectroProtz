@@ -90,7 +90,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     }
     DEFAULT_QC_QUIET_WINDOW_NM = (850.0, 900.0)
 
-    def __init__(self, *, enable_manifest: bool = True) -> None:
+    def __init__(self, *, enable_manifest: bool = False) -> None:
         self.enable_manifest = bool(enable_manifest)
         self._last_calibration_results: Dict[str, Any] | None = None
         self._report_context: Dict[str, Dict[str, Any]] = {}

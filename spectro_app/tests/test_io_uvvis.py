@@ -220,7 +220,7 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     manifest_path = tmp_path / "manifest.csv"
     manifest_path.write_text(manifest_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 3
@@ -260,7 +260,7 @@ priority.csv,Sample A,Treated-A,File-Blank,
     manifest_path = tmp_path / "uv_manifest.csv"
     manifest_path.write_text(manifest_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 1
@@ -311,6 +311,41 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     assert "replicate_id" not in blank_spec.meta
 
 
+
+def test_manifest_metadata_ignored_by_default(tmp_path):
+    generic_csv = """wavelength,Sample A,Sample B,Blank Control
+200,0.100,0.200,0.010
+205,0.105,0.205,0.011
+"""
+    data_path = tmp_path / "generic.csv"
+    data_path.write_text(generic_csv, encoding="utf-8")
+
+    manifest_csv = """file,channel,sample_id,blank_id,replicate,group,role
+generic.csv,Sample A,Treated-A,Blank-01,rep-1,Dose-Low,
+generic.csv,Sample B,Treated-B,Blank-01,rep-2,Dose-Low,
+generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
+"""
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(manifest_csv, encoding="utf-8")
+
+    default_plugin = UvVisPlugin()
+    spectra = default_plugin.load([str(data_path), str(manifest_path)])
+
+    assert len(spectra) == 3
+    by_id = {spec.meta["sample_id"]: spec for spec in spectra}
+
+    assert "Sample A" in by_id
+    sample_a = by_id["Sample A"]
+    assert sample_a.meta["blank_id"] == "Blank Control"
+    assert "replicate_id" not in sample_a.meta
+    assert "group_id" not in sample_a.meta
+
+    blank_spec = by_id["Blank Control"]
+    assert blank_spec.meta["role"] == "blank"
+    assert blank_spec.meta["blank_id"] == "Blank Control"
+    assert "replicate_id" not in blank_spec.meta
+
+
 def test_manifest_alias_assignments_from_excel(tmp_path):
     generic_csv = """wavelength,Sample A,Sample B,Blank Control
 200,0.100,0.200,0.010
@@ -352,7 +387,7 @@ def test_manifest_alias_assignments_from_excel(tmp_path):
     manifest_path = tmp_path / "manifest.xlsx"
     manifest_df.to_excel(manifest_path, index=False)
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 3

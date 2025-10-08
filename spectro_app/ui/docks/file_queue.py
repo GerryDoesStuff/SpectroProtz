@@ -270,7 +270,7 @@ class FileQueueDock(QDockWidget):
                     QueueBadge(
                         text="Manifest",
                         category="manifest-file",
-                        tooltip="Manifest file",
+                        tooltip="Manifest file (deprecated workflow)",
                     )
                 )
             return badges
@@ -324,11 +324,36 @@ class FileQueueDock(QDockWidget):
     @staticmethod
     def _manifest_badge(status: Optional[str]) -> Optional[QueueBadge]:
         mapping = {
-            "linked": QueueBadge(text="Manifest", category="manifest-ok", tooltip="Manifest metadata linked"),
-            "missing": QueueBadge(text="No Manifest", category="manifest-missing", tooltip="No manifest entry matched"),
-            "none": QueueBadge(text="No Manifest", category="manifest-na", tooltip="No manifest provided"),
-            "unsupported": QueueBadge(text="Manifest N/A", category="manifest-na", tooltip="Plugin does not support manifests"),
-            "manifest-error": QueueBadge(text="Manifest ⚠", category="manifest-error", tooltip="Manifest metadata unavailable"),
+            "linked": QueueBadge(
+                text="Manifest",
+                category="manifest-ok",
+                tooltip="Manifest metadata linked (deprecated feature)",
+            ),
+            "missing": QueueBadge(
+                text="No Manifest",
+                category="manifest-missing",
+                tooltip="No manifest entry matched (feature opt-in)",
+            ),
+            "none": QueueBadge(
+                text="No Manifest",
+                category="manifest-na",
+                tooltip="Manifest not supplied; ingestion is deprecated and off by default",
+            ),
+            "disabled": QueueBadge(
+                text="Manifest Off",
+                category="manifest-na",
+                tooltip="Manifest ingestion disabled (deprecated opt-in)",
+            ),
+            "unsupported": QueueBadge(
+                text="Manifest N/A",
+                category="manifest-na",
+                tooltip="Plugin does not support manifests",
+            ),
+            "manifest-error": QueueBadge(
+                text="Manifest ⚠",
+                category="manifest-error",
+                tooltip="Manifest metadata unavailable",
+            ),
         }
         if not status:
             return None
@@ -386,6 +411,10 @@ class FileQueueDock(QDockWidget):
         data_paths: List[Path] = []
         plugin = self._resolve_plugin_for_paths(ordered_paths)
 
+        manifest_enabled = True
+        if plugin:
+            manifest_enabled = bool(getattr(plugin, "enable_manifest", True))
+
         if plugin and hasattr(plugin, "_is_manifest_file"):
             for path in ordered_paths:
                 try:
@@ -401,9 +430,12 @@ class FileQueueDock(QDockWidget):
 
         include_manifests = True
         if manifest_paths and data_paths:
-            include_manifests = self._confirm_manifest_inclusion(manifest_paths)
-            if include_manifests is None:
-                return
+            if manifest_enabled:
+                include_manifests = self._confirm_manifest_inclusion(manifest_paths)
+                if include_manifests is None:
+                    return
+            else:
+                include_manifests = False
 
         final_paths: List[str]
         if include_manifests:
@@ -425,6 +457,7 @@ class FileQueueDock(QDockWidget):
             names += "\n…"
         message = (
             "Manifest files were detected along with spectra.\n\n"
+            "Manifests are deprecated and ignored unless the plugin opts in to use them.\n"
             "Include the manifests when updating the queue?"
         )
         if names:
@@ -592,7 +625,11 @@ class FileQueueDock(QDockWidget):
             item.setData(QUEUE_ENTRY_ROLE, entry)
             tooltip_lines = [entry.path]
             if entry.manifest_status:
-                tooltip_lines.append(f"Manifest: {entry.manifest_status}")
+                status_label = {
+                    "disabled": "off (deprecated opt-in)",
+                    "none": "not provided (feature off by default)",
+                }.get(entry.manifest_status, entry.manifest_status)
+                tooltip_lines.append(f"Manifest: {status_label}")
             if entry.metadata:
                 for key, value in entry.metadata.items():
                     tooltip_lines.append(f"{key}: {value}")

@@ -92,7 +92,7 @@ PEES
 
 8) Blank & baseline
 
- Blank mapping by manifest; if absent, nearest-in-time within window; pathlength mismatch warns.
+ Blank mapping by manifest when the opt-in feature is enabled; otherwise nearest-in-time within window; pathlength mismatch warns.
 
  After blank subtraction: negative A allowed but flagged; values preserved.
 

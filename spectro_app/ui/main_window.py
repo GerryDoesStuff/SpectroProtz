@@ -783,6 +783,7 @@ class MainWindow(QtWidgets.QMainWindow):
             technique_label = None
 
         manifest_supported = bool(active_plugin and hasattr(active_plugin, "_is_manifest_file"))
+        manifest_enabled = bool(getattr(active_plugin, "enable_manifest", True)) if active_plugin else True
         manifest_entries: List[Dict[str, object]] = []
         manifest_lookup: Dict[str, Dict[str, Dict[str, object]]] = {}
         manifest_files: set[str] = set()
@@ -797,7 +798,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     is_manifest = False
                 if is_manifest:
                     manifest_files.add(path_str)
-                    if hasattr(active_plugin, "_parse_manifest_file"):
+                    if manifest_enabled and hasattr(active_plugin, "_parse_manifest_file"):
                         try:
                             parsed = active_plugin._parse_manifest_file(path_obj)  # type: ignore[attr-defined]
                         except Exception:
@@ -805,7 +806,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         else:
                             if parsed:
                                 manifest_entries.extend(parsed)
-            if manifest_entries and hasattr(active_plugin, "_build_manifest_lookup"):
+            if manifest_enabled and manifest_entries and hasattr(active_plugin, "_build_manifest_lookup"):
                 try:
                     manifest_lookup = active_plugin._build_manifest_lookup(manifest_entries)  # type: ignore[attr-defined]
                 except Exception:
@@ -823,21 +824,24 @@ class MainWindow(QtWidgets.QMainWindow):
             elif is_manifest:
                 manifest_status = "manifest-error" if path_str in manifest_errors else "manifest"
             elif manifest_supported:
-                if manifest_lookup and hasattr(active_plugin, "_lookup_manifest_entries"):
-                    try:
-                        manifest_meta = active_plugin._lookup_manifest_entries(  # type: ignore[attr-defined]
-                            manifest_lookup,
-                            path_obj,
-                            {},
-                        ) or {}
-                    except Exception:
-                        manifest_meta = {}
-                if manifest_meta:
-                    manifest_status = "linked"
-                elif manifest_files:
-                    manifest_status = "missing"
+                if manifest_enabled:
+                    if manifest_lookup and hasattr(active_plugin, "_lookup_manifest_entries"):
+                        try:
+                            manifest_meta = active_plugin._lookup_manifest_entries(  # type: ignore[attr-defined]
+                                manifest_lookup,
+                                path_obj,
+                                {},
+                            ) or {}
+                        except Exception:
+                            manifest_meta = {}
+                    if manifest_meta:
+                        manifest_status = "linked"
+                    elif manifest_files:
+                        manifest_status = "missing"
+                    else:
+                        manifest_status = "none"
                 else:
-                    manifest_status = "none"
+                    manifest_status = "disabled"
             else:
                 manifest_status = "unsupported"
 
