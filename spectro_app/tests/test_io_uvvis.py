@@ -18,7 +18,7 @@ Wavelength (nm);Absorbance
     path = tmp_path / "sample_helios.csv"
     path.write_text(helios_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -49,7 +49,7 @@ def test_helios_excel_parsing(tmp_path):
     path = tmp_path / "helios.xlsx"
     df.to_excel(path, index=False, header=False)
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -79,7 +79,7 @@ wavelength,Sample A,Blank Control
     path = tmp_path / "generic.csv"
     path.write_text(generic_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 2
@@ -160,7 +160,7 @@ VISIONlite Scan Version 2.1
     path = tmp_path / "sample01.dsp"
     path.write_text(dsp_text, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -189,7 +189,7 @@ wavelength,Sample
     path = tmp_path / "reflectance.csv"
     path.write_text(generic_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(path)])
 
     assert len(spectra) == 1
@@ -220,7 +220,7 @@ generic.csv,Blank Control,Blank-01,,ref-blank,QC,blank
     manifest_path = tmp_path / "manifest.csv"
     manifest_path.write_text(manifest_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 3
@@ -260,7 +260,7 @@ priority.csv,Sample A,Treated-A,File-Blank,
     manifest_path = tmp_path / "uv_manifest.csv"
     manifest_path.write_text(manifest_csv, encoding="utf-8")
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 1
@@ -352,7 +352,7 @@ def test_manifest_alias_assignments_from_excel(tmp_path):
     manifest_path = tmp_path / "manifest.xlsx"
     manifest_df.to_excel(manifest_path, index=False)
 
-    plugin = UvVisPlugin()
+    plugin = UvVisPlugin(enable_manifest=True)
     spectra = plugin.load([str(data_path), str(manifest_path)])
 
     assert len(spectra) == 3

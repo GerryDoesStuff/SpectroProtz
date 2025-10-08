@@ -141,9 +141,11 @@ The preprocessing stage honours the following recipe keys:
 
 ### Additional feature gates
 
-- **Manifest ingestion** – construct `UvVisPlugin(enable_manifest=False)` to
-  bypass manifest parsing. Leave it `True` (the default) to merge CSV/Excel
-  descriptors using the join precedence described above.【F:spectro_app/plugins/uvvis/plugin.py†L90-L355】
+- **Manifest ingestion** – manifests are now opt-in. Instantiate
+  `UvVisPlugin(enable_manifest=True)` *and* enable the
+  `manifest_enrichment` UI capability when CSV/Excel descriptors should be
+  merged using the precedence described above. Leave the defaults in place to
+  ignore manifests entirely.【F:spectro_app/plugins/uvvis/plugin.py†L90-L355】
 - **Feature extraction** – populate the `features` section to override peak
   detection (`prominence`, `min_distance`, `max_peaks`, `height`), band ratios
   (`numerator`, `denominator`, `bandwidth`), integrals (`min`/`max` windows),

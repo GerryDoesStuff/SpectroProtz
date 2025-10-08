@@ -15,6 +15,7 @@ import os
 import io
 import math
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
@@ -90,12 +91,33 @@ class UvVisPlugin(SpectroscopyPlugin):
     }
     DEFAULT_QC_QUIET_WINDOW_NM = (850.0, 900.0)
 
-    def __init__(self, *, enable_manifest: bool = True) -> None:
+    UI_CAPABILITY_MANIFEST = "manifest_enrichment"
+
+    def __init__(
+        self,
+        *,
+        enable_manifest: bool = False,
+        ui_capabilities: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        if enable_manifest:
+            warnings.warn(
+                "enable_manifest=True is deprecated; configure UI capabilities instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.enable_manifest = bool(enable_manifest)
         self._last_calibration_results: Dict[str, Any] | None = None
         self._report_context: Dict[str, Dict[str, Any]] = {}
         self._queue_overrides: Dict[str, Dict[str, object]] = {}
+        self._ui_capabilities: Dict[str, bool] = {}
         self._reset_report_context()
+        if ui_capabilities is None and self.enable_manifest:
+            effective_caps: Dict[str, bool] | None = {
+                self.UI_CAPABILITY_MANIFEST: True
+            }
+        else:
+            effective_caps = dict(ui_capabilities) if ui_capabilities else None
+        self.set_ui_capabilities(effective_caps)
 
     def _reset_report_context(self) -> None:
         self._report_context = {
@@ -108,12 +130,38 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "manifest_entry_count": 0,
                 "manifest_index_hits": 0,
                 "manifest_lookup_hits": 0,
-                "manifest_enabled": bool(self.enable_manifest),
+                "manifest_enabled": bool(self._manifest_pipeline_enabled()),
             },
             "preprocessing": {},
             "analysis": {},
             "results": {},
         }
+
+    def set_ui_capabilities(self, capabilities: Mapping[str, object] | None) -> None:
+        values: Dict[str, bool] = {}
+        if capabilities:
+            for key, value in capabilities.items():
+                if value is None:
+                    continue
+                key_str = str(key).strip().lower()
+                if not key_str:
+                    continue
+                try:
+                    enabled = bool(value)
+                except Exception:
+                    enabled = False
+                values[key_str] = enabled
+        self._ui_capabilities = values
+        ingestion = self._report_context.get("ingestion")
+        if isinstance(ingestion, dict):
+            ingestion["manifest_enabled"] = bool(self._manifest_pipeline_enabled())
+
+    @property
+    def manifest_ui_capability_enabled(self) -> bool:
+        return bool(self._ui_capabilities.get(self.UI_CAPABILITY_MANIFEST))
+
+    def _manifest_pipeline_enabled(self) -> bool:
+        return bool(self.enable_manifest and self.manifest_ui_capability_enabled)
 
     def set_queue_overrides(self, overrides: Mapping[str, Mapping[str, object]] | None) -> None:
         normalized: Dict[str, Dict[str, object]] = {}
@@ -312,10 +360,14 @@ class UvVisPlugin(SpectroscopyPlugin):
         ingestion_ctx["requested_paths"] = [str(path) for path in path_objects]
         manifest_files: Set[Path] = set()
         manifest_index: UvVisPlugin._ManifestIndex | None = None
+        manifest_allowed = self._manifest_pipeline_enabled()
 
-        if self.enable_manifest:
+        if manifest_allowed:
             manifest_index, manifest_files = self._build_manifest_index(path_objects)
-        ingestion_ctx["manifest_files"] = sorted(str(path) for path in manifest_files)
+        ingestion_ctx["manifest_files"] = (
+            sorted(str(path) for path in manifest_files) if manifest_allowed else []
+        )
+        ingestion_ctx["manifest_enabled"] = bool(manifest_allowed)
 
         manifest_entries: List[Dict[str, object]] = []
         data_paths: List[Path] = []
@@ -326,11 +378,11 @@ class UvVisPlugin(SpectroscopyPlugin):
         for path_str in paths:
             path = Path(path_str)
             is_manifest = self._is_manifest_file(path)
-            if is_manifest and self.enable_manifest:
+            if is_manifest and manifest_allowed:
                 manifest_entries.extend(self._parse_manifest_file(path))
                 continue
             if (
-                not self.enable_manifest
+                not manifest_allowed
                 and is_manifest
                 and has_non_manifest_candidate
             ):
@@ -340,7 +392,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         ingestion_ctx["data_files"] = [str(path) for path in data_paths]
         manifest_lookup = (
             self._build_manifest_lookup(manifest_entries)
-            if self.enable_manifest
+            if manifest_allowed
             else {}
         )
 
@@ -382,7 +434,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                             meta[key] = value
                 index_hit = False
                 lookup_hit = False
-                if self.enable_manifest and manifest_index:
+                if manifest_allowed and manifest_index:
                     updates = self._lookup_manifest_index(manifest_index, path, meta)
                     if updates:
                         index_hit = True
@@ -400,7 +452,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                                 and meta.get("blank_id") == meta.get("channel")
                             ):
                                 meta["blank_id"] = meta.get("sample_id")
-                if self.enable_manifest and manifest_lookup:
+                if manifest_allowed and manifest_lookup:
                     manifest_meta = self._lookup_manifest_entries(
                         manifest_lookup, path, meta
                     )
@@ -421,9 +473,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                 if lookup_hit:
                     manifest_lookup_hits += 1
 
-        ingestion_ctx["manifest_entry_count"] = len(manifest_entries)
-        ingestion_ctx["manifest_index_hits"] = manifest_index_hits
-        ingestion_ctx["manifest_lookup_hits"] = manifest_lookup_hits
+        ingestion_ctx["manifest_entry_count"] = len(manifest_entries) if manifest_allowed else 0
+        ingestion_ctx["manifest_index_hits"] = (
+            manifest_index_hits if manifest_allowed else 0
+        )
+        ingestion_ctx["manifest_lookup_hits"] = (
+            manifest_lookup_hits if manifest_allowed else 0
+        )
         ingestion_ctx["spectra_count"] = len(spectra)
         ingestion_ctx["blank_count"] = blank_count
         ingestion_ctx["sample_count"] = max(len(spectra) - blank_count, 0)
@@ -3746,24 +3802,26 @@ class UvVisPlugin(SpectroscopyPlugin):
             ingestion_lines.append(
                 f"Identified {sample_count} sample spectrum(s) and {blank_count} blank(s)."
             )
-        manifest_files = ingestion.get("manifest_files") or []
-        manifest_entry_count = ingestion.get("manifest_entry_count", 0) or 0
-        manifest_hits = (ingestion.get("manifest_index_hits", 0) or 0) + (
-            ingestion.get("manifest_lookup_hits", 0) or 0
-        )
-        if manifest_files or manifest_entry_count:
-            if manifest_files:
-                manifest_names = ", ".join(sorted(Path(path).name for path in manifest_files))
-            else:
-                manifest_names = "None"
-            if manifest_entry_count:
-                ingestion_lines.append(
-                    f"Manifest files: {manifest_names} (matched {manifest_hits} of {manifest_entry_count} entries)."
-                )
-            else:
-                ingestion_lines.append(f"Manifest files: {manifest_names}.")
-        if not ingestion.get("manifest_enabled", True):
-            ingestion_lines.append("Manifest enrichment disabled for this run.")
+        manifest_enabled = bool(ingestion.get("manifest_enabled"))
+        if manifest_enabled:
+            manifest_files = ingestion.get("manifest_files") or []
+            manifest_entry_count = ingestion.get("manifest_entry_count", 0) or 0
+            manifest_hits = (ingestion.get("manifest_index_hits", 0) or 0) + (
+                ingestion.get("manifest_lookup_hits", 0) or 0
+            )
+            if manifest_files or manifest_entry_count:
+                if manifest_files:
+                    manifest_names = ", ".join(
+                        sorted(Path(path).name for path in manifest_files)
+                    )
+                else:
+                    manifest_names = "None"
+                if manifest_entry_count:
+                    ingestion_lines.append(
+                        f"Manifest files: {manifest_names} (matched {manifest_hits} of {manifest_entry_count} entries)."
+                    )
+                else:
+                    ingestion_lines.append(f"Manifest files: {manifest_names}.")
 
         preprocessing_lines: List[str] = []
         domain_cfg = preprocessing.get("domain") or {}

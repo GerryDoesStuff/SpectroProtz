@@ -782,7 +782,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             technique_label = None
 
-        manifest_supported = bool(active_plugin and hasattr(active_plugin, "_is_manifest_file"))
+        manifest_supported = False
+        if active_plugin is not None:
+            manifest_supported = bool(
+                getattr(active_plugin, "manifest_ui_capability_enabled", False)
+            )
         manifest_entries: List[Dict[str, object]] = []
         manifest_lookup: Dict[str, Dict[str, Dict[str, object]]] = {}
         manifest_files: set[str] = set()
