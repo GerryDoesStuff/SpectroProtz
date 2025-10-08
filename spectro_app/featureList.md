@@ -18,11 +18,13 @@ Input & ingestion
 
 Drag-and-drop files/folders; file queue with badges (technique, A/%T, blank/sample).
 
-Manifest CSV for sample↔blank mapping, groupings (dose/site), replicate IDs (deprecated enrichment; opt in via `UvVisPlugin(enable_manifest=True)`—standard workflows ignore manifests by default).
+Manifest CSV for sample↔blank mapping, groupings (dose/site), replicate IDs (deprecated enrichment).
+Opt in via `UvVisPlugin(enable_manifest=True)`—standard workflows ignore manifests by default.
   - Columns (case-insensitive): `file` (optional; basename or path), `channel`/`column` (optional; raw trace label),
     `sample_id` (final label), `blank_id`, `replicate`/`replicate_id`, `group`/`group_id`, `role`, `notes`.
   - Rows without `file` act as defaults; matching prefers file+channel, then file+sample, then global fallbacks.
-  - Channel match enables renaming (e.g., column `A1` → manifest `sample_id` "Dose 1"); blanks can be tagged via `role=blank`.
+  - Channel match enables renaming (e.g., column `A1` → manifest `sample_id` "Dose 1").
+  - Tag blanks by setting `role=blank` in the manifest.
   - Parsed fields are merged into spectrum metadata before `Spectrum` creation so downstream blanking/replicate logic sees them.
 
 Tolerant parsers (decimal comma/dot, delimiters, header variants).

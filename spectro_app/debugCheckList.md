@@ -40,7 +40,7 @@ PEES: minimal CSV with missing metadata field.
 
  Context menu: “Inspect header”, “Preview raw”, “Locate on disk” work.
 
- Manifest CSV loads; bad mappings warn but don’t crash; missing blank → fallback to nearest-in-time with warning.
+ Manifest CSV loads (when opt-in flag enabled); bad mappings warn but don’t crash; missing blank → fallback to nearest-in-time with warning.
 
 4) Plugin detection & switching
 
