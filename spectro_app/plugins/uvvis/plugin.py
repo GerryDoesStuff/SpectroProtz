@@ -97,6 +97,11 @@ class UvVisPlugin(SpectroscopyPlugin):
         self._queue_overrides: Dict[str, Dict[str, object]] = {}
         self._reset_report_context()
 
+    def supports_manifest_ui(self) -> bool:
+        """Return whether the plugin should expose manifest-related UI."""
+
+        return bool(self.enable_manifest)
+
     def _reset_report_context(self) -> None:
         self._report_context = {
             "ingestion": {
