@@ -844,6 +844,72 @@ def test_blank_matching_strategy_default_blank_id():
     assert np.allclose(processed_sample.intensity, expected)
 
 
+def test_blank_match_identifiers_include_indref_base_token():
+    blank = Spectrum(
+        wavelength=np.array([400.0, 405.0, 410.0]),
+        intensity=np.array([0.1, 0.1, 0.1]),
+        meta={"role": "blank", "blank_id": "Sample01_indRef"},
+    )
+
+    tokens = pipeline.blank_match_identifiers(blank)
+
+    assert tokens == ["Sample01_indRef", "Sample01"]
+
+
+def test_preprocess_blank_selection_supports_indref_suffix():
+    wl = np.linspace(400, 410, 3)
+    recipe = {"blank": {"subtract": True, "require": True}}
+
+    blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.25,
+        {"blank_id": "Sample01_indRef"},
+    )
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {"sample_id": "Sample01"},
+    )
+
+    plugin = UvVisPlugin()
+    processed = plugin.preprocess([blank, sample], recipe)
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+
+    assert processed_sample.meta.get("blank_subtracted") is True
+    assert np.allclose(processed_sample.intensity, sample.intensity - blank.intensity)
+    audit = processed_sample.meta.get("blank_audit") or {}
+    assert audit.get("blank_id") == "Sample01_indRef"
+
+    channel_blank = _build_simple_spectrum(
+        "blank",
+        wl,
+        0.1,
+        {"blank_id": "ChannelA_indRef"},
+    )
+    channel_sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        0.8,
+        {"channel": "ChannelA"},
+    )
+
+    plugin_channel = UvVisPlugin()
+    processed_channel = plugin_channel.preprocess([channel_blank, channel_sample], recipe)
+    processed_channel_sample = next(
+        spec for spec in processed_channel if spec.meta.get("role") != "blank"
+    )
+
+    assert processed_channel_sample.meta.get("blank_subtracted") is True
+    assert np.allclose(
+        processed_channel_sample.intensity,
+        channel_sample.intensity - channel_blank.intensity,
+    )
+    channel_audit = processed_channel_sample.meta.get("blank_audit") or {}
+    assert channel_audit.get("blank_id") == "ChannelA_indRef"
+
+
 def test_blank_matching_strategy_cuvette_slot_pairs_by_slot():
     wl = np.linspace(400, 410, 4)
     blank_a = Spectrum(
