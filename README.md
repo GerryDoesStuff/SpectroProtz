@@ -43,9 +43,12 @@ application by running:
 python -m spectro_app.main
 ```
 
-This command bootstraps the Qt event loop and shows the main window immediately,
-allowing users to load recipes, configure processing options, and monitor batch
-runs.
+On Windows you can launch the GUI directly with the bundled
+[`launch_spectro_app.cmd`](launch_spectro_app.cmd) helper, which takes care of
+activating `.venv` when available before delegating to the same module entry
+point. This command bootstraps the Qt event loop and shows the main window
+immediately, allowing users to load recipes, configure processing options, and
+monitor batch runs.
 
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
