@@ -81,8 +81,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_dir: Optional[Path] = None
         self._loading_session: bool = False
         self._updating_ui: bool = False
-        self._load_app_settings()
         self._job_running = False
+        self._load_app_settings()
 
         self._populate_plugin_selectors()
         self._connect_recipe_editor()
