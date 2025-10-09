@@ -42,6 +42,91 @@ pool. Each run executes the following stages in order:
 Integrations that display progress should listen to `RunController.job_started`
 and `job_finished` signals to mirror this lifecycle in the UI.【F:spectro_app/engine/run_controller.py†L28-L38】
 
+## UV-Vis stage deep dive
+
+The UV-Vis plugin exposes the same high-level lifecycle but enriches each stage
+with domain-specific behaviour. The sections below expand on what happens in
+practice so that operators can interpret status updates and recipe options with
+full context.
+
+### Workflow entry point
+
+`RunController` wraps every batch in a `BatchRunnable` and schedules it on Qt’s
+global thread pool. The runnable relays status strings (for example,
+“Loading spectra…”) and progress ticks as it sequentially invokes the plugin’s
+`load`, `validate`, `preprocess`, `analyze`, and `export` hooks. Cancellation
+requests flip an internal flag so the runnable can bail out between stages, and
+`RunController` re-broadcasts start, message, progress, and finish signals to UI
+listeners.【F:spectro_app/engine/run_controller.py†L10-L38】【F:spectro_app/plugins/uvvis/plugin.py†L171-L3503】
+
+### Load
+
+`UvVisPlugin.load` primes a per-run report context, records the target files,
+and determines whether manifest enrichment is active. When enabled, manifest
+CSVs are parsed and indexed by file, sample, and channel so the most specific
+entry can update each spectrum’s metadata. Raw data files (Helios `.dsp`,
+delimited text, Excel) are routed through modality-aware readers that normalise
+locale, strip metadata prefixes, and emit `Spectrum` objects. Baseline metadata
+such as the technique and source file is applied uniformly, while overrides and
+manifest hits populate roles, blank identifiers, and other fields. Blank
+spectra receive fallback identifiers automatically, and ingestion metrics (blank
+counts, manifest matches, etc.) are cached for later reporting.【F:spectro_app/plugins/uvvis/plugin.py†L171-L868】
+
+### Validate
+
+The plugin’s `validate` hook surfaces recipe incompatibilities before any
+processing occurs. `SpectroscopyPlugin` provides a permissive default that
+returns an empty list, but concrete plugins can override it to stop runs early
+when required. Any non-empty error list aborts the batch before preprocessing
+begins.【F:spectro_app/engine/run_controller.py†L16-L24】
+
+### Preprocess
+
+Preprocessing captures the active recipe options (domain limits, blank policy,
+baseline/smoothing/despiking settings, replicate strategy) in the report
+context, validating ranges such as join window width or Savitzky–Golay parity.
+Each spectrum is coerced onto the instrument-aware wavelength window, join
+seams are detected and optionally corrected, and despiking removes impulsive
+noise while storing join metadata. Blank spectra are averaged per match key
+(with optional outlier rejection) and stored in lookups. Samples pair with
+blanks using cuvette slots, explicit blank IDs, derived sample/channel names, or
+fallbacks. When subtraction is enabled, `_validate_blank_pairing` checks
+timestamp and pathlength tolerances before subtracting; optional blanks missing
+from the dataset generate audit entries instead of hard failures. Baseline
+correction and Savitzky–Golay smoothing run according to the recipe, including
+matching transformations on retained blanks. Replicates can be averaged into
+single representatives while preserving ordering, blank identifier lists, and
+ingestion metrics for downstream reporting.【F:spectro_app/plugins/uvvis/plugin.py†L927-L1934】
+
+### Analyse
+
+Analysis starts by recording ingestion totals and unpacking feature-related
+recipe blocks (band ratios, integrals, derivatives, isosbestic checks, kinetics)
+with sensible defaults when absent. Each spectrum is evaluated with
+`compute_uvvis_qc`, collecting saturation, join, noise, drift, despiking, and
+smoothing diagnostics. Derivative traces are recomputed if requested, and band
+ratios/integrals are calculated over configured windows. QC rows capture every
+metric plus flag summaries, while per-spectrum metadata accumulates feature
+payloads and derivative channels. Kinetics observations (timestamped feature
+values) are stored for later summarisation. `_perform_calibration` then builds
+target-specific calibration models: it collects standards, fits linear
+regressions with goodness-of-fit checks, calculates limits of detection and
+quantitation, and annotates QC rows and spectra with calibration payloads.
+Unknown samples receive predicted concentrations or explicit “no model” status.
+The calibration status and aggregates are cached for exporters.【F:spectro_app/plugins/uvvis/plugin.py†L1935-L3058】
+
+### Export
+
+Export honours the recipe’s `export` block, resolving workbook/PDF/sidecar
+destinations and choosing tidy or wide processed-data layouts. It generates
+figures (processed traces, join overlays, calibration plots, QC summaries),
+composes a textual audit trail, and writes an Excel workbook when a path is
+provided. Optional sidecar JSON recipes and PDF reports (embedding figures plus
+the audit narrative) are emitted when requested. The plugin closes Matplotlib
+handles, records export destinations and audit messages in the results context,
+and returns a `BatchResult` bundling processed spectra, QC tables, rendered
+figures, audit logs, and human-readable report text.【F:spectro_app/plugins/uvvis/plugin.py†L3059-L3503】
+
 ## Global processing toggles
 
 Default processing switches live in `spectro_app/config/defaults.yaml` and are
