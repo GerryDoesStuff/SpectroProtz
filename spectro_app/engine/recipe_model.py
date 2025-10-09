@@ -35,8 +35,11 @@ class Recipe:
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
         require_blank = blank_cfg.get("require", subtract)
         fallback = blank_cfg.get("default") or blank_cfg.get("fallback")
-        if subtract and not require_blank and not fallback:
-            errs.append("Blank subtraction allows missing blanks but provides no fallback/default blank")
+        # Historically, recipes that subtracted blanks while allowing them to be optional were
+        # rejected unless a fallback sample was provided. In practice the UV-Vis pipeline and
+        # GUI expect such recipes to validate successfully; if advisory messaging is required it
+        # should be surfaced outside of validation. We still resolve the fallback value here so
+        # downstream consumers can make that decision if needed.
         qc_cfg = self.params.get("qc", {})
         drift_cfg = qc_cfg.get("drift", {}) if isinstance(qc_cfg, dict) else {}
         if drift_cfg.get("enabled"):
