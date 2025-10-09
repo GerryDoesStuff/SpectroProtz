@@ -1041,6 +1041,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         entries = self._build_queue_entries(self._queued_paths, plugin)
         self.fileDock.set_entries(entries)
+        if not self._queued_paths:
+            self.previewDock.clear()
         self._last_result = None
         self._update_action_states()
         if plugin:
@@ -1106,6 +1108,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         directory = target.parent if target.is_file() else target
         QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory.resolve())))
+
+    def _on_queue_clear_requested(self):
+        self._set_queue([])
 
     def _on_queue_overrides_changed(self, overrides: Dict[str, Dict[str, object]]):
         if overrides is None:
