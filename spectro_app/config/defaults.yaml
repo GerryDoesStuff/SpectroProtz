@@ -16,7 +16,8 @@ processing:
   baseline:
     method: "asls"
     lambda: 1e5
-    p: 0.001
+    p: 0.01
+    niter: 10
   join_correction:
     enabled: true
     overlap_nm: [340, 360]
