@@ -662,8 +662,6 @@ class FileQueueDock(QDockWidget):
         if not ok:
             return
         value = text.strip()
-        if not value and default_blank:
-            value = str(default_blank)
         overrides = {"role": "blank"}
         clears: tuple[str, ...] = ()
         if value:
