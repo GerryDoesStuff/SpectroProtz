@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from spectro_app.engine.plugin_api import Spectrum
+from spectro_app.engine.run_controller import _flatten_recipe
 from spectro_app.plugins.uvvis import pipeline
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin, disable_blank_requirement
 
@@ -388,6 +389,36 @@ def test_disable_blank_requirement_allows_missing_blank():
     recipe = disable_blank_requirement(base_recipe)
 
     processed = plugin.preprocess([sample], recipe)
+    assert len(processed) == 1
+    processed_sample = processed[0]
+
+    assert processed_sample.meta.get("blank_subtracted") is False
+    audit = processed_sample.meta.get("blank_audit")
+    assert audit["blank_id"] == "B_missing"
+    assert audit["validation_ran"] is False
+    violations = audit["validation_violations"]
+    assert any(v.get("type") == "blank_missing" for v in violations)
+
+
+def test_ui_shaped_recipe_allows_missing_blank_without_error():
+    wl = np.linspace(400, 410, 3)
+    sample = _build_simple_spectrum(
+        "sample",
+        wl,
+        1.0,
+        {
+            "sample_id": "S1",
+            "blank_id": "B_missing",
+            "acquired_datetime": datetime(2024, 1, 1, 9, 0).isoformat(),
+        },
+    )
+
+    plugin = UvVisPlugin()
+    recipe = {"params": {"blank": {"subtract": True, "require": False}}}
+    flattened = _flatten_recipe(recipe)
+    assert "blank" in flattened and "params" not in flattened
+
+    processed = plugin.preprocess([sample], flattened)
     assert len(processed) == 1
     processed_sample = processed[0]
 

@@ -1,6 +1,26 @@
 from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from typing import Iterable, Optional
 
+
+def _flatten_recipe(recipe: Optional[dict]) -> dict:
+    """Return a copy of *recipe* with nested ``params`` merged into the top level."""
+
+    if not recipe:
+        return {}
+
+    # Start with a shallow copy of the top-level keys except for the nested ``params``
+    # mapping that holds the UI-shaped payload.
+    flattened = {k: v for k, v in recipe.items() if k != "params"}
+
+    params = recipe.get("params")
+    if isinstance(params, dict):
+        for key, value in params.items():
+            # Preserve explicitly provided top-level overrides while exposing any
+            # nested configuration (e.g. blank handling) to the plugin layer.
+            flattened.setdefault(key, value)
+
+    return flattened
+
 class JobSignals(QObject):
     progress = pyqtSignal(int)
     message = pyqtSignal(str)
@@ -21,24 +41,26 @@ class BatchRunnable(QRunnable):
             self.signals.progress.emit(10)
 
             self._emit_message("Validating recipe...")
-            errs = self.plugin.validate(specs, self.recipe)
+            flattened_recipe = _flatten_recipe(self.recipe)
+
+            errs = self.plugin.validate(specs, flattened_recipe)
             if errs:
                 raise RuntimeError("; ".join(errs))
             self.signals.progress.emit(20)
 
             self._emit_message("Preprocessing spectra...")
             self._raise_if_cancelled()
-            specs = self.plugin.preprocess(specs, self.recipe)
+            specs = self.plugin.preprocess(specs, flattened_recipe)
             self.signals.progress.emit(40)
 
             self._emit_message("Analyzing spectra...")
             self._raise_if_cancelled()
-            specs, qc = self.plugin.analyze(specs, self.recipe)
+            specs, qc = self.plugin.analyze(specs, flattened_recipe)
             self.signals.progress.emit(70)
 
             self._emit_message("Exporting results...")
             self._raise_if_cancelled()
-            result = self.plugin.export(specs, qc, self.recipe)
+            result = self.plugin.export(specs, qc, flattened_recipe)
             self.signals.progress.emit(100)
             self.signals.finished.emit(result)
         except Exception as e:
