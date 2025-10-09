@@ -1236,27 +1236,27 @@ class UvVisPlugin(SpectroscopyPlugin):
             processed = coerced
             joins: list[int] = []
             if join_cfg.get("enabled"):
+                join_window = int(join_cfg.get("window", 10))
                 join_windows = self._resolve_join_windows(join_cfg.get("windows"), processed)
                 joins = pipeline.detect_joins(
                     processed.wavelength,
                     processed.intensity,
                     threshold=join_cfg.get("threshold"),
-                    window=join_cfg.get("window", 10),
+                    window=join_window,
                     windows=join_windows,
                 )
-                if joins:
-                    bounds = join_cfg.get("offset_bounds")
-                    if bounds is None:
-                        bounds = (
-                            join_cfg.get("min_offset"),
-                            join_cfg.get("max_offset"),
-                        )
-                    processed = pipeline.correct_joins(
-                        processed,
-                        joins,
-                        window=join_cfg.get("window", 10),
-                        offset_bounds=bounds if bounds is not None else None,
+                bounds = join_cfg.get("offset_bounds")
+                if bounds is None:
+                    bounds = (
+                        join_cfg.get("min_offset"),
+                        join_cfg.get("max_offset"),
                     )
+                processed = pipeline.correct_joins(
+                    processed,
+                    joins,
+                    window=join_window,
+                    offset_bounds=bounds if bounds is not None else None,
+                )
             if despike_cfg.get("enabled"):
                 processed = pipeline.despike_spectrum(
                     processed,
