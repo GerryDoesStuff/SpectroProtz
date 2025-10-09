@@ -12,6 +12,10 @@ params:
     quiet_window:
       min: 850.0
       max: 900.0
+  despike:
+    enabled: false
+    window: 5
+    zscore: 5.0
   smoothing:
     enabled: false
     window: 15

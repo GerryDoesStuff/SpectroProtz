@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -100,6 +101,31 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.addRow("Poly order", self.smooth_poly)
         layout.addWidget(smoothing_group)
 
+        # --- Despiking ---
+        despike_group = QGroupBox("Despiking")
+        despike_form = QFormLayout(despike_group)
+        despike_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.despike_enable = QCheckBox("Enable spike removal")
+        self.despike_enable.setToolTip(
+            "Detect and replace narrow spikes using a z-score threshold on a sliding window."
+        )
+        self.despike_window = QSpinBox()
+        self.despike_window.setRange(3, 999)
+        self.despike_window.setValue(5)
+        self.despike_window.setToolTip("Window size (number of points) used for spike detection")
+        self.despike_zscore = QDoubleSpinBox()
+        self.despike_zscore.setRange(0.1, 99.9)
+        self.despike_zscore.setDecimals(2)
+        self.despike_zscore.setSingleStep(0.1)
+        self.despike_zscore.setValue(5.0)
+        self.despike_zscore.setToolTip("Z-score threshold used to flag spikes")
+
+        despike_form.addRow(self.despike_enable)
+        despike_form.addRow("Window", self.despike_window)
+        despike_form.addRow("Z-score", self.despike_zscore)
+        layout.addWidget(despike_group)
+
         # --- Join correction ---
         join_group = QGroupBox("Join correction")
         join_form = QFormLayout(join_group)
@@ -188,6 +214,9 @@ class RecipeEditorDock(QDockWidget):
             self.smooth_enable.toggled,
             self.smooth_window.valueChanged,
             self.smooth_poly.valueChanged,
+            self.despike_enable.toggled,
+            self.despike_window.valueChanged,
+            self.despike_zscore.valueChanged,
             self.join_enable.toggled,
             self.join_window.valueChanged,
             self.join_threshold.textChanged,
@@ -288,6 +317,15 @@ class RecipeEditorDock(QDockWidget):
                 self._safe_int(smoothing.get("polyorder"), self.smooth_poly.value())
             )
 
+            despike_cfg = params.get("despike", {}) if isinstance(params.get("despike"), dict) else {}
+            self.despike_enable.setChecked(bool(despike_cfg.get("enabled", False)))
+            self.despike_window.setValue(
+                self._safe_int(despike_cfg.get("window"), self.despike_window.value())
+            )
+            self.despike_zscore.setValue(
+                self._safe_float(despike_cfg.get("zscore"), self.despike_zscore.value())
+            )
+
             join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
             self.join_enable.setChecked(bool(join_cfg.get("enabled", False)))
             self.join_window.setValue(
@@ -352,6 +390,16 @@ class RecipeEditorDock(QDockWidget):
                 "polyorder": int(self.smooth_poly.value()),
             }
         )
+
+        despike_cfg = self._ensure_dict(params, "despike")
+        despike_enabled = self.despike_enable.isChecked()
+        despike_cfg["enabled"] = despike_enabled
+        if despike_enabled:
+            despike_cfg["window"] = int(self.despike_window.value())
+            despike_cfg["zscore"] = float(self.despike_zscore.value())
+        else:
+            despike_cfg.pop("window", None)
+            despike_cfg.pop("zscore", None)
 
         join_cfg = self._ensure_dict(params, "join")
         threshold_text = self.join_threshold.text().strip()
@@ -428,6 +476,12 @@ class RecipeEditorDock(QDockWidget):
             return int(value)
         except (TypeError, ValueError):
             return int(fallback)
+
+    def _safe_float(self, value, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
 
     def _ensure_dict(self, parent: dict, key: str) -> dict:
         value = parent.get(key)
