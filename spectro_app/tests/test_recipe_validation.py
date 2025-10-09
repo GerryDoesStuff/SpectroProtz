@@ -21,12 +21,11 @@ def test_recipe_validation_flags_join_and_smoothing_issues():
     assert "Join detection threshold must be positive" in errs
 
 
-def test_recipe_validation_requires_blank_fallback_when_optional():
+def test_recipe_validation_allows_optional_blank_without_fallback():
     params = {
         "blank": {"subtract": True, "require": False},
     }
-    errs = Recipe(params=params).validate()
-    assert "fallback" in errs[0].lower()
+    assert Recipe(params=params).validate() == []
 
 
 def test_recipe_validation_flags_invalid_drift_limits():
