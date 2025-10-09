@@ -656,7 +656,7 @@ class FileQueueDock(QDockWidget):
         text, ok = QtWidgets.QInputDialog.getText(
             self,
             "Set Blank Identifier",
-            "Blank identifier (used to pair samples with this blank):",
+            "Blank identifier (name used to match samples to this blank; leave empty if matching by cuvette slot):",
             text=str(default_blank or ""),
         )
         if not ok:
@@ -684,7 +684,7 @@ class FileQueueDock(QDockWidget):
         text, ok = QtWidgets.QInputDialog.getText(
             self,
             "Edit Blank Identifier",
-            "Blank identifier (used to pair samples with this blank):",
+            "Blank identifier (name used to match samples to this blank; leave empty if matching by cuvette slot):",
             text=str(current or ""),
         )
         if not ok:
