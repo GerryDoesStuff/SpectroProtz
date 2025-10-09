@@ -192,6 +192,7 @@ class FileQueueDock(QDockWidget):
     preview_requested = QtCore.pyqtSignal(str)
     locate_requested = QtCore.pyqtSignal(str)
     overrides_changed = QtCore.pyqtSignal(dict)
+    clear_requested = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -206,7 +207,27 @@ class FileQueueDock(QDockWidget):
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.list.setUniformItemSizes(False)
         self.list.setAlternatingRowColors(False)
-        self.setWidget(self.list)
+
+        header_widget = QtWidgets.QWidget(self)
+        header_layout = QtWidgets.QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(6, 6, 6, 6)
+        header_layout.setSpacing(6)
+        header_layout.addStretch(1)
+
+        self._clear_button = QtWidgets.QToolButton(header_widget)
+        self._clear_button.setText("Clear queue")
+        self._clear_button.setEnabled(False)
+        self._clear_button.clicked.connect(self._on_clear_clicked)
+        header_layout.addWidget(self._clear_button)
+
+        container = QtWidgets.QWidget(self)
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        container_layout.addWidget(header_widget)
+        container_layout.addWidget(self.list)
+
+        self.setWidget(container)
         self.setAcceptDrops(True)
         self._plugin_resolver = plugin_resolver
         self._entries: List[QueueEntry] = []
@@ -649,6 +670,11 @@ class FileQueueDock(QDockWidget):
             self.list.addItem(item)
             if selected and entry.path == selected:
                 item.setSelected(True)
+        if hasattr(self, "_clear_button"):
+            self._clear_button.setEnabled(bool(self._entries))
+
+    def _on_clear_clicked(self) -> None:
+        self.clear_requested.emit()
 
     def _set_role_auto(self, path: str) -> None:
         self._update_overrides(path, {}, clear=("role", "blank_id"))
