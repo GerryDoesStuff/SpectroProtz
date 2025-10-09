@@ -182,6 +182,41 @@ def test_correct_joins_records_channel():
     assert np.allclose(channels["joined"], corrected.intensity)
 
 
+def test_preprocess_join_correction_emits_channel_without_detected_joins(monkeypatch):
+    plugin = UvVisPlugin()
+    wl = np.linspace(400, 420, 11)
+    intensity = np.linspace(0.2, 0.8, wl.size)
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"channels": {"raw": intensity.copy()}},
+    )
+
+    called: Dict[str, bool] = {"detect": False}
+
+    def fake_detect_joins(wavelength, intensity, *, threshold=None, window=5, windows=None):
+        called["detect"] = True
+        return []
+
+    monkeypatch.setattr(pipeline, "detect_joins", fake_detect_joins)
+
+    recipe = {
+        "join": {"enabled": True, "window": 5},
+        "blank": {"subtract": False, "require": False},
+    }
+    processed = plugin.preprocess([spec], recipe)
+
+    assert called["detect"] is True
+    assert processed and len(processed) == 1
+    result = processed[0]
+    channels = result.meta.get("channels") or {}
+    assert "joined" in channels
+    assert np.allclose(channels["joined"], result.intensity)
+    stats = result.meta.get("join_statistics")
+    assert stats is not None
+    assert stats.get("indices") == []
+
+
 def test_despike_records_channel():
     wl = np.linspace(400, 440, 5)
     intensity = np.array([1.0, 1.05, 5.0, 1.1, 1.15])
