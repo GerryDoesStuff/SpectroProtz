@@ -30,6 +30,7 @@ class RecipeEditorDock(QDockWidget):
 
     def __init__(self, parent=None):
         super().__init__("Recipe Editor", parent)
+        self.setObjectName("RecipeEditorDock")
         self.recipe = Recipe()
         self._updating = False
         self._project_root = Path(__file__).resolve().parents[2]

@@ -221,6 +221,7 @@ def aggregate_qc_metrics(rows: Iterable[Dict[str, Any]]) -> Optional[AggregatedQ
 class QCDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("QC Panel", parent)
+        self.setObjectName("QCDock")
         self._qc_series: Optional[AggregatedQCSeries] = None
         self._desired_mode = "table"
         self._current_mode = "table"

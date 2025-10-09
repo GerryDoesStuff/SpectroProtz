@@ -200,6 +200,7 @@ class FileQueueDock(QDockWidget):
         plugin_resolver: Optional[Callable[[List[str]], object]] = None,
     ) -> None:
         super().__init__("File Queue", parent)
+        self.setObjectName("FileQueueDock")
         self.list = QListWidget()
         self.list.setItemDelegate(_QueueItemDelegate(self, self.list))
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
