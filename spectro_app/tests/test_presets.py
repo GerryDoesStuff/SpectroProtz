@@ -12,6 +12,13 @@ def test_uvvis_default_preset_includes_expected_params() -> None:
 
     params = preset.get("params", {})
 
+    assert params.get("baseline") == {
+        "method": "asls",
+        "lam": 100000.0,
+        "p": 0.01,
+        "niter": 10,
+    }
+
     assert params.get("join") == {
         "enabled": True,
         "window": 3,

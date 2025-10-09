@@ -1,5 +1,10 @@
 module: "uvvis"
 params:
+  baseline:
+    method: "asls"
+    lam: 100000.0
+    p: 0.01
+    niter: 10
   join:
     enabled: true
     window: 3

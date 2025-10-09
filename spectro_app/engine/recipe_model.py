@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, Any
+from collections.abc import Mapping, Sequence
 
 @dataclass
 class Recipe:
@@ -21,6 +22,121 @@ class Recipe:
                 errs.append("Savitzky–Golay window must be > 2*polyorder")
             if window < 3:
                 errs.append("Savitzky–Golay window must be at least 3 points")
+
+        baseline_cfg = self.params.get("baseline")
+        if isinstance(baseline_cfg, dict):
+            method = baseline_cfg.get("method")
+            if method:
+                method_name = str(method).strip().lower()
+                if method_name not in {"asls", "rubberband", "snip"}:
+                    errs.append("Baseline method must be one of asls, rubberband, snip")
+                else:
+                    if method_name == "asls":
+                        lam_val = baseline_cfg.get("lam", baseline_cfg.get("lambda"))
+                        if lam_val is not None:
+                            try:
+                                if float(lam_val) <= 0:
+                                    errs.append("Baseline lambda must be positive")
+                            except (TypeError, ValueError):
+                                errs.append("Baseline lambda must be numeric")
+                        p_val = baseline_cfg.get("p")
+                        if p_val is not None:
+                            try:
+                                p_float = float(p_val)
+                            except (TypeError, ValueError):
+                                errs.append("Baseline p must be numeric")
+                            else:
+                                if not (0 < p_float < 1):
+                                    errs.append("Baseline p must be between 0 and 1")
+                        niter_val = baseline_cfg.get("niter")
+                        if niter_val is not None:
+                            try:
+                                if int(niter_val) <= 0:
+                                    errs.append("Baseline iteration count must be positive")
+                            except (TypeError, ValueError):
+                                errs.append("Baseline iteration count must be an integer")
+                    if method_name == "snip":
+                        iterations_val = baseline_cfg.get("iterations")
+                        if iterations_val is not None:
+                            try:
+                                if int(iterations_val) <= 0:
+                                    errs.append("SNIP iteration count must be positive")
+                            except (TypeError, ValueError):
+                                errs.append("SNIP iteration count must be an integer")
+
+                    anchor_cfg = (
+                        baseline_cfg.get("anchor")
+                        or baseline_cfg.get("anchor_windows")
+                        or baseline_cfg.get("anchors")
+                        or baseline_cfg.get("zeroing")
+                    )
+                    if anchor_cfg:
+                        if isinstance(anchor_cfg, Mapping):
+                            windows_iter = anchor_cfg.get("windows")
+                        elif isinstance(anchor_cfg, Sequence) and not isinstance(
+                            anchor_cfg, (str, bytes)
+                        ):
+                            windows_iter = anchor_cfg
+                        else:
+                            errs.append(
+                                "Baseline anchor configuration must be a mapping or sequence"
+                            )
+                            windows_iter = None
+                        if isinstance(windows_iter, Sequence):
+                            for idx, entry in enumerate(windows_iter, start=1):
+                                if isinstance(entry, Mapping):
+                                    min_val = (
+                                        entry.get("min_nm")
+                                        or entry.get("lower_nm")
+                                        or entry.get("min")
+                                        or entry.get("lower")
+                                    )
+                                    max_val = (
+                                        entry.get("max_nm")
+                                        or entry.get("upper_nm")
+                                        or entry.get("max")
+                                        or entry.get("upper")
+                                    )
+                                    target_val = entry.get("target")
+                                    if target_val is None:
+                                        target_val = entry.get("level") or entry.get("value")
+                                elif isinstance(entry, Sequence) and not isinstance(
+                                    entry, (str, bytes)
+                                ):
+                                    if len(entry) < 2:
+                                        errs.append(
+                                            f"Baseline anchor row {idx} must provide min and max"
+                                        )
+                                        continue
+                                    min_val = entry[0]
+                                    max_val = entry[1]
+                                    target_val = entry[2] if len(entry) > 2 else None
+                                else:
+                                    errs.append(
+                                        f"Baseline anchor row {idx} must be a mapping or sequence"
+                                    )
+                                    continue
+
+                                try:
+                                    min_float = float(min_val)
+                                    max_float = float(max_val)
+                                except (TypeError, ValueError):
+                                    errs.append(
+                                        f"Baseline anchor row {idx} bounds must be numeric"
+                                    )
+                                    continue
+                                if min_float > max_float:
+                                    errs.append(
+                                        f"Baseline anchor row {idx} min must be ≤ max"
+                                    )
+                                    continue
+                                if target_val is not None:
+                                    try:
+                                        float(target_val)
+                                    except (TypeError, ValueError):
+                                        errs.append(
+                                            f"Baseline anchor row {idx} target must be numeric"
+                                        )
 
         join_cfg = self.params.get("join", {})
         if join_cfg.get("enabled"):

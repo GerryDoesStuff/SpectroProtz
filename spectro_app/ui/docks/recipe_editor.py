@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
+    QTableWidgetItem,
     QHeaderView,
     QVBoxLayout,
     QWidget,
@@ -46,6 +47,7 @@ class RecipeEditorDock(QDockWidget):
         self._join_windows_active_key = self._JOIN_WINDOWS_GLOBAL_KEY
         self._join_windows_loading = False
         self._join_windows_errors: list[str] = []
+        self._baseline_anchor_errors: list[str] = []
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -111,6 +113,95 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.addRow("Window", self.smooth_window)
         smoothing_form.addRow("Poly order", self.smooth_poly)
         layout.addWidget(smoothing_group)
+
+        # --- Baseline correction ---
+        baseline_group = QGroupBox("Baseline correction")
+        baseline_form = QFormLayout(baseline_group)
+        baseline_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.baseline_enable = QCheckBox("Enable baseline correction")
+        self.baseline_method = QComboBox()
+        self.baseline_method.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.baseline_method.addItem("Asymmetric least squares (AsLS)", "asls")
+        self.baseline_method.addItem("Rubber-band", "rubberband")
+        self.baseline_method.addItem("SNIP", "snip")
+
+        self.baseline_lambda = QDoubleSpinBox()
+        self.baseline_lambda.setDecimals(3)
+        self.baseline_lambda.setRange(0.0, 1e12)
+        self.baseline_lambda.setSingleStep(1000.0)
+        self._baseline_default_lambda = 1e5
+        self.baseline_lambda.setValue(self._baseline_default_lambda)
+        self.baseline_lambda.setToolTip("Smoothness penalty (λ) used by AsLS baselines")
+
+        self.baseline_p = QDoubleSpinBox()
+        self.baseline_p.setDecimals(5)
+        self.baseline_p.setRange(0.0, 1.0)
+        self.baseline_p.setSingleStep(0.001)
+        self._baseline_default_p = 0.01
+        self.baseline_p.setValue(self._baseline_default_p)
+        self.baseline_p.setToolTip("Asymmetry parameter (p) for AsLS baselines")
+
+        self.baseline_niter = QSpinBox()
+        self.baseline_niter.setRange(1, 999)
+        self._baseline_default_niter = 10
+        self.baseline_niter.setValue(self._baseline_default_niter)
+        self.baseline_niter.setToolTip("Number of refinement iterations for AsLS baselines")
+
+        self.baseline_iterations = QSpinBox()
+        self.baseline_iterations.setRange(1, 999)
+        self._baseline_default_iterations = 24
+        self.baseline_iterations.setValue(self._baseline_default_iterations)
+        self.baseline_iterations.setToolTip("Iteration count for SNIP baselines")
+
+        baseline_form.addRow(self.baseline_enable)
+        baseline_form.addRow("Method", self.baseline_method)
+        baseline_form.addRow("λ (lambda)", self.baseline_lambda)
+        baseline_form.addRow("p", self.baseline_p)
+        baseline_form.addRow("AsLS iterations", self.baseline_niter)
+        baseline_form.addRow("SNIP iterations", self.baseline_iterations)
+
+        baseline_anchor_container = QWidget()
+        baseline_anchor_layout = QVBoxLayout(baseline_anchor_container)
+        baseline_anchor_layout.setContentsMargins(0, 0, 0, 0)
+        baseline_anchor_layout.setSpacing(6)
+
+        self.baseline_anchor_enable = QCheckBox("Apply anchor window zeroing")
+        baseline_anchor_layout.addWidget(self.baseline_anchor_enable)
+
+        self.baseline_anchor_table = QTableWidget(0, 4)
+        self.baseline_anchor_table.setHorizontalHeaderLabels(
+            ["Min (nm)", "Max (nm)", "Target", "Label"]
+        )
+        anchor_header = self.baseline_anchor_table.horizontalHeader()
+        anchor_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        anchor_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        anchor_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        anchor_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.baseline_anchor_table.verticalHeader().setVisible(False)
+        self.baseline_anchor_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.baseline_anchor_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        baseline_anchor_layout.addWidget(self.baseline_anchor_table)
+
+        anchor_buttons = QHBoxLayout()
+        anchor_buttons.setContentsMargins(0, 0, 0, 0)
+        anchor_buttons.setSpacing(6)
+        anchor_buttons.addStretch(1)
+
+        self.baseline_anchor_add_row = QPushButton("Add window")
+        anchor_buttons.addWidget(self.baseline_anchor_add_row)
+
+        self.baseline_anchor_remove_row = QPushButton("Remove selected")
+        anchor_buttons.addWidget(self.baseline_anchor_remove_row)
+
+        baseline_anchor_layout.addLayout(anchor_buttons)
+
+        baseline_form.addRow("Anchor windows", baseline_anchor_container)
+        layout.addWidget(baseline_group)
 
         # --- Despiking ---
         despike_group = QGroupBox("Despiking")
@@ -293,11 +384,34 @@ class RecipeEditorDock(QDockWidget):
         self.join_windows_remove_row.clicked.connect(
             self._on_join_windows_remove_row
         )
+        self.baseline_enable.toggled.connect(self._on_baseline_enable_toggled)
+        self.baseline_method.currentIndexChanged.connect(
+            self._on_baseline_method_changed
+        )
+        self.baseline_anchor_enable.toggled.connect(
+            self._on_baseline_anchor_enable_toggled
+        )
+        self.baseline_anchor_add_row.clicked.connect(
+            self._on_baseline_anchor_add_row
+        )
+        self.baseline_anchor_remove_row.clicked.connect(
+            self._on_baseline_anchor_remove_row
+        )
+        self.baseline_anchor_table.itemChanged.connect(
+            self._on_baseline_anchor_item_changed
+        )
+        self.baseline_anchor_table.itemSelectionChanged.connect(
+            self._update_baseline_anchor_buttons
+        )
         for signal in (
             self.module.currentTextChanged,
             self.smooth_enable.toggled,
             self.smooth_window.valueChanged,
             self.smooth_poly.valueChanged,
+            self.baseline_lambda.valueChanged,
+            self.baseline_p.valueChanged,
+            self.baseline_niter.valueChanged,
+            self.baseline_iterations.valueChanged,
             self.despike_enable.toggled,
             self.despike_window.valueChanged,
             self.despike_zscore.valueChanged,
@@ -401,6 +515,52 @@ class RecipeEditorDock(QDockWidget):
                 self._safe_int(smoothing.get("polyorder"), self.smooth_poly.value())
             )
 
+            baseline_cfg = (
+                params.get("baseline", {}) if isinstance(params.get("baseline"), dict) else {}
+            )
+            method = str(baseline_cfg.get("method") or "").strip().lower()
+            if method not in {"asls", "rubberband", "snip"}:
+                method = ""
+            self.baseline_enable.setChecked(bool(method))
+            method_index = self.baseline_method.findData(
+                method or "asls", QtCore.Qt.ItemDataRole.UserRole
+            )
+            if method_index < 0:
+                method_index = 0
+            self.baseline_method.setCurrentIndex(method_index)
+            self.baseline_lambda.setValue(
+                self._safe_float(
+                    baseline_cfg.get("lam", baseline_cfg.get("lambda")),
+                    self._baseline_default_lambda,
+                )
+            )
+            self.baseline_p.setValue(
+                self._safe_float(
+                    baseline_cfg.get("p"),
+                    self._baseline_default_p,
+                )
+            )
+            self.baseline_niter.setValue(
+                self._safe_int(
+                    baseline_cfg.get("niter"),
+                    self._baseline_default_niter,
+                )
+            )
+            self.baseline_iterations.setValue(
+                self._safe_int(
+                    baseline_cfg.get("iterations"),
+                    self._baseline_default_iterations,
+                )
+            )
+            anchor_cfg = (
+                baseline_cfg.get("anchor")
+                or baseline_cfg.get("anchor_windows")
+                or baseline_cfg.get("anchors")
+                or baseline_cfg.get("zeroing")
+            )
+            anchor_enabled, _ = self._load_baseline_anchor_windows(anchor_cfg)
+            self.baseline_anchor_enable.setChecked(anchor_enabled)
+
             despike_cfg = params.get("despike", {}) if isinstance(params.get("despike"), dict) else {}
             self.despike_enable.setChecked(bool(despike_cfg.get("enabled", False)))
             self.despike_window.setValue(
@@ -450,6 +610,7 @@ class RecipeEditorDock(QDockWidget):
             self.drift_max_residual.setText(self._format_optional(drift_cfg.get("max_residual")))
 
         self._sync_recipe_from_ui()
+        self._update_baseline_controls_enabled()
 
     def _format_optional(self, value) -> str:
         if value is None:
@@ -499,6 +660,74 @@ class RecipeEditorDock(QDockWidget):
                 }
             )
         return rows
+
+    def _on_baseline_enable_toggled(self, checked: bool) -> None:
+        self._update_baseline_controls_enabled()
+        self._update_model_from_ui()
+
+    def _on_baseline_method_changed(self) -> None:
+        self._update_baseline_controls_enabled()
+        self._update_model_from_ui()
+
+    def _on_baseline_anchor_enable_toggled(self, checked: bool) -> None:
+        self._update_baseline_controls_enabled()
+        self._update_model_from_ui()
+
+    def _on_baseline_anchor_add_row(self) -> None:
+        row = self.baseline_anchor_table.rowCount()
+        self.baseline_anchor_table.insertRow(row)
+        for column, default in enumerate(("", "", "0", "")):
+            item = QTableWidgetItem(default)
+            self.baseline_anchor_table.setItem(row, column, item)
+        self.baseline_anchor_table.setCurrentCell(row, 0)
+        self._update_baseline_anchor_buttons()
+        self._update_model_from_ui()
+
+    def _on_baseline_anchor_remove_row(self) -> None:
+        selection = self.baseline_anchor_table.selectionModel()
+        if selection and selection.hasSelection():
+            row = selection.selectedRows()[0].row()
+        else:
+            row = self.baseline_anchor_table.rowCount() - 1
+        if row < 0:
+            return
+        self.baseline_anchor_table.removeRow(row)
+        self._update_baseline_anchor_buttons()
+        self._update_model_from_ui()
+
+    def _on_baseline_anchor_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating:
+            return
+        self._update_model_from_ui()
+
+    def _update_baseline_controls_enabled(self) -> None:
+        enabled = self.baseline_enable.isChecked()
+        method = self.baseline_method.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        method = str(method).strip().lower() if isinstance(method, str) else ""
+        asls_active = enabled and method == "asls"
+        snip_active = enabled and method == "snip"
+
+        self.baseline_method.setEnabled(enabled)
+        self.baseline_lambda.setEnabled(asls_active)
+        self.baseline_p.setEnabled(asls_active)
+        self.baseline_niter.setEnabled(asls_active)
+        self.baseline_iterations.setEnabled(snip_active)
+
+        anchor_enabled = enabled and self.baseline_anchor_enable.isChecked()
+        self.baseline_anchor_enable.setEnabled(enabled)
+        self.baseline_anchor_table.setEnabled(anchor_enabled)
+        self.baseline_anchor_add_row.setEnabled(anchor_enabled)
+        self.baseline_anchor_remove_row.setEnabled(
+            anchor_enabled and self.baseline_anchor_table.rowCount() > 0
+        )
+
+    def _update_baseline_anchor_buttons(self) -> None:
+        anchor_enabled = (
+            self.baseline_enable.isChecked()
+            and self.baseline_anchor_enable.isChecked()
+        )
+        row_count = self.baseline_anchor_table.rowCount()
+        self.baseline_anchor_remove_row.setEnabled(anchor_enabled and row_count > 0)
 
     def _refresh_join_windows_combo(self) -> None:
         self._join_windows_loading = True
@@ -757,6 +986,138 @@ class RecipeEditorDock(QDockWidget):
             return global_rows, errors
         return None, errors
 
+    def _load_baseline_anchor_windows(self, config) -> tuple[bool, bool]:
+        windows_data: list[dict[str, object]] = []
+        enabled = False
+        if isinstance(config, Mapping):
+            enabled = bool(config.get("enabled", True))
+            source = config.get("windows")
+        else:
+            source = config
+            enabled = bool(config)
+
+        if isinstance(source, Sequence) and not isinstance(source, (str, bytes)):
+            for entry in source:
+                if isinstance(entry, Mapping):
+                    windows_data.append(
+                        {
+                            "min": self._format_optional(
+                                entry.get("min_nm")
+                                or entry.get("lower_nm")
+                                or entry.get("min")
+                                or entry.get("lower")
+                            ),
+                            "max": self._format_optional(
+                                entry.get("max_nm")
+                                or entry.get("upper_nm")
+                                or entry.get("max")
+                                or entry.get("upper")
+                            ),
+                            "target": self._format_optional(
+                                entry.get("target")
+                                or entry.get("level")
+                                or entry.get("value")
+                            ),
+                            "label": self._format_optional(entry.get("label")),
+                        }
+                    )
+                elif isinstance(entry, Sequence) and len(entry) >= 2:
+                    min_val = self._format_optional(entry[0])
+                    max_val = self._format_optional(entry[1])
+                    target_val = self._format_optional(entry[2]) if len(entry) > 2 else ""
+                    label_val = self._format_optional(entry[3]) if len(entry) > 3 else ""
+                    windows_data.append(
+                        {
+                            "min": min_val,
+                            "max": max_val,
+                            "target": target_val,
+                            "label": label_val,
+                        }
+                    )
+
+        self.baseline_anchor_table.blockSignals(True)
+        try:
+            self.baseline_anchor_table.setRowCount(0)
+            for entry in windows_data:
+                row = self.baseline_anchor_table.rowCount()
+                self.baseline_anchor_table.insertRow(row)
+                self.baseline_anchor_table.setItem(row, 0, QTableWidgetItem(entry.get("min", "")))
+                self.baseline_anchor_table.setItem(row, 1, QTableWidgetItem(entry.get("max", "")))
+                target_text = entry.get("target", "")
+                if target_text in {None, "None"}:
+                    target_text = ""
+                self.baseline_anchor_table.setItem(row, 2, QTableWidgetItem(str(target_text)))
+                label_text = entry.get("label", "")
+                self.baseline_anchor_table.setItem(row, 3, QTableWidgetItem(str(label_text or "")))
+        finally:
+            self.baseline_anchor_table.blockSignals(False)
+        self._update_baseline_anchor_buttons()
+        return enabled, bool(windows_data)
+
+    def _build_baseline_anchor_payload(self) -> tuple[object | None, list[str]]:
+        errors: list[str] = []
+        windows: list[dict[str, object]] = []
+        for row in range(self.baseline_anchor_table.rowCount()):
+            min_item = self.baseline_anchor_table.item(row, 0)
+            max_item = self.baseline_anchor_table.item(row, 1)
+            target_item = self.baseline_anchor_table.item(row, 2)
+            label_item = self.baseline_anchor_table.item(row, 3)
+
+            min_text = min_item.text().strip() if min_item else ""
+            max_text = max_item.text().strip() if max_item else ""
+            target_text = target_item.text().strip() if target_item else ""
+            label_text = label_item.text().strip() if label_item else ""
+
+            if not min_text and not max_text:
+                continue
+            if not min_text or not max_text:
+                errors.append(
+                    f"Baseline anchor row {row + 1} must include both min and max"
+                )
+                continue
+
+            min_value = self._parse_optional_float(min_text)
+            max_value = self._parse_optional_float(max_text)
+            if not isinstance(min_value, (int, float)) or not isinstance(
+                max_value, (int, float)
+            ):
+                errors.append(
+                    f"Baseline anchor row {row + 1} bounds must be numeric"
+                )
+                continue
+
+            if float(min_value) > float(max_value):
+                errors.append(
+                    f"Baseline anchor row {row + 1} min must be ≤ max"
+                )
+                continue
+
+            if target_text:
+                target_value = self._parse_optional_float(target_text)
+                if not isinstance(target_value, (int, float)):
+                    errors.append(
+                        f"Baseline anchor row {row + 1} target must be numeric"
+                    )
+                    continue
+                target_float: float = float(target_value)
+            else:
+                target_float = 0.0
+
+            window_entry: dict[str, object] = {
+                "min_nm": float(min_value),
+                "max_nm": float(max_value),
+                "target": target_float,
+            }
+            if label_text:
+                window_entry["label"] = label_text
+            windows.append(window_entry)
+
+        if not windows:
+            return None, errors
+
+        payload = {"enabled": True, "windows": windows}
+        return payload, errors
+
     def _sync_recipe_from_ui(self) -> None:
         with self._suspend_updates():
             self._update_model_from_ui(force=True)
@@ -767,6 +1128,34 @@ class RecipeEditorDock(QDockWidget):
 
         params_source = self.recipe.params if isinstance(self.recipe.params, dict) else {}
         params = copy.deepcopy(params_source)
+
+        baseline_cfg = self._ensure_dict(params, "baseline")
+        method_data = self.baseline_method.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        method_value = str(method_data).strip().lower() if isinstance(method_data, str) else ""
+        if self.baseline_enable.isChecked() and method_value:
+            baseline_cfg["method"] = method_value
+            baseline_cfg["lam"] = float(self.baseline_lambda.value())
+            baseline_cfg.pop("lambda", None)
+            baseline_cfg["p"] = float(self.baseline_p.value())
+            baseline_cfg["niter"] = int(self.baseline_niter.value())
+            baseline_cfg["iterations"] = int(self.baseline_iterations.value())
+        else:
+            baseline_cfg.pop("method", None)
+
+        if self.baseline_enable.isChecked() and self.baseline_anchor_enable.isChecked():
+            anchor_payload, anchor_errors = self._build_baseline_anchor_payload()
+            self._baseline_anchor_errors = anchor_errors
+            if anchor_payload is None:
+                for key in ("anchor", "anchor_windows", "anchors", "zeroing"):
+                    baseline_cfg.pop(key, None)
+            else:
+                baseline_cfg["anchor"] = anchor_payload
+                for key in ("anchor_windows", "anchors", "zeroing"):
+                    baseline_cfg.pop(key, None)
+        else:
+            self._baseline_anchor_errors = []
+            for key in ("anchor", "anchor_windows", "anchors", "zeroing"):
+                baseline_cfg.pop(key, None)
 
         smoothing_cfg = self._ensure_dict(params, "smoothing")
         smoothing_cfg.update(
@@ -887,6 +1276,8 @@ class RecipeEditorDock(QDockWidget):
         errors = list(self.recipe.validate())
         if self._join_windows_errors:
             errors.extend(self._join_windows_errors)
+        if self._baseline_anchor_errors:
+            errors.extend(self._baseline_anchor_errors)
         if errors:
             self.validation_label.setStyleSheet("color: #b00020;")
             formatted = "\n".join(f"• {err}" for err in errors)
