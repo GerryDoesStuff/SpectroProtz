@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 
 import yaml
 from PyQt6 import QtCore
+from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +21,8 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QHeaderView,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +32,7 @@ from spectro_app.engine.recipe_model import Recipe
 
 class RecipeEditorDock(QDockWidget):
     _CUSTOM_SENTINEL = "__custom__"
+    _JOIN_WINDOWS_GLOBAL_KEY = "__global__"
 
     def __init__(self, parent=None):
         super().__init__("Recipe Editor", parent)
@@ -35,6 +40,12 @@ class RecipeEditorDock(QDockWidget):
         self.recipe = Recipe()
         self._updating = False
         self._project_root = Path(__file__).resolve().parents[2]
+        self._join_windows_store: dict[str, list[dict[str, str]]] = {
+            self._JOIN_WINDOWS_GLOBAL_KEY: []
+        }
+        self._join_windows_active_key = self._JOIN_WINDOWS_GLOBAL_KEY
+        self._join_windows_loading = False
+        self._join_windows_errors: list[str] = []
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -144,6 +155,62 @@ class RecipeEditorDock(QDockWidget):
         join_form.addRow(self.join_enable)
         join_form.addRow("Window", self.join_window)
         join_form.addRow("Threshold", self.join_threshold)
+
+        join_windows_container = QWidget()
+        join_windows_layout = QVBoxLayout(join_windows_container)
+        join_windows_layout.setContentsMargins(0, 0, 0, 0)
+        join_windows_layout.setSpacing(6)
+
+        join_windows_scope_row = QHBoxLayout()
+        join_windows_scope_row.setContentsMargins(0, 0, 0, 0)
+        join_windows_scope_row.setSpacing(6)
+
+        scope_label = QLabel("Instrument")
+        join_windows_scope_row.addWidget(scope_label)
+
+        self.join_windows_instrument_combo = QComboBox()
+        self.join_windows_instrument_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        join_windows_scope_row.addWidget(self.join_windows_instrument_combo, 1)
+
+        self.join_windows_add_instrument = QPushButton("Add instrument…")
+        join_windows_scope_row.addWidget(self.join_windows_add_instrument)
+
+        self.join_windows_remove_instrument = QPushButton("Remove")
+        join_windows_scope_row.addWidget(self.join_windows_remove_instrument)
+
+        join_windows_layout.addLayout(join_windows_scope_row)
+
+        self.join_windows_table = QTableWidget(0, 2)
+        self.join_windows_table.setHorizontalHeaderLabels(["Min (nm)", "Max (nm)"])
+        header = self.join_windows_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.join_windows_table.verticalHeader().setVisible(False)
+        self.join_windows_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.join_windows_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        join_windows_layout.addWidget(self.join_windows_table)
+
+        join_windows_buttons = QHBoxLayout()
+        join_windows_buttons.setContentsMargins(0, 0, 0, 0)
+        join_windows_buttons.setSpacing(6)
+        join_windows_buttons.addStretch(1)
+
+        self.join_windows_add_row = QPushButton("Add window")
+        join_windows_buttons.addWidget(self.join_windows_add_row)
+
+        self.join_windows_remove_row = QPushButton("Remove selected")
+        join_windows_buttons.addWidget(self.join_windows_remove_row)
+
+        join_windows_layout.addLayout(join_windows_buttons)
+
+        join_form.addRow("Windows", join_windows_container)
+        self._refresh_join_windows_combo()
         layout.addWidget(join_group)
 
         # --- Blank handling ---
@@ -213,6 +280,19 @@ class RecipeEditorDock(QDockWidget):
     def _connect_signals(self):
         self.load_preset_button.clicked.connect(self._load_selected_preset)
         self.save_preset_button.clicked.connect(self._save_preset)
+        self.join_windows_instrument_combo.currentIndexChanged.connect(
+            self._on_join_windows_instrument_changed
+        )
+        self.join_windows_add_instrument.clicked.connect(
+            self._on_join_windows_add_instrument
+        )
+        self.join_windows_remove_instrument.clicked.connect(
+            self._on_join_windows_remove_instrument
+        )
+        self.join_windows_add_row.clicked.connect(self._on_join_windows_add_row)
+        self.join_windows_remove_row.clicked.connect(
+            self._on_join_windows_remove_row
+        )
         for signal in (
             self.module.currentTextChanged,
             self.smooth_enable.toggled,
@@ -336,6 +416,7 @@ class RecipeEditorDock(QDockWidget):
                 self._safe_int(join_cfg.get("window"), self.join_window.value())
             )
             self.join_threshold.setText(self._format_optional(join_cfg.get("threshold")))
+            self._load_join_windows(join_cfg.get("windows"))
 
             blank_cfg = params.get("blank", {}) if isinstance(params.get("blank"), dict) else {}
             subtract = bool(blank_cfg.get("subtract", blank_cfg.get("enabled", False)))
@@ -374,6 +455,307 @@ class RecipeEditorDock(QDockWidget):
         if value is None:
             return ""
         return str(value)
+
+    def _load_join_windows(self, config) -> None:
+        store: dict[str, list[dict[str, str]]] = {
+            self._JOIN_WINDOWS_GLOBAL_KEY: []
+        }
+        if isinstance(config, Mapping):
+            for key, value in config.items():
+                if key is None:
+                    continue
+                key_str = str(key).strip()
+                if not key_str:
+                    continue
+                target_key = (
+                    self._JOIN_WINDOWS_GLOBAL_KEY
+                    if key_str.lower() == "default"
+                    else key_str
+                )
+                rows = self._normalise_join_window_rows(value)
+                if target_key in store:
+                    store[target_key] = rows
+                else:
+                    store[target_key] = rows
+        elif isinstance(config, Sequence) and not isinstance(config, (str, bytes)):
+            rows = self._normalise_join_window_rows(config)
+            store[self._JOIN_WINDOWS_GLOBAL_KEY] = rows
+        self._join_windows_store = store
+        self._join_windows_active_key = self._JOIN_WINDOWS_GLOBAL_KEY
+        self._join_windows_errors = []
+        self._refresh_join_windows_combo()
+
+    def _normalise_join_window_rows(self, value) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return rows
+        for entry in value:
+            if not isinstance(entry, Mapping):
+                continue
+            rows.append(
+                {
+                    "min": self._format_optional(entry.get("min_nm")),
+                    "max": self._format_optional(entry.get("max_nm")),
+                }
+            )
+        return rows
+
+    def _refresh_join_windows_combo(self) -> None:
+        self._join_windows_loading = True
+        try:
+            if self._JOIN_WINDOWS_GLOBAL_KEY not in self._join_windows_store:
+                self._join_windows_store[self._JOIN_WINDOWS_GLOBAL_KEY] = []
+            self.join_windows_instrument_combo.blockSignals(True)
+            self.join_windows_instrument_combo.clear()
+            self.join_windows_instrument_combo.addItem(
+                "Global (all instruments)", self._JOIN_WINDOWS_GLOBAL_KEY
+            )
+            for key in self._join_windows_store.keys():
+                if key == self._JOIN_WINDOWS_GLOBAL_KEY:
+                    continue
+                self.join_windows_instrument_combo.addItem(key, key)
+            current_key = (
+                self._join_windows_active_key
+                if self._join_windows_active_key in self._join_windows_store
+                else self._JOIN_WINDOWS_GLOBAL_KEY
+            )
+            index = self.join_windows_instrument_combo.findData(
+                current_key, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index < 0:
+                index = 0
+            self.join_windows_instrument_combo.setCurrentIndex(index)
+        finally:
+            self.join_windows_instrument_combo.blockSignals(False)
+            self._join_windows_loading = False
+        current_data = self.join_windows_instrument_combo.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        if not isinstance(current_data, str):
+            current_data = self._JOIN_WINDOWS_GLOBAL_KEY
+        self._join_windows_active_key = current_data
+        self._populate_join_windows_table(current_data)
+        self._update_join_window_buttons()
+
+    def _populate_join_windows_table(self, key: str) -> None:
+        self._join_windows_loading = True
+        try:
+            self.join_windows_table.setRowCount(0)
+            rows = self._join_windows_store.get(key, [])
+            for row in rows:
+                self._insert_join_window_row(row.get("min", ""), row.get("max", ""))
+        finally:
+            self._join_windows_loading = False
+        self._update_join_window_buttons()
+
+    def _insert_join_window_row(self, min_text: str = "", max_text: str = "") -> None:
+        row_index = self.join_windows_table.rowCount()
+        self.join_windows_table.insertRow(row_index)
+        min_field = self._create_join_window_field("Min (nm)", min_text)
+        max_field = self._create_join_window_field("Max (nm)", max_text)
+        self.join_windows_table.setCellWidget(row_index, 0, min_field)
+        self.join_windows_table.setCellWidget(row_index, 1, max_field)
+
+    def _create_join_window_field(self, placeholder: str, text: str) -> QLineEdit:
+        field = QLineEdit()
+        field.setPlaceholderText(placeholder)
+        field.setClearButtonEnabled(True)
+        validator = QDoubleValidator(0.0, 10000.0, 3, field)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        field.setValidator(validator)
+        if text:
+            field.setText(text)
+        field.textChanged.connect(self._on_join_window_value_changed)
+        return field
+
+    def _on_join_window_value_changed(self, *_):
+        if self._join_windows_loading:
+            return
+        self._save_current_join_windows()
+        self._update_model_from_ui()
+
+    def _save_current_join_windows(self) -> None:
+        key = self._join_windows_active_key
+        if not isinstance(key, str):
+            key = self._JOIN_WINDOWS_GLOBAL_KEY
+        rows: list[dict[str, str]] = []
+        for index in range(self.join_windows_table.rowCount()):
+            min_widget = self.join_windows_table.cellWidget(index, 0)
+            max_widget = self.join_windows_table.cellWidget(index, 1)
+            min_text = min_widget.text().strip() if isinstance(min_widget, QLineEdit) else ""
+            max_text = max_widget.text().strip() if isinstance(max_widget, QLineEdit) else ""
+            rows.append({"min": min_text, "max": max_text})
+        self._join_windows_store[key] = rows
+
+    def _on_join_windows_instrument_changed(self):
+        if self._join_windows_loading:
+            return
+        self._save_current_join_windows()
+        new_key = self.join_windows_instrument_combo.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        if not isinstance(new_key, str):
+            new_key = self._JOIN_WINDOWS_GLOBAL_KEY
+        self._join_windows_active_key = new_key
+        if new_key not in self._join_windows_store:
+            self._join_windows_store[new_key] = []
+        self._populate_join_windows_table(new_key)
+        self._update_model_from_ui()
+
+    def _on_join_windows_add_instrument(self):
+        self._save_current_join_windows()
+        name, ok = QInputDialog.getText(
+            self,
+            "Add Instrument Profile",
+            "Instrument name (e.g. model, serial fragment, or 'default'):",
+        )
+        if not ok:
+            return
+        key = name.strip()
+        if not key:
+            return
+        if key.lower() == "default":
+            index = self.join_windows_instrument_combo.findData(
+                self._JOIN_WINDOWS_GLOBAL_KEY, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index >= 0:
+                self.join_windows_instrument_combo.setCurrentIndex(index)
+            return
+        existing = {
+            (stored_key or "").strip().lower(): stored_key
+            for stored_key in self._join_windows_store.keys()
+        }
+        lookup = key.strip().lower()
+        if lookup in existing:
+            index = self.join_windows_instrument_combo.findData(
+                existing[lookup], QtCore.Qt.ItemDataRole.UserRole
+            )
+            if index >= 0:
+                self.join_windows_instrument_combo.setCurrentIndex(index)
+            return
+        self._join_windows_store[key] = []
+        self._join_windows_active_key = key
+        self._refresh_join_windows_combo()
+        index = self.join_windows_instrument_combo.findData(
+            key, QtCore.Qt.ItemDataRole.UserRole
+        )
+        if index >= 0:
+            self.join_windows_instrument_combo.setCurrentIndex(index)
+        self._update_model_from_ui()
+
+    def _on_join_windows_remove_instrument(self):
+        key = self.join_windows_instrument_combo.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        if not isinstance(key, str) or key == self._JOIN_WINDOWS_GLOBAL_KEY:
+            return
+        self._join_windows_store.pop(key, None)
+        self._join_windows_active_key = self._JOIN_WINDOWS_GLOBAL_KEY
+        self._refresh_join_windows_combo()
+        index = self.join_windows_instrument_combo.findData(
+            self._JOIN_WINDOWS_GLOBAL_KEY, QtCore.Qt.ItemDataRole.UserRole
+        )
+        if index >= 0:
+            self.join_windows_instrument_combo.setCurrentIndex(index)
+        self._update_model_from_ui()
+
+    def _on_join_windows_add_row(self):
+        self._insert_join_window_row()
+        row = self.join_windows_table.rowCount() - 1
+        if row >= 0:
+            self.join_windows_table.selectRow(row)
+            widget = self.join_windows_table.cellWidget(row, 0)
+            if isinstance(widget, QLineEdit):
+                widget.setFocus()
+                widget.selectAll()
+        self._save_current_join_windows()
+        self._update_join_window_buttons()
+        self._update_model_from_ui()
+
+    def _on_join_windows_remove_row(self):
+        selection = self.join_windows_table.selectionModel()
+        if selection and selection.hasSelection():
+            row = selection.selectedRows()[0].row()
+        else:
+            row = self.join_windows_table.rowCount() - 1
+        if row < 0:
+            return
+        self.join_windows_table.removeRow(row)
+        self._save_current_join_windows()
+        self._update_join_window_buttons()
+        self._update_model_from_ui()
+
+    def _update_join_window_buttons(self) -> None:
+        has_rows = self.join_windows_table.rowCount() > 0
+        self.join_windows_remove_row.setEnabled(has_rows)
+        removable = (
+            self.join_windows_instrument_combo.count() > 1
+            and self.join_windows_instrument_combo.currentData(
+                QtCore.Qt.ItemDataRole.UserRole
+            )
+            != self._JOIN_WINDOWS_GLOBAL_KEY
+        )
+        self.join_windows_remove_instrument.setEnabled(removable)
+
+    def _build_join_windows_payload(self) -> tuple[object | None, list[str]]:
+        errors: list[str] = []
+        cleaned: dict[str, list[dict[str, float]]] = {}
+        for key, rows in self._join_windows_store.items():
+            cleaned_rows: list[dict[str, float]] = []
+            for index, row in enumerate(rows, start=1):
+                min_text = str(row.get("min", "")).strip()
+                max_text = str(row.get("max", "")).strip()
+                if not min_text and not max_text:
+                    continue
+                if not min_text or not max_text:
+                    label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                    errors.append(
+                        f"Join window for {label} row {index} must include both min and max"
+                    )
+                    continue
+                min_value = self._parse_optional_float(min_text)
+                max_value = self._parse_optional_float(max_text)
+                if not isinstance(min_value, (int, float)) or not isinstance(
+                    max_value, (int, float)
+                ):
+                    label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                    errors.append(
+                        f"Join window bounds for {label} row {index} must be numeric"
+                    )
+                    continue
+                min_float = float(min_value)
+                max_float = float(max_value)
+                if min_float < 0.0 or max_float < 0.0:
+                    label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                    errors.append(
+                        f"Join window bounds for {label} row {index} must be positive"
+                    )
+                    continue
+                if min_float > max_float:
+                    label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                    errors.append(
+                        f"Join window min must be ≤ max for {label} row {index}"
+                    )
+                    continue
+                cleaned_rows.append({"min_nm": min_float, "max_nm": max_float})
+            if cleaned_rows:
+                cleaned[key] = cleaned_rows
+        global_rows = cleaned.get(self._JOIN_WINDOWS_GLOBAL_KEY, [])
+        non_global_keys = [
+            key
+            for key in self._join_windows_store.keys()
+            if key != self._JOIN_WINDOWS_GLOBAL_KEY and key in cleaned
+        ]
+        if non_global_keys:
+            payload: dict[str, list[dict[str, float]]] = {}
+            if global_rows:
+                payload["default"] = global_rows
+            for key in non_global_keys:
+                payload[key] = cleaned[key]
+            return payload or None, errors
+        if global_rows:
+            return global_rows, errors
+        return None, errors
 
     def _sync_recipe_from_ui(self) -> None:
         with self._suspend_updates():
@@ -424,6 +806,13 @@ class RecipeEditorDock(QDockWidget):
             join_cfg.pop("threshold", None)
         else:
             join_cfg["threshold"] = threshold_value
+        self._save_current_join_windows()
+        windows_payload, window_errors = self._build_join_windows_payload()
+        self._join_windows_errors = window_errors
+        if windows_payload is None:
+            join_cfg.pop("windows", None)
+        else:
+            join_cfg["windows"] = windows_payload
 
         blank_cfg = self._ensure_dict(params, "blank")
         fallback_text = self.blank_fallback.text().strip()
@@ -495,7 +884,9 @@ class RecipeEditorDock(QDockWidget):
         return value
 
     def _run_validation(self):
-        errors = self.recipe.validate()
+        errors = list(self.recipe.validate())
+        if self._join_windows_errors:
+            errors.extend(self._join_windows_errors)
         if errors:
             self.validation_label.setStyleSheet("color: #b00020;")
             formatted = "\n".join(f"• {err}" for err in errors)
