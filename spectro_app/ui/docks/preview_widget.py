@@ -636,6 +636,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 class PreviewDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Preview", parent)
+        self.setObjectName("PreviewDock")
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(False)
