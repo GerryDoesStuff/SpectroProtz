@@ -72,6 +72,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._color_map: Dict[str, QtGui.QColor] = {}
         self._legend: Optional[pg.LegendItem] = None
         self._last_cursor_result: Optional[tuple[_StageDataset, int, float, float]] = None
+        self._last_cursor_pos: Optional[tuple[float, float]] = None
 
         self._sample_labels: List[str] = []
         self._single_mode: bool = False
@@ -141,6 +142,16 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self.add_button.setText("Add spectrum")
         self.add_button.clicked.connect(self._on_add_clicked)
         navigation_row.addWidget(self.add_button)
+
+        self.zoom_in_button = QtWidgets.QToolButton()
+        self.zoom_in_button.setText("Zoom in")
+        self.zoom_in_button.clicked.connect(self._on_zoom_in_clicked)
+        navigation_row.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QtWidgets.QToolButton()
+        self.zoom_out_button.setText("Zoom out")
+        self.zoom_out_button.clicked.connect(self._on_zoom_out_clicked)
+        navigation_row.addWidget(self.zoom_out_button)
 
         navigation_row.addStretch(1)
 
@@ -440,6 +451,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self.next_button.setEnabled(is_single and total > 1)
         self.add_button.setEnabled(is_single and self._single_window_size < total)
         self.remove_button.setEnabled(is_single and self._single_window_size > 1)
+        self.zoom_in_button.setEnabled(total > 0)
+        self.zoom_out_button.setEnabled(total > 0)
 
         if is_single:
             labels = self._current_single_labels()
@@ -499,6 +512,25 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._single_window_size -= 1
         self._apply_view_mode()
 
+    def _on_zoom_in_clicked(self) -> None:
+        self._apply_zoom(0.8)
+
+    def _on_zoom_out_clicked(self) -> None:
+        self._apply_zoom(1.25)
+
+    def _apply_zoom(self, factor: float) -> None:
+        view_box = self.plot.plotItem.getViewBox()
+        if view_box is None:
+            return
+        self.plot.plotItem.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=False)
+        if self._last_cursor_pos is not None:
+            center = pg.Point(*self._last_cursor_pos)
+        else:
+            rect = view_box.viewRect()
+            center_qpoint = rect.center()
+            center = pg.Point(center_qpoint.x(), center_qpoint.y())
+        view_box.scaleBy((factor, factor), center=center)
+
     def _render_curves(self) -> None:
         if self._legend is not None:
             self._legend.clear()
@@ -540,6 +572,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         mouse_point = self.plot.plotItem.vb.mapSceneToView(pos)
         x = float(mouse_point.x())
         y = float(mouse_point.y())
+        self._last_cursor_pos = (x, y)
         self._vline.setPos(x)
         self._hline.setPos(y)
         self._update_cursor_label((x, y))
