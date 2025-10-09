@@ -71,6 +71,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda paths: self._resolve_plugin(paths, self._recipe_data.get("module"))
         )
         self._current_recipe_path: Optional[Path] = None
+        self._last_browsed_dir: Optional[Path] = None
         self._last_result: Optional[BatchResult] = None
         self._active_plugin = None
         self._active_plugin_id: Optional[str] = None
@@ -78,6 +79,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._default_palette: Optional[QtGui.QPalette] = None
         self._default_style_name: Optional[str] = None
         self._log_dir: Optional[Path] = None
+        self._loading_session: bool = False
         self._load_app_settings()
         self._job_running = False
         self._updating_ui = False
@@ -197,6 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_app_settings(self):
         settings = self.appctx.settings
+        self._restore_session_state(settings)
         app = QtWidgets.QApplication.instance()
         if app:
             if self._default_palette is None:
@@ -228,6 +231,85 @@ class MainWindow(QtWidgets.QMainWindow):
 
         theme_value = str(settings.value("theme", "system") or "system")
         self._apply_theme(theme_value)
+
+    def _restore_session_state(self, settings: QtCore.QSettings) -> None:
+        raw_state = settings.value("session/state", "")
+        if isinstance(raw_state, (bytes, bytearray)):
+            raw_state = raw_state.decode("utf-8", errors="ignore")
+        payload: Dict[str, Any] = {}
+        if isinstance(raw_state, str) and raw_state.strip():
+            try:
+                parsed = json.loads(raw_state)
+            except (TypeError, ValueError):
+                parsed = {}
+            if isinstance(parsed, dict):
+                payload = parsed
+
+        previous_loading = self._loading_session
+        self._loading_session = True
+        try:
+            recipe_payload = (
+                payload.get("recipe") if isinstance(payload.get("recipe"), dict) else {}
+            )
+            self._recipe_data = self._normalise_recipe_data(recipe_payload)
+            previous_state = self._updating_ui
+            self._updating_ui = True
+            try:
+                self.recipeDock.set_recipe(self._recipe_data)
+            finally:
+                self._updating_ui = previous_state
+
+            queue_items: List[str] = []
+            stored_queue = payload.get("queue")
+            if isinstance(stored_queue, list):
+                for item in stored_queue:
+                    if isinstance(item, str) and item:
+                        queue_items.append(item)
+
+            overrides: Dict[str, Dict[str, object]] = {}
+            stored_overrides = payload.get("overrides")
+            if isinstance(stored_overrides, dict):
+                for path_str, values in stored_overrides.items():
+                    if not isinstance(path_str, str) or not isinstance(values, dict):
+                        continue
+                    try:
+                        normalized = str(Path(path_str))
+                    except (TypeError, ValueError):
+                        normalized = path_str
+                    overrides[normalized] = {
+                        str(key): value for key, value in values.items() if isinstance(key, str)
+                    }
+            self._queue_overrides = overrides
+            self.fileDock.load_overrides(self._queue_overrides)
+
+            stored_recipe_path = payload.get("current_recipe_path")
+            if isinstance(stored_recipe_path, str) and stored_recipe_path.strip():
+                try:
+                    self._current_recipe_path = Path(stored_recipe_path)
+                except (TypeError, ValueError):
+                    self._current_recipe_path = None
+            else:
+                self._current_recipe_path = None
+
+            stored_last_dir = payload.get("last_data_dir")
+            if isinstance(stored_last_dir, str) and stored_last_dir.strip():
+                try:
+                    self._last_browsed_dir = Path(stored_last_dir)
+                except (TypeError, ValueError):
+                    self._last_browsed_dir = None
+
+            if queue_items:
+                self._set_queue(queue_items)
+            else:
+                self._set_queue([])
+
+            if hasattr(self.appctx, "set_dirty"):
+                try:
+                    self.appctx.set_dirty(False)
+                except Exception:
+                    pass
+        finally:
+            self._loading_session = previous_loading
 
     def _apply_theme(self, theme: str):
         theme = (theme or "system").lower()
@@ -718,6 +800,29 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self.appctx.settings
         s.setValue("geometry", self.saveGeometry())
         s.setValue("windowState", self.saveState())
+        session_payload = {
+            "recipe": copy.deepcopy(self._recipe_data),
+            "queue": list(self._queued_paths),
+            "overrides": {
+                str(path): dict(values)
+                for path, values in self._queue_overrides.items()
+            },
+            "current_recipe_path": (
+                str(self._current_recipe_path) if self._current_recipe_path else None
+            ),
+            "last_data_dir": str(self._last_browsed_dir) if self._last_browsed_dir else None,
+        }
+
+        def _json_default(value: object) -> object:
+            if isinstance(value, Path):
+                return str(value)
+            raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+        try:
+            encoded = json.dumps(session_payload, default=_json_default)
+        except TypeError:
+            encoded = json.dumps({})
+        s.setValue("session/state", encoded)
 
     def restore_state(self):
         s = self.appctx.settings
@@ -751,9 +856,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _last_data_dir(self) -> Path:
         if self._queued_paths:
-            return Path(self._queued_paths[-1]).parent
+            try:
+                last_path = Path(self._queued_paths[-1])
+            except (TypeError, ValueError):
+                last_path = None
+            else:
+                if last_path.exists() and last_path.is_dir():
+                    return last_path
+                if last_path.parent != last_path:
+                    return last_path.parent
         if self._current_recipe_path:
             return self._current_recipe_path.parent
+        if self._last_browsed_dir:
+            return self._last_browsed_dir
         return Path.home()
 
     def _build_queue_entries(
@@ -916,7 +1031,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.apply_metadata(entries)
 
     def _set_queue(self, paths: List[str]):
-        self._queued_paths = [str(p) for p in paths]
+        self._queued_paths = [str(p) for p in paths if p]
+        if self._queued_paths and not self._loading_session:
+            self._update_last_browsed_dir(self._queued_paths)
         plugin = None
         if self._queued_paths:
             plugin = self._resolve_plugin(
@@ -934,6 +1051,31 @@ class MainWindow(QtWidgets.QMainWindow):
             else "Queue cleared"
         )
         self.status.showMessage(message, 5000)
+
+    def _update_last_browsed_dir(self, paths: List[str]) -> None:
+        if not paths:
+            return
+        candidate_dir: Optional[Path] = None
+        for raw in paths:
+            try:
+                candidate = Path(raw)
+            except (TypeError, ValueError):
+                continue
+            if candidate.exists():
+                candidate_dir = candidate if candidate.is_dir() else candidate.parent
+                break
+        if candidate_dir is None:
+            try:
+                fallback = Path(paths[0])
+            except (TypeError, ValueError):
+                fallback = None
+            else:
+                if fallback.exists() and fallback.is_dir():
+                    candidate_dir = fallback
+                else:
+                    candidate_dir = fallback.parent if fallback.parent != fallback else None
+        if candidate_dir and str(candidate_dir):
+            self._last_browsed_dir = candidate_dir
 
     # ------------------------------------------------------------------
     # File queue interactions
@@ -973,7 +1115,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(Path(path)): dict(values)
                 for path, values in overrides.items()
             }
-        self.appctx.set_dirty(True)
+        if not self._loading_session:
+            self.appctx.set_dirty(True)
 
     def _open_file_preview(self, path: Path, title: str, max_bytes: int):
         if not path.exists():

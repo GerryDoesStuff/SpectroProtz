@@ -212,6 +212,22 @@ class FileQueueDock(QDockWidget):
         self._raw_entries: List[QueueEntry] = []
         self._overrides: Dict[str, Dict[str, object]] = {}
 
+    def load_overrides(self, overrides: Dict[str, Dict[str, object]]) -> None:
+        """Seed override state without emitting change notifications."""
+        loaded: Dict[str, Dict[str, object]] = {}
+        if isinstance(overrides, dict):
+            for path, values in overrides.items():
+                if not isinstance(path, str):
+                    continue
+                if not isinstance(values, dict):
+                    continue
+                normalized = self._normalize_path(path)
+                loaded[normalized] = dict(values)
+        self._overrides = loaded
+        if self._raw_entries:
+            self._entries = [self._apply_overrides(entry) for entry in self._raw_entries]
+            self._refresh_list_widget()
+
     def set_plugin_resolver(
         self, resolver: Optional[Callable[[List[str]], object]]
     ) -> None:
