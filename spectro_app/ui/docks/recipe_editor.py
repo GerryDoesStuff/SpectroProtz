@@ -126,7 +126,10 @@ class RecipeEditorDock(QDockWidget):
         self.blank_match_strategy = QComboBox()
         self.blank_match_strategy.addItem("Match by blank identifier", "blank_id")
         self.blank_match_strategy.addItem("Match by cuvette slot", "cuvette_slot")
-        self.blank_match_strategy.setToolTip("Choose how blanks are paired with samples")
+        self.blank_match_strategy.setToolTip(
+            "Use blank identifiers when blank files share a named ID with their samples. "
+            "Choose cuvette slots when pairing by instrument position; blank IDs may be left empty."
+        )
 
         blank_form.addRow(self.blank_subtract)
         blank_form.addRow(self.blank_require)
