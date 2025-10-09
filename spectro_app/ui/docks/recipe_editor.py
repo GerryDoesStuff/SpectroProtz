@@ -14,12 +14,14 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -53,6 +55,14 @@ class RecipeEditorDock(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setWidget(container)
 
         preset_form = QFormLayout()
         preset_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -362,7 +372,7 @@ class RecipeEditorDock(QDockWidget):
 
         layout.addStretch(1)
 
-        self.setWidget(container)
+        self.setWidget(scroll_area)
 
         self._refresh_preset_list()
         self._connect_signals()
