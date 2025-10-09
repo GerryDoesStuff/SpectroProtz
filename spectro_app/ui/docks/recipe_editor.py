@@ -136,6 +136,10 @@ class RecipeEditorDock(QDockWidget):
         self.join_threshold = QLineEdit()
         self.join_threshold.setPlaceholderText("Leave blank for default")
         self.join_threshold.setClearButtonEnabled(True)
+        self.join_threshold.setToolTip(
+            "Absolute absorbance offset allowed when joining detectors. "
+            "Default join threshold is 0.2; quality control fallback uses 0.5."
+        )
 
         join_form.addRow(self.join_enable)
         join_form.addRow("Window", self.join_window)
