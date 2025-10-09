@@ -97,6 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.preview_requested.connect(self._on_queue_preview_requested)
         self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
         self.fileDock.overrides_changed.connect(self._on_queue_overrides_changed)
+        self.fileDock.clear_requested.connect(self._on_queue_clear_requested)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.fileDock)
         self.recipeDock = RecipeEditorDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.recipeDock)
@@ -1090,6 +1091,9 @@ class MainWindow(QtWidgets.QMainWindow):
             target_dir = first_existing.parent if first_existing.is_file() else first_existing
             if target_dir.is_dir():
                 self._export_default_dir = target_dir
+
+    def _on_queue_clear_requested(self) -> None:
+        self._set_queue([])
 
     def _on_queue_inspect_requested(self, path: str):
         self._open_file_preview(Path(path), "Inspect Header", 4096)
