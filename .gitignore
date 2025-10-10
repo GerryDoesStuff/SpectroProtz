@@ -12,3 +12,4 @@
 /spectro_app/plugins/uvvis/__pycache__
 /spectro_app/ui/docks/__pycache__
 *.pyc
+*.pyc
