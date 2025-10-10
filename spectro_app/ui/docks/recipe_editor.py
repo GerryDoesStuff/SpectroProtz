@@ -150,40 +150,160 @@ class RecipeEditorDock(QDockWidget):
         self.validation_label.setStyleSheet("color: #0a0;")
         layout.addWidget(self.validation_label)
 
-        # --- Smoothing ---
-        smoothing_section = CollapsibleSection("Smoothing")
-        smoothing_form = QFormLayout()
-        smoothing_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        smoothing_section.setContentLayout(smoothing_form)
-
-        self.smooth_enable = QCheckBox("Enable Savitzky–Golay smoothing")
-        self.smooth_enable.setToolTip(
-            "Toggle global Savitzky–Golay smoothing; defaults of window 15 and"
-            " polyorder 3 suit 1 nm UV-Vis sampling and can be reduced for"
-            " sparse data."
+        # --- Join correction ---
+        join_section = CollapsibleSection("Join correction")
+        join_form = QFormLayout()
+        join_section.setContentLayout(join_form)
+        self.join_enable = QCheckBox("Enable detector join correction")
+        self.join_enable.setToolTip(
+            "Detect and correct offsets where detectors overlap; enable when"
+            " multi-detector instruments need stitching."
         )
-        self.smooth_window = QSpinBox()
-        self.smooth_window.setRange(3, 999)
-        self.smooth_window.setSingleStep(2)
-        self.smooth_window.setValue(15)
-        self.smooth_window.setToolTip(
-            "Number of points in the Savitzky–Golay window. Use odd values larger"
-            " than the polynomial order; start around 15 for 1 nm data and shrink"
-            " only when working with sparse sampling."
+        self.join_window = QSpinBox()
+        self.join_window.setRange(1, 999)
+        self.join_window.setValue(10)
+        self.join_window.setToolTip(
+            "Number of points on each side used to measure join offsets; keep"
+            " custom values above 3 so the detector overlap provides enough"
+            " context."
         )
-        self.smooth_poly = QSpinBox()
-        self.smooth_poly.setRange(1, 15)
-        self.smooth_poly.setValue(3)
-        self.smooth_poly.setToolTip(
-            "Polynomial order used by the Savitzky–Golay fit. Keep it lower than"
-            " the window size; an order of 3 is the recommended starting point"
-            " for 1 nm sampling."
+        self.join_threshold = QLineEdit()
+        self.join_threshold.setPlaceholderText("Leave blank for default")
+        self.join_threshold.setClearButtonEnabled(True)
+        self.join_threshold.setToolTip(
+            "Maximum absorbance offset permitted when stitching detectors. The"
+            " UV-Vis default is 0.2 and QC falls back to 0.5, so keep overrides"
+            " within that band for consistent flagging."
         )
 
-        smoothing_form.addRow(self.smooth_enable)
-        smoothing_form.addRow("Window", self.smooth_window)
-        smoothing_form.addRow("Poly order", self.smooth_poly)
-        layout.addWidget(smoothing_section)
+        join_form.addRow(self.join_enable)
+        join_form.addRow("Window", self.join_window)
+        join_form.addRow("Threshold", self.join_threshold)
+
+        join_windows_container = QWidget()
+        join_windows_layout = QVBoxLayout(join_windows_container)
+        join_windows_layout.setContentsMargins(0, 0, 0, 0)
+        join_windows_layout.setSpacing(6)
+
+        join_windows_scope_row = QHBoxLayout()
+        join_windows_scope_row.setContentsMargins(0, 0, 0, 0)
+        join_windows_scope_row.setSpacing(6)
+
+        scope_label = QLabel("Instrument")
+        join_windows_scope_row.addWidget(scope_label)
+
+        self.join_windows_instrument_combo = QComboBox()
+        self.join_windows_instrument_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        join_windows_scope_row.addWidget(self.join_windows_instrument_combo, 1)
+
+        self.join_windows_add_instrument = QPushButton("Add instrument…")
+        join_windows_scope_row.addWidget(self.join_windows_add_instrument)
+
+        self.join_windows_remove_instrument = QPushButton("Remove")
+        join_windows_scope_row.addWidget(self.join_windows_remove_instrument)
+
+        join_windows_layout.addLayout(join_windows_scope_row)
+
+        self.join_windows_table = QTableWidget(0, 2)
+        self.join_windows_table.setHorizontalHeaderLabels(["Min (nm)", "Max (nm)"])
+        header = self.join_windows_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.join_windows_table.verticalHeader().setVisible(False)
+        self.join_windows_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.join_windows_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        join_windows_layout.addWidget(self.join_windows_table)
+
+        join_windows_buttons = QHBoxLayout()
+        join_windows_buttons.setContentsMargins(0, 0, 0, 0)
+        join_windows_buttons.setSpacing(6)
+        join_windows_buttons.addStretch(1)
+
+        self.join_windows_add_row = QPushButton("Add window")
+        join_windows_buttons.addWidget(self.join_windows_add_row)
+
+        self.join_windows_remove_row = QPushButton("Remove selected")
+        join_windows_buttons.addWidget(self.join_windows_remove_row)
+
+        join_windows_layout.addLayout(join_windows_buttons)
+
+        join_form.addRow("Windows", join_windows_container)
+        self._refresh_join_windows_combo()
+        layout.addWidget(join_section)
+
+        # --- Despiking ---
+        despike_section = CollapsibleSection("Despiking")
+        despike_form = QFormLayout()
+        despike_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        despike_section.setContentLayout(despike_form)
+
+        self.despike_enable = QCheckBox("Enable spike removal")
+        self.despike_enable.setToolTip(
+            "Detect and replace narrow spikes using a z-score threshold on a sliding window."
+        )
+        self.despike_window = QSpinBox()
+        self.despike_window.setRange(3, 999)
+        self.despike_window.setValue(5)
+        self.despike_window.setToolTip(
+            "Number of points in the despiking window; the default five-point"
+            " window balances spike suppression with peak preservation."
+        )
+        self.despike_zscore = QDoubleSpinBox()
+        self.despike_zscore.setRange(0.1, 99.9)
+        self.despike_zscore.setDecimals(2)
+        self.despike_zscore.setSingleStep(0.1)
+        self.despike_zscore.setValue(5.0)
+        self.despike_zscore.setToolTip(
+            "Z-score threshold for spike detection; UV-Vis recipes typically"
+            " stay between 2.5 and 6.0."
+        )
+
+        despike_form.addRow(self.despike_enable)
+        despike_form.addRow("Window", self.despike_window)
+        despike_form.addRow("Z-score", self.despike_zscore)
+        layout.addWidget(despike_section)
+
+        # --- Blank handling ---
+        blank_section = CollapsibleSection("Blank handling")
+        blank_form = QFormLayout()
+        blank_section.setContentLayout(blank_form)
+        self.blank_subtract = QCheckBox("Subtract blank from samples")
+        self.blank_subtract.setToolTip(
+            "Remove instrument/background signal using matched blanks; enable"
+            " when blank spectra are available for subtraction."
+        )
+        self.blank_require = QCheckBox("Require blank for each batch")
+        self.blank_require.setToolTip(
+            "Fail batches without a paired blank. Leave disabled for automated"
+            " workflows that cannot guarantee blanks every run."
+        )
+        self.blank_fallback = QLineEdit()
+        self.blank_fallback.setPlaceholderText("Optional fallback/default blank path")
+        self.blank_fallback.setClearButtonEnabled(True)
+        self.blank_fallback.setToolTip(
+            "Optional path to a default blank used when no matched file is"
+            " found; keep it empty when on-the-fly blanks should be mandatory."
+        )
+        self.blank_match_strategy = QComboBox()
+        self.blank_match_strategy.addItem("Match by blank identifier", "blank_id")
+        self.blank_match_strategy.addItem("Match by cuvette slot", "cuvette_slot")
+        self.blank_match_strategy.setToolTip(
+            "Use blank identifiers when files share stable IDs with samples;"
+            " switch to cuvette slots when pairing by instrument position so"
+            " slot metadata drives the association."
+        )
+
+        blank_form.addRow(self.blank_subtract)
+        blank_form.addRow(self.blank_require)
+        blank_form.addRow("Fallback", self.blank_fallback)
+        blank_form.addRow("Match strategy", self.blank_match_strategy)
+        layout.addWidget(blank_section)
 
         # --- Baseline correction ---
         baseline_section = CollapsibleSection("Baseline correction")
@@ -301,160 +421,40 @@ class RecipeEditorDock(QDockWidget):
         baseline_form.addRow("Anchor windows", baseline_anchor_container)
         layout.addWidget(baseline_section)
 
-        # --- Despiking ---
-        despike_section = CollapsibleSection("Despiking")
-        despike_form = QFormLayout()
-        despike_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        despike_section.setContentLayout(despike_form)
+        # --- Smoothing ---
+        smoothing_section = CollapsibleSection("Smoothing")
+        smoothing_form = QFormLayout()
+        smoothing_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        smoothing_section.setContentLayout(smoothing_form)
 
-        self.despike_enable = QCheckBox("Enable spike removal")
-        self.despike_enable.setToolTip(
-            "Detect and replace narrow spikes using a z-score threshold on a sliding window."
+        self.smooth_enable = QCheckBox("Enable Savitzky–Golay smoothing")
+        self.smooth_enable.setToolTip(
+            "Toggle global Savitzky–Golay smoothing; defaults of window 15 and"
+            " polyorder 3 suit 1 nm UV-Vis sampling and can be reduced for"
+            " sparse data."
         )
-        self.despike_window = QSpinBox()
-        self.despike_window.setRange(3, 999)
-        self.despike_window.setValue(5)
-        self.despike_window.setToolTip(
-            "Number of points in the despiking window; the default five-point"
-            " window balances spike suppression with peak preservation."
+        self.smooth_window = QSpinBox()
+        self.smooth_window.setRange(3, 999)
+        self.smooth_window.setSingleStep(2)
+        self.smooth_window.setValue(15)
+        self.smooth_window.setToolTip(
+            "Number of points in the Savitzky–Golay window. Use odd values larger"
+            " than the polynomial order; start around 15 for 1 nm data and shrink"
+            " only when working with sparse sampling."
         )
-        self.despike_zscore = QDoubleSpinBox()
-        self.despike_zscore.setRange(0.1, 99.9)
-        self.despike_zscore.setDecimals(2)
-        self.despike_zscore.setSingleStep(0.1)
-        self.despike_zscore.setValue(5.0)
-        self.despike_zscore.setToolTip(
-            "Z-score threshold for spike detection; UV-Vis recipes typically"
-            " stay between 2.5 and 6.0."
-        )
-
-        despike_form.addRow(self.despike_enable)
-        despike_form.addRow("Window", self.despike_window)
-        despike_form.addRow("Z-score", self.despike_zscore)
-        layout.addWidget(despike_section)
-
-        # --- Join correction ---
-        join_section = CollapsibleSection("Join correction")
-        join_form = QFormLayout()
-        join_section.setContentLayout(join_form)
-        self.join_enable = QCheckBox("Enable detector join correction")
-        self.join_enable.setToolTip(
-            "Detect and correct offsets where detectors overlap; enable when"
-            " multi-detector instruments need stitching."
-        )
-        self.join_window = QSpinBox()
-        self.join_window.setRange(1, 999)
-        self.join_window.setValue(10)
-        self.join_window.setToolTip(
-            "Number of points on each side used to measure join offsets; keep"
-            " custom values above 3 so the detector overlap provides enough"
-            " context."
-        )
-        self.join_threshold = QLineEdit()
-        self.join_threshold.setPlaceholderText("Leave blank for default")
-        self.join_threshold.setClearButtonEnabled(True)
-        self.join_threshold.setToolTip(
-            "Maximum absorbance offset permitted when stitching detectors. The"
-            " UV-Vis default is 0.2 and QC falls back to 0.5, so keep overrides"
-            " within that band for consistent flagging."
+        self.smooth_poly = QSpinBox()
+        self.smooth_poly.setRange(1, 15)
+        self.smooth_poly.setValue(3)
+        self.smooth_poly.setToolTip(
+            "Polynomial order used by the Savitzky–Golay fit. Keep it lower than"
+            " the window size; an order of 3 is the recommended starting point"
+            " for 1 nm sampling."
         )
 
-        join_form.addRow(self.join_enable)
-        join_form.addRow("Window", self.join_window)
-        join_form.addRow("Threshold", self.join_threshold)
-
-        join_windows_container = QWidget()
-        join_windows_layout = QVBoxLayout(join_windows_container)
-        join_windows_layout.setContentsMargins(0, 0, 0, 0)
-        join_windows_layout.setSpacing(6)
-
-        join_windows_scope_row = QHBoxLayout()
-        join_windows_scope_row.setContentsMargins(0, 0, 0, 0)
-        join_windows_scope_row.setSpacing(6)
-
-        scope_label = QLabel("Instrument")
-        join_windows_scope_row.addWidget(scope_label)
-
-        self.join_windows_instrument_combo = QComboBox()
-        self.join_windows_instrument_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
-        join_windows_scope_row.addWidget(self.join_windows_instrument_combo, 1)
-
-        self.join_windows_add_instrument = QPushButton("Add instrument…")
-        join_windows_scope_row.addWidget(self.join_windows_add_instrument)
-
-        self.join_windows_remove_instrument = QPushButton("Remove")
-        join_windows_scope_row.addWidget(self.join_windows_remove_instrument)
-
-        join_windows_layout.addLayout(join_windows_scope_row)
-
-        self.join_windows_table = QTableWidget(0, 2)
-        self.join_windows_table.setHorizontalHeaderLabels(["Min (nm)", "Max (nm)"])
-        header = self.join_windows_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.join_windows_table.verticalHeader().setVisible(False)
-        self.join_windows_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
-        self.join_windows_table.setSelectionMode(
-            QTableWidget.SelectionMode.SingleSelection
-        )
-        join_windows_layout.addWidget(self.join_windows_table)
-
-        join_windows_buttons = QHBoxLayout()
-        join_windows_buttons.setContentsMargins(0, 0, 0, 0)
-        join_windows_buttons.setSpacing(6)
-        join_windows_buttons.addStretch(1)
-
-        self.join_windows_add_row = QPushButton("Add window")
-        join_windows_buttons.addWidget(self.join_windows_add_row)
-
-        self.join_windows_remove_row = QPushButton("Remove selected")
-        join_windows_buttons.addWidget(self.join_windows_remove_row)
-
-        join_windows_layout.addLayout(join_windows_buttons)
-
-        join_form.addRow("Windows", join_windows_container)
-        self._refresh_join_windows_combo()
-        layout.addWidget(join_section)
-
-        # --- Blank handling ---
-        blank_section = CollapsibleSection("Blank handling")
-        blank_form = QFormLayout()
-        blank_section.setContentLayout(blank_form)
-        self.blank_subtract = QCheckBox("Subtract blank from samples")
-        self.blank_subtract.setToolTip(
-            "Remove instrument/background signal using matched blanks; enable"
-            " when blank spectra are available for subtraction."
-        )
-        self.blank_require = QCheckBox("Require blank for each batch")
-        self.blank_require.setToolTip(
-            "Fail batches without a paired blank. Leave disabled for automated"
-            " workflows that cannot guarantee blanks every run."
-        )
-        self.blank_fallback = QLineEdit()
-        self.blank_fallback.setPlaceholderText("Optional fallback/default blank path")
-        self.blank_fallback.setClearButtonEnabled(True)
-        self.blank_fallback.setToolTip(
-            "Optional path to a default blank used when no matched file is"
-            " found; keep it empty when on-the-fly blanks should be mandatory."
-        )
-        self.blank_match_strategy = QComboBox()
-        self.blank_match_strategy.addItem("Match by blank identifier", "blank_id")
-        self.blank_match_strategy.addItem("Match by cuvette slot", "cuvette_slot")
-        self.blank_match_strategy.setToolTip(
-            "Use blank identifiers when files share stable IDs with samples;"
-            " switch to cuvette slots when pairing by instrument position so"
-            " slot metadata drives the association."
-        )
-
-        blank_form.addRow(self.blank_subtract)
-        blank_form.addRow(self.blank_require)
-        blank_form.addRow("Fallback", self.blank_fallback)
-        blank_form.addRow("Match strategy", self.blank_match_strategy)
-        layout.addWidget(blank_section)
+        smoothing_form.addRow(self.smooth_enable)
+        smoothing_form.addRow("Window", self.smooth_window)
+        smoothing_form.addRow("Poly order", self.smooth_poly)
+        layout.addWidget(smoothing_section)
 
         # --- QC / Drift ---
         qc_section = CollapsibleSection("Quality control – drift limits")
