@@ -300,7 +300,8 @@ def test_preprocess_blank_pairing_records_audit_metadata():
 
     plugin = UvVisPlugin()
     recipe = {"blank": {"subtract": True, "max_time_delta_minutes": 120}}
-    processed = plugin.preprocess([blank, sample], recipe)
+    with pytest.warns(DeprecationWarning):
+        processed = plugin.preprocess([blank, sample], recipe)
     processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
     audit = processed_sample.meta.get("blank_audit")
     assert audit["timestamp_delta_minutes"] == pytest.approx(30.0)
@@ -331,8 +332,21 @@ def test_preprocess_blank_pairing_rejects_time_gap():
 
     plugin = UvVisPlugin()
     recipe = {"blank": {"subtract": True, "max_time_delta_minutes": 60}}
-    with pytest.raises(ValueError):
-        plugin.preprocess([blank, sample], recipe)
+    with pytest.warns(DeprecationWarning) as warning_info:
+        processed = plugin.preprocess([blank, sample], recipe)
+
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+    audit = processed_sample.meta.get("blank_audit")
+
+    assert processed_sample.meta.get("blank_subtracted") is True
+    assert audit["validation_ran"] is True
+    assert audit["validation_enforced"] is False
+    assert audit["timestamp_delta_minutes"] == pytest.approx(300.0)
+    violations = audit["validation_violations"]
+    gap_violation = next(v for v in violations if v["type"] == "timestamp_gap")
+    assert gap_violation["limit_minutes"] == pytest.approx(60.0)
+    assert gap_violation["observed_minutes"] == pytest.approx(300.0)
+    assert any("blank.max_time_delta_minutes" in str(w.message) for w in warning_info)
 
 
 def test_preprocess_blank_pairing_rejects_pathlength_mismatch():
@@ -393,7 +407,8 @@ def test_preprocess_blank_pairing_opt_out_logs_violations():
             "validate_metadata": False,
         }
     }
-    processed = plugin.preprocess([blank, sample], recipe)
+    with pytest.warns(DeprecationWarning):
+        processed = plugin.preprocess([blank, sample], recipe)
     processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
     audit = processed_sample.meta.get("blank_audit")
 
@@ -495,7 +510,8 @@ def test_disable_blank_requirement_captures_audit_without_subtraction():
     base_recipe: Dict[str, object] = {"blank": {"subtract": False, "max_time_delta_minutes": 60}}
     recipe = disable_blank_requirement(base_recipe)
 
-    processed = plugin.preprocess([blank, sample], recipe)
+    with pytest.warns(DeprecationWarning):
+        processed = plugin.preprocess([blank, sample], recipe)
     processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
 
     assert processed_sample.meta.get("blank_subtracted") is False
