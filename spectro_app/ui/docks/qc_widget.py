@@ -236,17 +236,15 @@ class QCDock(QDockWidget):
         self.table.setModel(self.model)
 
         self.figure = Figure(figsize=(6, 4))
+        self._supports_constrained_layout = bool(
+            getattr(self.figure, "set_layout_engine", None)
+        )
         self._uses_constrained_layout = False
-        try:
-            self.figure.set_layout_engine("constrained")
-            self._uses_constrained_layout = True
-        except AttributeError:
-            # Fallback for older Matplotlib versions where constrained layout
-            # is configured via tight_layout at draw time.
-            self._uses_constrained_layout = False
+        self._pending_constrained_layout_activation = False
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.canvas.setFocus()
+        self.canvas.installEventFilter(self)
         self.chart_toolbar = NavigationToolbar(self.canvas, self)
 
         self.table_container = QtWidgets.QWidget(self)
@@ -353,10 +351,12 @@ class QCDock(QDockWidget):
             self.stacked.setCurrentWidget(self.table_container)
             self.table_action.setChecked(True)
             self.chart_action.setChecked(False)
+            self._disable_constrained_layout()
         else:
             self.stacked.setCurrentWidget(self.chart_container)
             self.table_action.setChecked(False)
             self.chart_action.setChecked(True)
+            self._ensure_constrained_layout_active()
 
     def _can_show_charts(self) -> bool:
         return bool(self._qc_series and self._qc_series.has_numeric())
@@ -453,3 +453,39 @@ class QCDock(QDockWidget):
             # layout is unavailable on the current Matplotlib version.
             self.figure.subplots_adjust(bottom=0.18)
         self.canvas.draw_idle()
+
+    def _ensure_constrained_layout_active(self):
+        if not self._supports_constrained_layout or self._uses_constrained_layout:
+            return
+        if self.canvas.size().isEmpty():
+            self._pending_constrained_layout_activation = True
+            return
+        try:
+            self.figure.set_layout_engine("constrained")
+        except AttributeError:
+            self._supports_constrained_layout = False
+            self._uses_constrained_layout = False
+            self._pending_constrained_layout_activation = False
+            return
+        self._uses_constrained_layout = True
+        self._pending_constrained_layout_activation = False
+        self.canvas.draw_idle()
+
+    def _disable_constrained_layout(self):
+        self._pending_constrained_layout_activation = False
+        if not self._supports_constrained_layout or not self._uses_constrained_layout:
+            return
+        try:
+            self.figure.set_layout_engine(None)
+        except AttributeError:
+            self._supports_constrained_layout = False
+            self._uses_constrained_layout = False
+            return
+        self._uses_constrained_layout = False
+        self.canvas.draw_idle()
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if obj is self.canvas and event.type() == QtCore.QEvent.Type.Resize:
+            if self._pending_constrained_layout_activation and not self.canvas.size().isEmpty():
+                self._ensure_constrained_layout_active()
+        return super().eventFilter(obj, event)
