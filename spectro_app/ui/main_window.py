@@ -17,6 +17,7 @@ from spectro_app.plugins.uvvis.plugin import UvVisPlugin
 from spectro_app.ui.dialogs.about import AboutDialog
 from spectro_app.ui.dialogs.help_viewer import HelpViewer
 from spectro_app.ui.dialogs.settings_dialog import SettingsDialog
+from spectro_app.ui.dialogs.raw_preview import RawDataPreviewWindow
 from spectro_app.ui.docks.file_queue import FileQueueDock, QueueEntry
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
@@ -82,6 +83,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._loading_session: bool = False
         self._updating_ui: bool = False
         self._job_running = False
+        self._raw_preview_window: Optional[RawDataPreviewWindow] = None
         self._load_app_settings()
 
         self._populate_plugin_selectors()
@@ -1146,7 +1148,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_file_preview(Path(path), "Inspect Header", 4096)
 
     def _on_queue_preview_requested(self, path: str):
-        self._open_file_preview(Path(path), "Preview", 65536)
+        candidate = Path(path)
+        str_path = str(candidate)
+        plugin = None
+        if self._active_plugin_id:
+            plugin = self._plugin_registry.get(self._active_plugin_id)
+        if plugin is None:
+            plugin = self._resolve_plugin([str_path])
+        if plugin is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Preview Unavailable",
+                "Could not determine a plugin to load the selected file for preview.",
+            )
+            return
+
+        try:
+            spectra = plugin.load([str_path])
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Preview Failed",
+                f"Loading spectra for preview failed: {exc}",
+            )
+            return
+
+        if not spectra:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Preview Unavailable",
+                "The selected file did not produce any spectra to preview.",
+            )
+            return
+
+        if self._raw_preview_window is None:
+            self._raw_preview_window = RawDataPreviewWindow(self)
+            self._raw_preview_window.destroyed.connect(self._on_raw_preview_destroyed)
+
+        try:
+            self._raw_preview_window.plot_spectra(spectra)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Preview Failed",
+                f"Displaying spectra failed: {exc}",
+            )
+            return
+
+        self._raw_preview_window.show()
+        self._raw_preview_window.raise_()
+        self._raw_preview_window.activateWindow()
 
     def _on_queue_locate_requested(self, path: str):
         target = Path(path)
@@ -1159,6 +1210,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         directory = target.parent if target.is_file() else target
         QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory.resolve())))
+
+    def _on_raw_preview_destroyed(self, *_args):
+        self._raw_preview_window = None
 
     def _on_queue_clear_requested(self):
         self._set_queue([])
