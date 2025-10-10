@@ -182,6 +182,7 @@ class FileQueueDock(QDockWidget):
     locate_requested = QtCore.pyqtSignal(str)
     overrides_changed = QtCore.pyqtSignal(dict)
     clear_requested = QtCore.pyqtSignal()
+    remove_requested = QtCore.pyqtSignal(list)
 
     def __init__(
         self,
@@ -193,15 +194,25 @@ class FileQueueDock(QDockWidget):
         self.setObjectName("FileQueueDock")
         self.list = QListWidget()
         self.list.setItemDelegate(_QueueItemDelegate(self, self.list))
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.list.setUniformItemSizes(False)
         self.list.setAlternatingRowColors(False)
+        self.list.installEventFilter(self)
+        self.list.itemSelectionChanged.connect(self._update_remove_button_state)
 
         header_widget = QtWidgets.QWidget(self)
         header_layout = QtWidgets.QHBoxLayout(header_widget)
         header_layout.setContentsMargins(6, 6, 6, 6)
         header_layout.setSpacing(6)
         header_layout.addStretch(1)
+
+        self._remove_button = QtWidgets.QToolButton(header_widget)
+        self._remove_button.setText("Remove selected")
+        self._remove_button.setEnabled(False)
+        self._remove_button.clicked.connect(self._emit_remove_selected)
+        header_layout.addWidget(self._remove_button)
 
         self._clear_button = QtWidgets.QToolButton(header_widget)
         self._clear_button.setText("Clear queue")
@@ -516,6 +527,7 @@ class FileQueueDock(QDockWidget):
     def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # type: ignore[name-defined]
         menu = QtWidgets.QMenu(self)
         selected_path = self._selected_path()
+        selected_paths = self._selected_paths()
 
         inspect_action = menu.addAction("Inspect Data…")
         preview_action = menu.addAction("Preview…")
@@ -527,6 +539,8 @@ class FileQueueDock(QDockWidget):
         standard_role_action = role_menu.addAction("Standard")
         edit_blank_id_action = menu.addAction("Edit Blank ID…")
         menu.addSeparator()
+        remove_action = menu.addAction("Remove from Queue")
+        menu.addSeparator()
         locate_action = menu.addAction("Show in File Manager")
 
         enabled = bool(selected_path)
@@ -534,12 +548,15 @@ class FileQueueDock(QDockWidget):
         preview_action.setEnabled(enabled)
         role_menu.setEnabled(enabled)
         locate_action.setEnabled(enabled)
+        remove_action.setEnabled(bool(selected_paths))
         entry = self._entry_for_path(selected_path) if selected_path else None
         is_blank = bool(entry and (entry.role == "blank"))
         edit_blank_id_action.setEnabled(enabled and is_blank)
 
         action = menu.exec(event.globalPos()) if menu.actions() else None
         if not action or not selected_path:
+            if action is remove_action:
+                self._emit_remove_selected()
             return
         path = selected_path
         if action is inspect_action:
@@ -558,19 +575,29 @@ class FileQueueDock(QDockWidget):
             self._edit_blank_id(path)
         elif action is locate_action:
             self.locate_requested.emit(path)
+        elif action is remove_action:
+            self._emit_remove_selected()
 
     def _selected_path(self) -> Optional[str]:
+        paths = self._selected_paths()
+        return paths[0] if paths else None
+
+    def _selected_paths(self) -> List[str]:
         items = self.list.selectedItems()
-        if not items:
-            return None
-        item = items[0]
-        entry = item.data(QUEUE_ENTRY_ROLE)
-        if isinstance(entry, QueueEntry):
-            return entry.path
-        data = item.data(QtCore.Qt.ItemDataRole.DisplayRole)
-        if isinstance(data, str):
-            return data
-        return item.text()
+        paths: List[str] = []
+        for item in items:
+            entry = item.data(QUEUE_ENTRY_ROLE)
+            if isinstance(entry, QueueEntry):
+                paths.append(entry.path)
+                continue
+            data = item.data(QtCore.Qt.ItemDataRole.DisplayRole)
+            if isinstance(data, str):
+                paths.append(data)
+                continue
+            text = item.text()
+            if text:
+                paths.append(text)
+        return paths
 
     # ------------------------------------------------------------------
     # Override management helpers
@@ -663,9 +690,29 @@ class FileQueueDock(QDockWidget):
                 item.setSelected(True)
         if hasattr(self, "_clear_button"):
             self._clear_button.setEnabled(bool(self._entries))
+        self._update_remove_button_state()
 
     def _on_clear_clicked(self) -> None:
         self.clear_requested.emit()
+
+    def _emit_remove_selected(self) -> None:
+        paths = self._selected_paths()
+        if paths:
+            self.remove_requested.emit(paths)
+
+    def _update_remove_button_state(self) -> None:
+        if hasattr(self, "_remove_button"):
+            self._remove_button.setEnabled(bool(self._selected_paths()))
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if obj is self.list and event.type() == QtCore.QEvent.Type.KeyPress:
+            if isinstance(event, QtGui.QKeyEvent) and event.key() in (
+                QtCore.Qt.Key.Key_Delete,
+                QtCore.Qt.Key.Key_Backspace,
+            ):
+                self._emit_remove_selected()
+                return True
+        return super().eventFilter(obj, event)
 
     def _set_role_auto(self, path: str) -> None:
         self._update_overrides(path, {}, clear=("role", "blank_id"))
