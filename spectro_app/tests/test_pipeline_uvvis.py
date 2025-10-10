@@ -645,6 +645,20 @@ def test_join_detection_and_correction():
     assert abs(left_mean - right_mean) < 1e-6
 
 
+def test_detect_joins_keeps_all_peaks_above_threshold():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 320.0] += 0.6
+    intensity[wl >= 350.0] += 3.0
+
+    joins = pipeline.detect_joins(wl, intensity, window=3, threshold=0.5)
+
+    assert len(joins) == 2
+    join_wavelengths = np.sort(wl[np.asarray(joins, dtype=int)])
+    expected_wavelengths = np.array([320.0, 350.0])
+    assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
+
+
 def test_detect_joins_respects_wavelength_windows():
     wl = np.linspace(300.0, 400.0, 201)
     intensity = np.zeros_like(wl)

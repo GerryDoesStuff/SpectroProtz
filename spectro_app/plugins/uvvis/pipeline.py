@@ -797,15 +797,14 @@ def detect_joins(
             refined_sorted.append(idx)
 
     if refined_sorted:
-        score_values = [scores[idx] if idx < scores.size else float("nan") for idx in refined_sorted]
-        max_score = float(np.nanmax([val for val in score_values if np.isfinite(val)] or [float("nan")]))
-        if np.isfinite(max_score) and max_score > 0:
-            threshold_ratio = 0.6
-            refined_sorted = [
-                idx
-                for idx in refined_sorted
-                if idx < scores.size and (not np.isfinite(scores[idx]) or scores[idx] >= max_score * threshold_ratio)
-            ]
+        filtered_candidates: list[int] = []
+        for idx in refined_sorted:
+            if idx >= scores.size:
+                continue
+            score = float(scores[idx])
+            if not np.isfinite(score) or score >= threshold:
+                filtered_candidates.append(idx)
+        refined_sorted = filtered_candidates
 
     return refined_sorted
 
