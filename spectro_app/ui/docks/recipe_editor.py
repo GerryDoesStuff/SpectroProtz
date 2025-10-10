@@ -86,6 +86,10 @@ class RecipeEditorDock(QDockWidget):
 
         self.module = QComboBox()
         self.module.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.module.setToolTip(
+            "Select the spectroscopy module so preprocessing uses the matching"
+            " recipe keys for UV-Vis, FTIR, Raman, or PEES data."
+        )
         self.set_available_modules(
             [
                 ("uvvis", "uvvis"),
@@ -109,15 +113,28 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.smooth_enable = QCheckBox("Enable Savitzky–Golay smoothing")
+        self.smooth_enable.setToolTip(
+            "Toggle global Savitzky–Golay smoothing; defaults of window 15 and"
+            " polyorder 3 suit 1 nm UV-Vis sampling and can be reduced for"
+            " sparse data."
+        )
         self.smooth_window = QSpinBox()
         self.smooth_window.setRange(3, 999)
         self.smooth_window.setSingleStep(2)
         self.smooth_window.setValue(15)
-        self.smooth_window.setToolTip("Smoothing window (must be odd and > 2×poly order)")
+        self.smooth_window.setToolTip(
+            "Number of points in the Savitzky–Golay window. Use odd values larger"
+            " than the polynomial order; start around 15 for 1 nm data and shrink"
+            " only when working with sparse sampling."
+        )
         self.smooth_poly = QSpinBox()
         self.smooth_poly.setRange(1, 15)
         self.smooth_poly.setValue(3)
-        self.smooth_poly.setToolTip("Polynomial order for Savitzky–Golay smoothing")
+        self.smooth_poly.setToolTip(
+            "Polynomial order used by the Savitzky–Golay fit. Keep it lower than"
+            " the window size; an order of 3 is the recommended starting point"
+            " for 1 nm sampling."
+        )
 
         smoothing_form.addRow(self.smooth_enable)
         smoothing_form.addRow("Window", self.smooth_window)
@@ -130,11 +147,20 @@ class RecipeEditorDock(QDockWidget):
         baseline_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.baseline_enable = QCheckBox("Enable baseline correction")
+        self.baseline_enable.setToolTip(
+            "Subtract a modelled background using the selected baseline method;"
+            " enable this whenever gradual drift or curvature needs removal."
+        )
         self.baseline_method = QComboBox()
         self.baseline_method.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.baseline_method.addItem("Asymmetric least squares (AsLS)", "asls")
         self.baseline_method.addItem("Rubber-band", "rubberband")
         self.baseline_method.addItem("SNIP", "snip")
+        self.baseline_method.setToolTip(
+            "Choose the baseline solver: AsLS for gradual drift, rubber-band for"
+            " broad curvature, or SNIP for fluorescence streaks that need many"
+            " iterations."
+        )
 
         self.baseline_lambda = QDoubleSpinBox()
         self.baseline_lambda.setDecimals(3)
@@ -142,7 +168,11 @@ class RecipeEditorDock(QDockWidget):
         self.baseline_lambda.setSingleStep(1000.0)
         self._baseline_default_lambda = 1e5
         self.baseline_lambda.setValue(self._baseline_default_lambda)
-        self.baseline_lambda.setToolTip("Smoothness penalty (λ) used by AsLS baselines")
+        self.baseline_lambda.setToolTip(
+            "Smoothness penalty (λ) for AsLS baselines; start at 1e5 and explore"
+            " roughly 1e3–1e7 depending on how aggressively the background"
+            " should be flattened."
+        )
 
         self.baseline_p = QDoubleSpinBox()
         self.baseline_p.setDecimals(5)
@@ -150,19 +180,28 @@ class RecipeEditorDock(QDockWidget):
         self.baseline_p.setSingleStep(0.001)
         self._baseline_default_p = 0.01
         self.baseline_p.setValue(self._baseline_default_p)
-        self.baseline_p.setToolTip("Asymmetry parameter (p) for AsLS baselines")
+        self.baseline_p.setToolTip(
+            "Asymmetry parameter (p) for AsLS baselines; typical UV-Vis recipes"
+            " stay between 0.001 and 0.05 with 0.01 as a reliable default."
+        )
 
         self.baseline_niter = QSpinBox()
         self.baseline_niter.setRange(1, 999)
         self._baseline_default_niter = 10
         self.baseline_niter.setValue(self._baseline_default_niter)
-        self.baseline_niter.setToolTip("Number of refinement iterations for AsLS baselines")
+        self.baseline_niter.setToolTip(
+            "Number of refinement passes for AsLS; keep between 10 and 30 to"
+            " balance convergence and runtime."
+        )
 
         self.baseline_iterations = QSpinBox()
         self.baseline_iterations.setRange(1, 999)
         self._baseline_default_iterations = 24
         self.baseline_iterations.setValue(self._baseline_default_iterations)
-        self.baseline_iterations.setToolTip("Iteration count for SNIP baselines")
+        self.baseline_iterations.setToolTip(
+            "Iteration count for SNIP baselines; start around 24 and adjust"
+            " within 20–60 for fluorescence-heavy spectra."
+        )
 
         baseline_form.addRow(self.baseline_enable)
         baseline_form.addRow("Method", self.baseline_method)
@@ -177,6 +216,10 @@ class RecipeEditorDock(QDockWidget):
         baseline_anchor_layout.setSpacing(6)
 
         self.baseline_anchor_enable = QCheckBox("Apply anchor window zeroing")
+        self.baseline_anchor_enable.setToolTip(
+            "Zero or level specific wavelength windows after baseline removal by"
+            " pinning them to target intensities."
+        )
         baseline_anchor_layout.addWidget(self.baseline_anchor_enable)
 
         self.baseline_anchor_table = QTableWidget(0, 4)
@@ -225,13 +268,19 @@ class RecipeEditorDock(QDockWidget):
         self.despike_window = QSpinBox()
         self.despike_window.setRange(3, 999)
         self.despike_window.setValue(5)
-        self.despike_window.setToolTip("Window size (number of points) used for spike detection")
+        self.despike_window.setToolTip(
+            "Number of points in the despiking window; the default five-point"
+            " window balances spike suppression with peak preservation."
+        )
         self.despike_zscore = QDoubleSpinBox()
         self.despike_zscore.setRange(0.1, 99.9)
         self.despike_zscore.setDecimals(2)
         self.despike_zscore.setSingleStep(0.1)
         self.despike_zscore.setValue(5.0)
-        self.despike_zscore.setToolTip("Z-score threshold used to flag spikes")
+        self.despike_zscore.setToolTip(
+            "Z-score threshold for spike detection; UV-Vis recipes typically"
+            " stay between 2.5 and 6.0."
+        )
 
         despike_form.addRow(self.despike_enable)
         despike_form.addRow("Window", self.despike_window)
@@ -242,15 +291,25 @@ class RecipeEditorDock(QDockWidget):
         join_group = QGroupBox("Join correction")
         join_form = QFormLayout(join_group)
         self.join_enable = QCheckBox("Enable detector join correction")
+        self.join_enable.setToolTip(
+            "Detect and correct offsets where detectors overlap; enable when"
+            " multi-detector instruments need stitching."
+        )
         self.join_window = QSpinBox()
         self.join_window.setRange(1, 999)
         self.join_window.setValue(10)
+        self.join_window.setToolTip(
+            "Number of points on each side used to measure join offsets; keep"
+            " custom values above 3 so the detector overlap provides enough"
+            " context."
+        )
         self.join_threshold = QLineEdit()
         self.join_threshold.setPlaceholderText("Leave blank for default")
         self.join_threshold.setClearButtonEnabled(True)
         self.join_threshold.setToolTip(
-            "Absolute absorbance offset allowed when joining detectors. "
-            "Default join threshold is 0.2; quality control fallback uses 0.5."
+            "Maximum absorbance offset permitted when stitching detectors. The"
+            " UV-Vis default is 0.2 and QC falls back to 0.5, so keep overrides"
+            " within that band for consistent flagging."
         )
 
         join_form.addRow(self.join_enable)
@@ -318,16 +377,29 @@ class RecipeEditorDock(QDockWidget):
         blank_group = QGroupBox("Blank handling")
         blank_form = QFormLayout(blank_group)
         self.blank_subtract = QCheckBox("Subtract blank from samples")
+        self.blank_subtract.setToolTip(
+            "Remove instrument/background signal using matched blanks; enable"
+            " when blank spectra are available for subtraction."
+        )
         self.blank_require = QCheckBox("Require blank for each batch")
+        self.blank_require.setToolTip(
+            "Fail batches without a paired blank. Leave disabled for automated"
+            " workflows that cannot guarantee blanks every run."
+        )
         self.blank_fallback = QLineEdit()
         self.blank_fallback.setPlaceholderText("Optional fallback/default blank path")
         self.blank_fallback.setClearButtonEnabled(True)
+        self.blank_fallback.setToolTip(
+            "Optional path to a default blank used when no matched file is"
+            " found; keep it empty when on-the-fly blanks should be mandatory."
+        )
         self.blank_match_strategy = QComboBox()
         self.blank_match_strategy.addItem("Match by blank identifier", "blank_id")
         self.blank_match_strategy.addItem("Match by cuvette slot", "cuvette_slot")
         self.blank_match_strategy.setToolTip(
-            "Use blank identifiers when blank files share a named ID with their samples. "
-            "Choose cuvette slots when pairing by instrument position; blank IDs may be left empty."
+            "Use blank identifiers when files share stable IDs with samples;"
+            " switch to cuvette slots when pairing by instrument position so"
+            " slot metadata drives the association."
         )
 
         blank_form.addRow(self.blank_subtract)
@@ -340,15 +412,27 @@ class RecipeEditorDock(QDockWidget):
         qc_group = QGroupBox("Quality control – drift limits")
         qc_layout = QVBoxLayout(qc_group)
         self.drift_enable = QCheckBox("Enable drift monitoring")
+        self.drift_enable.setToolTip(
+            "Track baseline drift over time and flag batches when slope, delta,"
+            " or residual limits are exceeded."
+        )
         qc_layout.addWidget(self.drift_enable)
 
         drift_bounds_row = QHBoxLayout()
         self.drift_window_min = QLineEdit()
         self.drift_window_min.setPlaceholderText("Quiet window min")
         self.drift_window_min.setClearButtonEnabled(True)
+        self.drift_window_min.setToolTip(
+            "Lower wavelength bound (nm) for the quiet drift window. Align this"
+            " with a flat region such as 210–290 nm when modelling drift."
+        )
         self.drift_window_max = QLineEdit()
         self.drift_window_max.setPlaceholderText("Quiet window max")
         self.drift_window_max.setClearButtonEnabled(True)
+        self.drift_window_max.setToolTip(
+            "Upper wavelength bound (nm) for the quiet drift window; pair with"
+            " the minimum to enclose the same flat region."
+        )
         drift_bounds_row.addWidget(self.drift_window_min)
         drift_bounds_row.addWidget(self.drift_window_max)
         qc_layout.addLayout(drift_bounds_row)
@@ -357,12 +441,24 @@ class RecipeEditorDock(QDockWidget):
         self.drift_max_slope = QLineEdit()
         self.drift_max_slope.setPlaceholderText("Max slope per hour")
         self.drift_max_slope.setClearButtonEnabled(True)
+        self.drift_max_slope.setToolTip(
+            "Largest acceptable drift slope (absorbance/hour); start around 0.5"
+            " to flag trends exceeding typical QC tolerance."
+        )
         self.drift_max_delta = QLineEdit()
         self.drift_max_delta.setPlaceholderText("Max delta allowed")
         self.drift_max_delta.setClearButtonEnabled(True)
+        self.drift_max_delta.setToolTip(
+            "Maximum total baseline change allowed across the batch; 0.6 is a"
+            " representative limit for UV-Vis drift checks."
+        )
         self.drift_max_residual = QLineEdit()
         self.drift_max_residual.setPlaceholderText("Max residual allowed")
         self.drift_max_residual.setClearButtonEnabled(True)
+        self.drift_max_residual.setToolTip(
+            "Largest acceptable residual error after drift fitting; values"
+            " near 0.4 catch noisy baselines without over-flagging."
+        )
 
         qc_limits_form.addRow("Slope", self.drift_max_slope)
         qc_limits_form.addRow("Delta", self.drift_max_delta)
