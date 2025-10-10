@@ -15,22 +15,65 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from spectro_app.engine.recipe_model import Recipe
+
+
+class CollapsibleSection(QWidget):
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._toggle_button = QToolButton()
+        self._toggle_button.setText(title)
+        self._toggle_button.setCheckable(True)
+        self._toggle_button.setChecked(True)
+        self._toggle_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._toggle_button.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+
+        self._content_area = QWidget()
+        self._content_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._toggle_button)
+        layout.addWidget(self._content_area)
+
+        self._toggle_button.clicked.connect(self._on_toggled)
+
+    @property
+    def content_widget(self) -> QWidget:
+        return self._content_area
+
+    def setContentLayout(self, layout: QVBoxLayout | QFormLayout) -> None:
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._content_area.setLayout(layout)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._content_area.setVisible(checked)
+        self._toggle_button.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow
+            if checked
+            else QtCore.Qt.ArrowType.RightArrow
+        )
 
 
 class RecipeEditorDock(QDockWidget):
@@ -104,9 +147,10 @@ class RecipeEditorDock(QDockWidget):
         layout.addWidget(self.validation_label)
 
         # --- Smoothing ---
-        smoothing_group = QGroupBox("Smoothing")
-        smoothing_form = QFormLayout(smoothing_group)
+        smoothing_section = CollapsibleSection("Smoothing")
+        smoothing_form = QFormLayout()
         smoothing_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        smoothing_section.setContentLayout(smoothing_form)
 
         self.smooth_enable = QCheckBox("Enable Savitzky–Golay smoothing")
         self.smooth_window = QSpinBox()
@@ -122,12 +166,13 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.addRow(self.smooth_enable)
         smoothing_form.addRow("Window", self.smooth_window)
         smoothing_form.addRow("Poly order", self.smooth_poly)
-        layout.addWidget(smoothing_group)
+        layout.addWidget(smoothing_section)
 
         # --- Baseline correction ---
-        baseline_group = QGroupBox("Baseline correction")
-        baseline_form = QFormLayout(baseline_group)
+        baseline_section = CollapsibleSection("Baseline correction")
+        baseline_form = QFormLayout()
         baseline_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        baseline_section.setContentLayout(baseline_form)
 
         self.baseline_enable = QCheckBox("Enable baseline correction")
         self.baseline_method = QComboBox()
@@ -211,12 +256,13 @@ class RecipeEditorDock(QDockWidget):
         baseline_anchor_layout.addLayout(anchor_buttons)
 
         baseline_form.addRow("Anchor windows", baseline_anchor_container)
-        layout.addWidget(baseline_group)
+        layout.addWidget(baseline_section)
 
         # --- Despiking ---
-        despike_group = QGroupBox("Despiking")
-        despike_form = QFormLayout(despike_group)
+        despike_section = CollapsibleSection("Despiking")
+        despike_form = QFormLayout()
         despike_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        despike_section.setContentLayout(despike_form)
 
         self.despike_enable = QCheckBox("Enable spike removal")
         self.despike_enable.setToolTip(
@@ -236,11 +282,12 @@ class RecipeEditorDock(QDockWidget):
         despike_form.addRow(self.despike_enable)
         despike_form.addRow("Window", self.despike_window)
         despike_form.addRow("Z-score", self.despike_zscore)
-        layout.addWidget(despike_group)
+        layout.addWidget(despike_section)
 
         # --- Join correction ---
-        join_group = QGroupBox("Join correction")
-        join_form = QFormLayout(join_group)
+        join_section = CollapsibleSection("Join correction")
+        join_form = QFormLayout()
+        join_section.setContentLayout(join_form)
         self.join_enable = QCheckBox("Enable detector join correction")
         self.join_window = QSpinBox()
         self.join_window.setRange(1, 999)
@@ -312,11 +359,12 @@ class RecipeEditorDock(QDockWidget):
 
         join_form.addRow("Windows", join_windows_container)
         self._refresh_join_windows_combo()
-        layout.addWidget(join_group)
+        layout.addWidget(join_section)
 
         # --- Blank handling ---
-        blank_group = QGroupBox("Blank handling")
-        blank_form = QFormLayout(blank_group)
+        blank_section = CollapsibleSection("Blank handling")
+        blank_form = QFormLayout()
+        blank_section.setContentLayout(blank_form)
         self.blank_subtract = QCheckBox("Subtract blank from samples")
         self.blank_require = QCheckBox("Require blank for each batch")
         self.blank_fallback = QLineEdit()
@@ -334,11 +382,12 @@ class RecipeEditorDock(QDockWidget):
         blank_form.addRow(self.blank_require)
         blank_form.addRow("Fallback", self.blank_fallback)
         blank_form.addRow("Match strategy", self.blank_match_strategy)
-        layout.addWidget(blank_group)
+        layout.addWidget(blank_section)
 
         # --- QC / Drift ---
-        qc_group = QGroupBox("Quality control – drift limits")
-        qc_layout = QVBoxLayout(qc_group)
+        qc_section = CollapsibleSection("Quality control – drift limits")
+        qc_layout = QVBoxLayout()
+        qc_section.setContentLayout(qc_layout)
         self.drift_enable = QCheckBox("Enable drift monitoring")
         qc_layout.addWidget(self.drift_enable)
 
@@ -368,7 +417,7 @@ class RecipeEditorDock(QDockWidget):
         qc_limits_form.addRow("Delta", self.drift_max_delta)
         qc_limits_form.addRow("Residual", self.drift_max_residual)
         qc_layout.addLayout(qc_limits_form)
-        layout.addWidget(qc_group)
+        layout.addWidget(qc_section)
 
         layout.addStretch(1)
 
