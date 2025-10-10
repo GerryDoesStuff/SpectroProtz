@@ -171,6 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _collect_actions(self):
         actions = {action.text(): action for action in self.findChildren(QtGui.QAction)}
         self._open_action = actions.get("Open...")
+        self._mass_load_action = actions.get("Mass Load...")
         self._save_recipe_action = actions.get("Save Recipe")
         self._save_recipe_as_action = actions.get("Save Recipe As...")
         self._export_action = actions.get("Export Workbook...")
@@ -501,6 +502,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._export_default_dir = None
 
         self._record_recent_files(paths)
+
+    def on_mass_load(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Directory", str(self._last_data_dir())
+        )
+        if not directory:
+            return
+
+        try:
+            root = Path(directory)
+        except (TypeError, ValueError):
+            return
+
+        files: List[str] = [str(path) for path in root.rglob("*") if path.is_file()]
+
+        if files:
+            self._add_to_queue(files)
+
+        if root.is_dir():
+            self._export_default_dir = root
+            self.appctx.settings.setValue("export/defaultDir", str(root))
+            self._last_browsed_dir = root
+
+        self._record_recent_files(files)
 
     def on_save_recipe(self):
         if self._current_recipe_path is None:
@@ -846,6 +871,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cancel_action.setEnabled(running)
         if self._open_action:
             self._open_action.setEnabled(not running)
+        if self._mass_load_action:
+            self._mass_load_action.setEnabled(not running)
         if self._save_recipe_action:
             self._save_recipe_action.setEnabled(not running)
         if self._save_recipe_as_action:

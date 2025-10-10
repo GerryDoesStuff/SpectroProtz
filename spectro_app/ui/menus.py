@@ -9,6 +9,7 @@ def build_menus(window):
 
     file_menu = menubar.addMenu("&File")
     file_menu.addAction(_act(window, "Open...", shortcut="Ctrl+O", slot=window.on_open))
+    file_menu.addAction(_act(window, "Mass Load...", slot=window.on_mass_load))
     recent_menu = file_menu.addMenu("Open Recent")
     recent_menu.setObjectName("openRecentMenu")
     window._recent_menu = recent_menu
