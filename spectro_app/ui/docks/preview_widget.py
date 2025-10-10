@@ -262,40 +262,31 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     smoothed_fallbacks.append(dataset)
                     any_data = True
 
-        if not any_data:
-            self._all_stage_datasets = {stage: [] for stage in self.STAGE_LABELS}
-            self._sample_labels = []
-            self._total_spectra = 0
-            self._single_mode = False
-            for checkbox in self._stage_controls.values():
-                checkbox.blockSignals(True)
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
-                checkbox.blockSignals(False)
-            self.cursor_label.setText("λ: ––– | I: –––")
-            self.plot.setTitle("No spectra available")
-            self.reset_button.setEnabled(False)
-            self._update_navigation_ui()
-            return False
-
-        if not has_stepwise:
-            self._all_stage_datasets = {stage: [] for stage in self.STAGE_LABELS}
-            self._sample_labels = []
-            self._total_spectra = 0
-            self._single_mode = False
-            for checkbox in self._stage_controls.values():
-                checkbox.blockSignals(True)
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
-                checkbox.blockSignals(False)
-            self.cursor_label.setText("λ: ––– | I: –––")
-            self.plot.setTitle("Stepwise spectra unavailable; use exported overlays.")
-            self.reset_button.setEnabled(False)
-            self._update_navigation_ui()
-            return False
-
         if smoothed_fallbacks:
             stage_datasets.setdefault("smoothed", []).extend(smoothed_fallbacks)
+
+        has_usable_stage_data = any(stage_datasets[stage] for stage in self.STAGE_LABELS)
+
+        if not has_stepwise and not has_usable_stage_data:
+            self._all_stage_datasets = {stage: [] for stage in self.STAGE_LABELS}
+            self._sample_labels = []
+            self._total_spectra = 0
+            self._single_mode = False
+            for checkbox in self._stage_controls.values():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                checkbox.blockSignals(False)
+            self.cursor_label.setText("λ: ––– | I: –––")
+            message = (
+                "No spectra available"
+                if not any_data
+                else "Stepwise spectra unavailable; use exported overlays."
+            )
+            self.plot.setTitle(message)
+            self.reset_button.setEnabled(False)
+            self._update_navigation_ui()
+            return False
 
         self._all_stage_datasets = {stage: list(datasets) for stage, datasets in stage_datasets.items()}
         self.reset_button.setEnabled(True)
