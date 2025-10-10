@@ -183,9 +183,13 @@ Baseline-oriented parameters appear in several recipe blocks:
 
 `disable_blank_requirement(recipe)` returns a deep copy with `blank.require`
 set to `false`, allowing integrations to skip hard failures when blanks are
-absent while preserving subtraction defaults. Use this helper before submitting
-recipes through automation when instrument workflows cannot guarantee blank
-captures.【F:spectro_app/plugins/uvvis/plugin.py†L12-L74】
+absent while preserving subtraction defaults. Timestamp gap validation now runs
+in a soft mode—violations are written to the blank audit but no longer raise
+`ValueError`s even when metadata checks are enabled—so downstream tooling
+should inspect the audit payload instead of relying on exceptions. Use this
+helper before submitting recipes through automation when instrument workflows
+cannot guarantee blank captures and review the recorded metadata for quality
+control.【F:spectro_app/plugins/uvvis/plugin.py†L12-L74】【F:spectro_app/plugins/uvvis/plugin.py†L1484-L1564】
 
 ### Preprocessing switches
 
@@ -197,11 +201,13 @@ The preprocessing stage honours the following recipe keys:
   `ValueError`s.【F:spectro_app/plugins/uvvis/plugin.py†L80-L188】【F:spectro_app/plugins/uvvis/plugin.py†L927-L978】
 - **Blank handling** – `blank.subtract`, `blank.require`,
   `blank.validate_metadata`, `blank.default`/`blank.fallback`,
-  `blank.match_strategy`, `blank.max_time_delta_minutes`
-  (default 240 minutes) and `blank.pathlength_tolerance_cm` (default 0.01 cm)
-  govern subtraction and guard-rails. Time windows should reflect instrument
-  drift; stick to sub-day spans unless long acquisitions demand otherwise.
-  Set `blank.match_strategy` to `cuvette_slot` when blanks should be grouped
+  `blank.match_strategy`, `blank.max_time_delta_minutes` *(deprecated; now
+  records audit-only timestamp gaps and defaults to disabled)* and
+  `blank.pathlength_tolerance_cm` (default 0.01 cm) govern subtraction and
+  guard-rails. Configure explicit time windows only when you need to retain the
+  warning metadata—runtime validation logs the observed gap without aborting the
+  run—and rely on pathlength checks for hard failures. Set
+  `blank.match_strategy` to `cuvette_slot` when blanks should be grouped
   and matched via `meta["cuvette_slot"]`; the pipeline automatically falls
   back to legacy blank identifiers when slot metadata is unavailable so
   existing recipes continue to work.【F:spectro_app/plugins/uvvis/plugin.py†L60-L78】【F:spectro_app/plugins/uvvis/plugin.py†L978-L1268】

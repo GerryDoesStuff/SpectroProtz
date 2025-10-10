@@ -75,7 +75,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     id = "uvvis"
     label = "UV-Vis"
     xlabel = "Wavelength (nm)"
-    DEFAULT_BLANK_TIME_WINDOW_MINUTES = 240.0
+    DEFAULT_BLANK_TIME_WINDOW_MINUTES = None
     DEFAULT_PATHLENGTH_TOLERANCE_CM = 0.01
     HELIOS_GAMMA_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
     GENERIC_WAVELENGTH_LIMITS_NM = (190.0, 1100.0)
@@ -1142,6 +1142,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             blank_cfg = dict(blank_cfg_raw)
         else:
             blank_cfg = {}
+        if blank_cfg.get("max_time_delta_minutes") is not None:
+            warnings.warn(
+                "blank.max_time_delta_minutes is deprecated and will be removed in a future release; "
+                "timestamp gaps now record audit violations without blocking",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         match_strategy = pipeline.normalize_blank_match_strategy(
             blank_cfg.get("match_strategy")
         )
@@ -1506,6 +1513,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         )
         time_delta_minutes: float | None = None
         violations: List[Dict[str, object]] = []
+        timestamp_gap_violation = False
         if sample_time and blank_time:
             delta = abs(sample_time - blank_time)
             time_delta_minutes = delta.total_seconds() / 60.0
@@ -1522,10 +1530,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     }
                 )
                 if enforce:
-                    raise ValueError(
-                        "Blank/sample timestamp gap exceeds allowed window: "
-                        f"sample '{sample_id}' vs blank '{blank_id}'"
-                    )
+                    timestamp_gap_violation = True
 
         tolerance_cfg = blank_cfg.get("pathlength_tolerance_cm")
         tolerance = (
@@ -1574,7 +1579,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             "blank_pathlength_cm": blank_path_val,
             "pathlength_delta_cm": path_delta,
             "validation_ran": True,
-            "validation_enforced": bool(enforce),
+            "validation_enforced": bool(enforce and not timestamp_gap_violation),
             "validation_violations": violations,
         }
         return audit
