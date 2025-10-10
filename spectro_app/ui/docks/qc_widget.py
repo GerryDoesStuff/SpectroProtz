@@ -236,6 +236,14 @@ class QCDock(QDockWidget):
         self.table.setModel(self.model)
 
         self.figure = Figure(figsize=(6, 4))
+        self._uses_constrained_layout = False
+        try:
+            self.figure.set_layout_engine("constrained")
+            self._uses_constrained_layout = True
+        except AttributeError:
+            # Fallback for older Matplotlib versions where constrained layout
+            # is configured via tight_layout at draw time.
+            self._uses_constrained_layout = False
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.canvas.setFocus()
@@ -440,5 +448,8 @@ class QCDock(QDockWidget):
             if handles:
                 ax_trend.legend(handles, labels, loc="best", frameon=False)
 
-        self.figure.tight_layout()
+        if not self._uses_constrained_layout:
+            # Ensure there is enough padding for tick labels when constrained
+            # layout is unavailable on the current Matplotlib version.
+            self.figure.subplots_adjust(bottom=0.18)
         self.canvas.draw_idle()
