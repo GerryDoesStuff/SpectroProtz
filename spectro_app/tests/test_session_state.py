@@ -118,3 +118,41 @@ def test_session_round_trip(qapp, tmp_path):
         ctx_second.set_dirty(False)
         window_two.close()
         window_two.deleteLater()
+
+
+def test_queue_appends_without_overwriting(qapp, tmp_path):
+    settings = _make_settings(tmp_path)
+    ctx = DummyAppContext(settings)
+    window = MainWindow(ctx)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    file_a = data_dir / "first.spc"
+    file_b = data_dir / "second.spc"
+    file_c = data_dir / "third.spc"
+    file_a.write_text("a")
+    file_b.write_text("b")
+    file_c.write_text("c")
+
+    try:
+        window._set_queue([str(file_a)])
+        window._on_queue_paths_dropped([str(file_b)])
+        assert window._queued_paths == [str(file_a), str(file_b)]
+
+        # Dropping an already queued file should keep the original ordering
+        window._on_queue_paths_dropped([str(file_b), str(file_c)])
+        assert window._queued_paths == [str(file_a), str(file_b), str(file_c)]
+
+        # Explicitly allow duplicates when requested
+        window._add_to_queue([str(file_a)], skip_duplicates=False)
+        assert window._queued_paths == [
+            str(file_a),
+            str(file_b),
+            str(file_c),
+            str(file_a),
+        ]
+
+        window._on_queue_clear_requested()
+        assert window._queued_paths == []
+    finally:
+        window.close()
+        window.deleteLater()
