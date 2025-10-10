@@ -517,7 +517,7 @@ class FileQueueDock(QDockWidget):
         menu = QtWidgets.QMenu(self)
         selected_path = self._selected_path()
 
-        inspect_action = menu.addAction("Inspect Header…")
+        inspect_action = menu.addAction("Inspect Data…")
         preview_action = menu.addAction("Preview…")
         menu.addSeparator()
         role_menu = menu.addMenu("Set Role")

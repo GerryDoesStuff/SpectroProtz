@@ -1145,7 +1145,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_queue([])
 
     def _on_queue_inspect_requested(self, path: str):
-        self._open_file_preview(Path(path), "Inspect Header", 4096)
+        self._open_file_data_dialog(Path(path))
 
     def _on_queue_preview_requested(self, path: str):
         candidate = Path(path)
@@ -1228,7 +1228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._loading_session:
             self.appctx.set_dirty(True)
 
-    def _open_file_preview(self, path: Path, title: str, max_bytes: int):
+    def _open_file_text_preview(self, path: Path, title: str, max_bytes: int):
         if not path.exists():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -1286,7 +1286,231 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(buttons)
 
         dialog.resize(900, 600 if max_bytes > 8192 else 520)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _open_file_data_dialog(self, path: Path) -> None:
+        if not path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"The file '{path}' could not be found on disk.",
+            )
+            return
+
+        plugin = self._active_plugin
+        if plugin is None and self._active_plugin_id:
+            plugin = self._plugin_registry.get(self._active_plugin_id)
+        if plugin is None:
+            plugin = self._resolve_plugin([str(path)], self._recipe_data.get("module"))
+        if plugin is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No Compatible Plugin",
+                "Unable to determine a plugin capable of loading this file for inspection.",
+            )
+            return
+
+        try:
+            spectra = plugin.load([str(path)])
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Failed to Inspect Data",
+                f"Failed to load '{path}': {exc}",
+            )
+            return
+
+        if not spectra:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No Data Found",
+                f"No spectra were returned when loading '{path}'.",
+            )
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Inspect Data — {path.name}")
+        dialog.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        info_lines = [str(path.resolve())]
+        plugin_label = getattr(plugin, "label", None) or getattr(plugin, "id", "")
+        if plugin_label:
+            info_lines.append(f"Plugin: {plugin_label}")
+        info_label = QtWidgets.QLabel("\n".join(info_lines))
+        info_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        layout.addWidget(info_label)
+
+        selector: Optional[QtWidgets.QComboBox] = None
+        if len(spectra) > 1:
+            selector = QtWidgets.QComboBox()
+            selector.setObjectName("InspectorSpectrumSelector")
+            for index, spectrum in enumerate(spectra):
+                label_candidates = [
+                    spectrum.meta.get("sample_id") if isinstance(spectrum.meta, dict) else None,
+                    spectrum.meta.get("name") if isinstance(spectrum.meta, dict) else None,
+                    spectrum.meta.get("id") if isinstance(spectrum.meta, dict) else None,
+                ]
+                display = next((str(candidate) for candidate in label_candidates if candidate), None)
+                if not display:
+                    display = f"Spectrum {index + 1}"
+                selector.addItem(display, index)
+            layout.addWidget(selector)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        metadata_tree = QtWidgets.QTreeWidget()
+        metadata_tree.setObjectName("InspectorMetadataTree")
+        metadata_tree.setColumnCount(2)
+        metadata_tree.setHeaderLabels(["Field", "Value"])
+        metadata_tree.header().setStretchLastSection(True)
+        splitter.addWidget(metadata_tree)
+
+        data_table = QtWidgets.QTableWidget()
+        data_table.setObjectName("InspectorDataTable")
+        data_table.setColumnCount(2)
+        data_table.setHorizontalHeaderLabels(["Wavelength", "Intensity"])
+        data_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        data_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        data_table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        data_table.verticalHeader().setVisible(False)
+        data_table.horizontalHeader().setStretchLastSection(True)
+        data_table.setAlternatingRowColors(True)
+        splitter.addWidget(data_table)
+
+        def _format_number(value: object) -> str:
+            if value is None:
+                return ""
+            try:
+                if isinstance(value, (int, bool)):
+                    return str(int(value))
+                numeric = float(value)
+            except Exception:
+                return str(value)
+            else:
+                return format(numeric, "g")
+
+        def _coerce_sequence(values: object) -> List[object]:
+            if values is None:
+                return []
+            if hasattr(values, "tolist") and callable(getattr(values, "tolist")):
+                try:
+                    values = values.tolist()
+                except Exception:
+                    pass
+            if isinstance(values, (list, tuple)):
+                return list(values)
+            try:
+                return list(values)
+            except Exception:
+                return [values]
+
+        def _format_value(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, dict):
+                return ""
+            if isinstance(value, (list, tuple)):
+                return ", ".join(_format_value(item) for item in value)
+            if hasattr(value, "tolist") and callable(getattr(value, "tolist")):
+                try:
+                    return ", ".join(
+                        _format_number(item) for item in value.tolist()
+                    )
+                except Exception:
+                    return str(value)
+            if isinstance(value, (int, bool)):
+                return str(int(value))
+            try:
+                return format(float(value), "g")
+            except Exception:
+                return str(value)
+
+        def _populate_metadata(parent: QtWidgets.QTreeWidgetItem, value: object) -> None:
+            if isinstance(value, dict):
+                for key in sorted(value):
+                    child = QtWidgets.QTreeWidgetItem(parent, [str(key), ""])
+                    _populate_metadata(child, value[key])
+            elif isinstance(value, (list, tuple)):
+                for index, item in enumerate(value):
+                    child = QtWidgets.QTreeWidgetItem(parent, [str(index), ""])
+                    _populate_metadata(child, item)
+            else:
+                parent.setText(1, _format_value(value))
+
+        def _update_contents(index: int) -> None:
+            if index < 0 or index >= len(spectra):
+                return
+            spectrum = spectra[index]
+            metadata_tree.clear()
+            title_label = f"Spectrum {index + 1}"
+            if isinstance(spectrum.meta, dict):
+                sample_id = spectrum.meta.get("sample_id")
+                if sample_id:
+                    title_label += f" — {sample_id}"
+            root = QtWidgets.QTreeWidgetItem([title_label, ""])
+            metadata_tree.addTopLevelItem(root)
+            if isinstance(spectrum.meta, dict):
+                _populate_metadata(root, spectrum.meta)
+            metadata_tree.expandAll()
+
+            wavelengths = _coerce_sequence(getattr(spectrum, "wavelength", []))
+            intensities = _coerce_sequence(getattr(spectrum, "intensity", []))
+            row_count = max(len(wavelengths), len(intensities))
+            data_table.setRowCount(row_count)
+            for row in range(row_count):
+                if row < len(wavelengths):
+                    data_table.setItem(
+                        row,
+                        0,
+                        QtWidgets.QTableWidgetItem(
+                            _format_number(wavelengths[row])
+                        ),
+                    )
+                else:
+                    data_table.setItem(row, 0, QtWidgets.QTableWidgetItem(""))
+
+                if row < len(intensities):
+                    data_table.setItem(
+                        row,
+                        1,
+                        QtWidgets.QTableWidgetItem(
+                            _format_number(intensities[row])
+                        ),
+                    )
+                else:
+                    data_table.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+            data_table.resizeColumnsToContents()
+
+        _update_contents(0)
+
+        if selector is not None:
+            selector.currentIndexChanged.connect(_update_contents)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(960, 640)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _normalise_recipe_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         base = dict(data or {})
