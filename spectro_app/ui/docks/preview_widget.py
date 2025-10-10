@@ -585,7 +585,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self.cursor_label.setText("λ: ––– | I: –––")
             return
 
-        x, _ = coords
+        x, y = coords
         nearest = self._find_nearest_dataset(x)
         if nearest is None:
             self._last_cursor_result = None
@@ -596,7 +596,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         stage_label = self.STAGE_LABELS.get(dataset.stage, dataset.stage)
         self._last_cursor_result = nearest
         self.cursor_label.setText(
-            f"λ: {x_val:.4g} | I: {y_val:.4g} · {dataset.label} ({stage_label})"
+            f"λ: {x_val:.4g} | I: {y:.4g} · {dataset.label} ({stage_label})"
         )
 
     def _find_nearest_dataset(
