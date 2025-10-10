@@ -513,23 +513,25 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._apply_view_mode()
 
     def _on_zoom_in_clicked(self) -> None:
-        self._apply_zoom(0.8)
+        self._apply_zoom(0.8, self._last_cursor_pos)
 
     def _on_zoom_out_clicked(self) -> None:
-        self._apply_zoom(1.25)
+        self._apply_zoom(1.25, self._last_cursor_pos)
 
-    def _apply_zoom(self, factor: float) -> None:
+    def _apply_zoom(self, factor: float, center: Optional[tuple[float, float]] = None) -> None:
         view_box = self.plot.plotItem.getViewBox()
         if view_box is None:
             return
         self.plot.plotItem.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=False)
-        if self._last_cursor_pos is not None:
-            center = pg.Point(*self._last_cursor_pos)
+        if center is not None:
+            target_center = pg.Point(*center)
+        elif self._last_cursor_pos is not None:
+            target_center = pg.Point(*self._last_cursor_pos)
         else:
             rect = view_box.viewRect()
             center_qpoint = rect.center()
-            center = pg.Point(center_qpoint.x(), center_qpoint.y())
-        view_box.scaleBy((factor, factor), center=center)
+            target_center = pg.Point(center_qpoint.x(), center_qpoint.y())
+        view_box.scaleBy((factor, factor), center=target_center)
 
     def _render_curves(self) -> None:
         if self._legend is not None:
@@ -623,6 +625,9 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         copy_action = menu.addAction("Copy data at cursor")
         export_action = menu.addAction("Export figure…")
         reset_action = menu.addAction("Reset view")
+        menu.addSeparator()
+        zoom_in_action = menu.addAction("Zoom in here")
+        zoom_out_action = menu.addAction("Zoom out here")
         action = menu.exec(self.plot.mapToGlobal(pos))
         if action == copy_action:
             self._copy_data_at_cursor()
@@ -630,6 +635,17 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._export_figure()
         elif action == reset_action:
             self._reset_view()
+        elif action in {zoom_in_action, zoom_out_action}:
+            view_box = self.plot.plotItem.getViewBox()
+            if view_box is None:
+                return
+            scene_pos = self.plot.mapToScene(pos)
+            view_pos = view_box.mapSceneToView(scene_pos)
+            center = (float(view_pos.x()), float(view_pos.y()))
+            if action == zoom_in_action:
+                self._apply_zoom(0.8, center)
+            else:
+                self._apply_zoom(1.25, center)
 
     def _copy_data_at_cursor(self) -> None:
         if not self._last_cursor_result:
