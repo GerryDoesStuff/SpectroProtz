@@ -115,7 +115,7 @@ Calibration (optional): Beer–Lambert linear/weighted fits; residual diagnostic
 
 Visualization
 
-Central interactive preview: Raw, Blanked, Baseline-corrected, Joined, Despiked, Smoothed (toggle overlays).
+Central interactive preview: Raw, Joined, Despiked, Blanked, Baseline-corrected, Smoothed (toggle overlays).
 
 Crosshair readouts (x, y, and Δ between states); zoom/pan; reset view.
 

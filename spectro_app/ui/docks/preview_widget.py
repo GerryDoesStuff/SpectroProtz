@@ -34,10 +34,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     STAGE_LABELS: Dict[str, str] = {
         "raw": "Raw",
-        "blanked": "Blanked",
-        "baseline_corrected": "Baseline",
         "joined": "Joined",
         "despiked": "Despiked",
+        "blanked": "Blanked",
+        "baseline_corrected": "Baseline",
         "smoothed": "Smoothed",
     }
 
