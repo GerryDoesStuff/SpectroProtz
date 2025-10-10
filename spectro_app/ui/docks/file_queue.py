@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
 
@@ -8,24 +8,13 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDockWidget, QListWidget
 
 
-__all__ = ["FileQueueDock", "QueueEntry"]
+from .file_queue_models import QueueEntry, order_queue_entries
+
+
+__all__ = ["FileQueueDock", "QueueEntry", "order_queue_entries"]
 
 
 QUEUE_ENTRY_ROLE = QtCore.Qt.ItemDataRole.UserRole
-
-
-@dataclass
-class QueueEntry:
-    path: str
-    display_name: str
-    plugin_id: Optional[str] = None
-    technique: Optional[str] = None
-    mode: Optional[str] = None
-    role: Optional[str] = None
-    manifest_status: Optional[str] = None
-    is_manifest: bool = False
-    metadata: Dict[str, object] = field(default_factory=dict)
-    overrides: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -263,7 +252,8 @@ class FileQueueDock(QDockWidget):
             for entry in entries
         ]
         self._prune_overrides()
-        self._entries = [self._apply_overrides(entry) for entry in self._raw_entries]
+        applied = [self._apply_overrides(entry) for entry in self._raw_entries]
+        self._entries = order_queue_entries(applied)
         self._refresh_list_widget(selected_path)
 
     def apply_metadata(self, entries: List[QueueEntry]) -> None:
@@ -647,7 +637,8 @@ class FileQueueDock(QDockWidget):
 
         if changed:
             self._emit_overrides_changed()
-        self._entries = [self._apply_overrides(entry) for entry in self._raw_entries]
+        applied = [self._apply_overrides(entry) for entry in self._raw_entries]
+        self._entries = order_queue_entries(applied)
         self._refresh_list_widget()
 
     def _refresh_list_widget(self, selected: Optional[str] = None) -> None:
