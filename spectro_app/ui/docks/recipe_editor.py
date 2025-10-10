@@ -413,6 +413,11 @@ class RecipeEditorDock(QDockWidget):
         self.baseline_anchor_table.itemSelectionChanged.connect(
             self._update_baseline_anchor_buttons
         )
+        self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.despike_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.join_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.blank_subtract.toggled.connect(self._update_feature_controls_enabled)
+        self.drift_enable.toggled.connect(self._update_feature_controls_enabled)
         for signal in (
             self.module.currentTextChanged,
             self.smooth_enable.toggled,
@@ -621,6 +626,7 @@ class RecipeEditorDock(QDockWidget):
 
         self._sync_recipe_from_ui()
         self._update_baseline_controls_enabled()
+        self._update_feature_controls_enabled()
 
     def _format_optional(self, value) -> str:
         if value is None:
@@ -738,6 +744,37 @@ class RecipeEditorDock(QDockWidget):
         )
         row_count = self.baseline_anchor_table.rowCount()
         self.baseline_anchor_remove_row.setEnabled(anchor_enabled and row_count > 0)
+
+    def _update_feature_controls_enabled(self) -> None:
+        smoothing_enabled = self.smooth_enable.isChecked()
+        self.smooth_window.setEnabled(smoothing_enabled)
+        self.smooth_poly.setEnabled(smoothing_enabled)
+
+        despike_enabled = self.despike_enable.isChecked()
+        self.despike_window.setEnabled(despike_enabled)
+        self.despike_zscore.setEnabled(despike_enabled)
+
+        join_enabled = self.join_enable.isChecked()
+        self.join_window.setEnabled(join_enabled)
+        self.join_threshold.setEnabled(join_enabled)
+        self.join_windows_instrument_combo.setEnabled(join_enabled)
+        self.join_windows_table.setEnabled(join_enabled)
+        self.join_windows_add_instrument.setEnabled(join_enabled)
+        self.join_windows_add_row.setEnabled(join_enabled)
+
+        blank_enabled = self.blank_subtract.isChecked()
+        self.blank_require.setEnabled(blank_enabled)
+        self.blank_fallback.setEnabled(blank_enabled)
+        self.blank_match_strategy.setEnabled(blank_enabled)
+
+        drift_enabled = self.drift_enable.isChecked()
+        self.drift_window_min.setEnabled(drift_enabled)
+        self.drift_window_max.setEnabled(drift_enabled)
+        self.drift_max_slope.setEnabled(drift_enabled)
+        self.drift_max_delta.setEnabled(drift_enabled)
+        self.drift_max_residual.setEnabled(drift_enabled)
+
+        self._update_join_window_buttons()
 
     def _refresh_join_windows_combo(self) -> None:
         self._join_windows_loading = True
@@ -925,8 +962,10 @@ class RecipeEditorDock(QDockWidget):
         self._update_model_from_ui()
 
     def _update_join_window_buttons(self) -> None:
+        join_enabled = self.join_enable.isChecked()
         has_rows = self.join_windows_table.rowCount() > 0
-        self.join_windows_remove_row.setEnabled(has_rows)
+        self.join_windows_add_row.setEnabled(join_enabled)
+        self.join_windows_remove_row.setEnabled(join_enabled and has_rows)
         removable = (
             self.join_windows_instrument_combo.count() > 1
             and self.join_windows_instrument_combo.currentData(
@@ -934,7 +973,8 @@ class RecipeEditorDock(QDockWidget):
             )
             != self._JOIN_WINDOWS_GLOBAL_KEY
         )
-        self.join_windows_remove_instrument.setEnabled(removable)
+        self.join_windows_add_instrument.setEnabled(join_enabled)
+        self.join_windows_remove_instrument.setEnabled(join_enabled and removable)
 
     def _build_join_windows_payload(self) -> tuple[object | None, list[str]]:
         errors: list[str] = []
