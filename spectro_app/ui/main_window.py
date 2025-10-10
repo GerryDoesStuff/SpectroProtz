@@ -443,7 +443,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if lowered.endswith(".recipe.json"):
             self._load_recipe(target)
         else:
-            self._set_queue([normalized])
+            self._add_to_queue([normalized])
             base_dir = target.parent if target.is_file() else target
             if base_dir.is_dir():
                 self._export_default_dir = base_dir
@@ -491,7 +491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_recipe(Path(recipe_paths[0]))
 
         if data_paths:
-            self._set_queue(data_paths)
+            self._add_to_queue(data_paths)
             try:
                 self._export_default_dir = Path(data_paths[0]).parent
                 self.appctx.settings.setValue(
@@ -499,8 +499,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             except (TypeError, ValueError):
                 self._export_default_dir = None
-        else:
-            self._set_queue([])
 
         self._record_recent_files(paths)
 
@@ -1031,8 +1029,30 @@ class MainWindow(QtWidgets.QMainWindow):
         entries = self._build_queue_entries(self._queued_paths, plugin)
         self.fileDock.apply_metadata(entries)
 
-    def _set_queue(self, paths: List[str]):
-        self._queued_paths = [str(p) for p in paths if p]
+    def _add_to_queue(self, paths: List[str], *, skip_duplicates: bool = True) -> None:
+        if not paths:
+            return
+        combined = list(self._queued_paths)
+        combined.extend(str(p) for p in paths if p)
+        self._set_queue(combined, skip_duplicates=skip_duplicates)
+
+    def _set_queue(self, paths: List[str], *, skip_duplicates: bool = False):
+        cleaned_paths: List[str] = []
+        seen: set[str] = set()
+        for raw in paths:
+            if not raw:
+                continue
+            try:
+                normalized = str(raw)
+            except Exception:
+                continue
+            if skip_duplicates:
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+            cleaned_paths.append(normalized)
+
+        self._queued_paths = cleaned_paths
         if self._queued_paths and not self._loading_session:
             self._update_last_browsed_dir(self._queued_paths)
         plugin = None
@@ -1085,7 +1105,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_queue_paths_dropped(self, paths: List[str]):
         if not paths:
             return
-        self._set_queue(paths)
+        self._add_to_queue(paths)
         first_existing = next((Path(p) for p in paths if Path(p).exists()), None)
         if first_existing:
             target_dir = first_existing.parent if first_existing.is_file() else first_existing
