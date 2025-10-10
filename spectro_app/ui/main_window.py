@@ -100,6 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
         self.fileDock.overrides_changed.connect(self._on_queue_overrides_changed)
         self.fileDock.clear_requested.connect(self._on_queue_clear_requested)
+        self.fileDock.remove_requested.connect(self._on_queue_remove_requested)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.fileDock)
         self.recipeDock = RecipeEditorDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.recipeDock)
@@ -1144,6 +1145,43 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_queue_clear_requested(self) -> None:
         self._set_queue([])
 
+    def _on_queue_remove_requested(self, paths: List[str]) -> None:
+        if not paths:
+            return
+
+        removal_values: set[str] = set()
+        normalized_values: set[str] = set()
+        for raw in paths:
+            if raw is None:
+                continue
+            try:
+                as_str = str(raw)
+            except Exception:
+                continue
+            if not as_str:
+                continue
+            removal_values.add(as_str)
+            try:
+                normalized_values.add(str(Path(as_str)))
+            except (TypeError, ValueError):
+                normalized_values.add(as_str)
+
+        if not removal_values:
+            return
+
+        remaining = [path for path in self._queued_paths if path not in removal_values]
+        if len(remaining) == len(self._queued_paths):
+            return
+
+        for key in list(self._queue_overrides.keys()):
+            if key in normalized_values:
+                self._queue_overrides.pop(key, None)
+
+        self._set_queue(remaining)
+
+        if not self._loading_session:
+            self.appctx.set_dirty(True)
+
     def _on_queue_inspect_requested(self, path: str):
         self._open_file_data_dialog(Path(path))
 
@@ -1213,9 +1251,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_raw_preview_destroyed(self, *_args):
         self._raw_preview_window = None
-
-    def _on_queue_clear_requested(self):
-        self._set_queue([])
 
     def _on_queue_overrides_changed(self, overrides: Dict[str, Dict[str, object]]):
         if overrides is None:

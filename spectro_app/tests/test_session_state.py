@@ -156,3 +156,66 @@ def test_queue_appends_without_overwriting(qapp, tmp_path):
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_queue_remove_single_entry_clears_override(qapp, tmp_path):
+    settings = _make_settings(tmp_path)
+    ctx = DummyAppContext(settings)
+    window = MainWindow(ctx)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    file_a = data_dir / "first.spc"
+    file_b = data_dir / "second.spc"
+    file_c = data_dir / "third.spc"
+    file_a.write_text("a")
+    file_b.write_text("b")
+    file_c.write_text("c")
+
+    try:
+        queue = [str(file_a), str(file_b), str(file_c)]
+        window._set_queue(queue)
+        overrides = {
+            str(file_a): {"role": "sample"},
+            str(file_b): {"role": "blank"},
+        }
+        window._on_queue_overrides_changed(overrides)
+        window.fileDock.load_overrides(overrides)
+
+        window._on_queue_remove_requested([str(file_b)])
+
+        assert window._queued_paths == [str(file_a), str(file_c)]
+        assert str(file_b) not in window._queue_overrides
+        assert str(file_b) not in window.fileDock._overrides
+        assert ctx.is_dirty()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_queue_remove_multiple_entries(qapp, tmp_path):
+    settings = _make_settings(tmp_path)
+    ctx = DummyAppContext(settings)
+    window = MainWindow(ctx)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    files = [data_dir / name for name in ("first.spc", "second.spc", "third.spc")]
+    for idx, file in enumerate(files):
+        file.write_text(str(idx))
+
+    try:
+        queue = [str(path) for path in files]
+        window._set_queue(queue)
+        overrides = {str(path): {"role": "sample"} for path in queue}
+        window._on_queue_overrides_changed(overrides)
+        window.fileDock.load_overrides(overrides)
+
+        window._on_queue_remove_requested([str(files[0]), str(files[2])])
+
+        assert window._queued_paths == [str(files[1])]
+        assert str(files[0]) not in window._queue_overrides
+        assert str(files[2]) not in window._queue_overrides
+        assert str(files[0]) not in window.fileDock._overrides
+        assert str(files[2]) not in window.fileDock._overrides
+    finally:
+        window.close()
+        window.deleteLater()
