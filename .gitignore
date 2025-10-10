@@ -1,1 +1,14 @@
 /spectro_app/__pycache__
+/spectro_app/plugins/uvvis/__pycache__
+/spectro_app/engine/__pycache__
+/spectro_app/engine/__pycache__
+/spectro_app/plugins/uvvis/__pycache__
+/spectro_app/ui/__pycache__
+/spectro_app/plugins/uvvis/__pycache__
+/spectro_app/ui/docks/__pycache__
+/spectro_app/engine/__pycache__
+/spectro_app/engine/__pycache__
+/spectro_app/engine/__pycache__
+/spectro_app/plugins/uvvis/__pycache__
+/spectro_app/ui/docks/__pycache__
+*.pyc
