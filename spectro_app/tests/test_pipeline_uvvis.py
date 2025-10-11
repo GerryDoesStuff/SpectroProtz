@@ -193,6 +193,20 @@ def test_despike_preserves_leading_slope_with_joins():
     assert np.allclose(np.diff(despiked.intensity[:5]), np.diff(intensity[:5]))
 
 
+def test_despike_iteratively_handles_clustered_spikes():
+    wl = np.linspace(300.0, 500.0, 80)
+    baseline = np.linspace(0.1, 0.5, wl.size)
+    intensity = baseline.copy()
+    spike_idx = np.array([20, 21, 22, 23])
+    intensity[spike_idx] += np.array([3.0, 6.0, 5.5, 4.0])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(spec, window=9)
+
+    assert np.allclose(despiked.intensity, baseline, atol=1e-6)
+    assert despiked.meta.get("despiked") is True
+
+
 def test_preprocess_join_correction_emits_channel_without_detected_joins(monkeypatch):
     plugin = UvVisPlugin()
     wl = np.linspace(400, 420, 11)

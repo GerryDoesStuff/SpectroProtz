@@ -1407,21 +1407,68 @@ def despike_spectrum(
     if join_indices:
         joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
 
+    max_iter = 10
+
+    residual_tolerance = 2e-2
+    isolated_ratio = 20.0
+
     if not joins:
         window_size = _effective_window(n)
         if window_size is None:
             return _final_spectrum(y.copy())
 
-        baseline = median_filter(y, size=window_size, mode="nearest")
-        residual = y - baseline
-        mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
-        if not np.isfinite(mad) or mad == 0:
-            return _final_spectrum(y.copy())
-
-        threshold = float(zscore) * 1.4826 * mad
-        mask = np.abs(residual) > threshold
         corrected = y.copy()
-        if np.any(mask):
+        mask = np.zeros(n, dtype=bool)
+        for _ in range(max_iter):
+            baseline = median_filter(corrected, size=window_size, mode="nearest")
+            residual = corrected - baseline
+            mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
+            if np.isfinite(mad) and mad > 0:
+                threshold = float(zscore) * 1.4826 * mad
+                candidate_mask = np.abs(residual) > threshold
+            else:
+                nonzero = np.abs(residual) > 1e-12
+                if np.any(nonzero) and np.count_nonzero(nonzero) < n:
+                    abs_residual = np.abs(residual)
+                    max_residual = float(abs_residual.max(initial=0.0))
+                    if max_residual <= max(residual_tolerance, 1e-12):
+                        candidate_mask = np.zeros(n, dtype=bool)
+                    else:
+                        if not np.any(mask):
+                            unmasked = abs_residual
+                            if unmasked.size > 1:
+                                second_largest = float(
+                                    np.partition(unmasked, -2)[-2]
+                                )
+                            else:
+                                second_largest = 0.0
+                            if second_largest <= max(residual_tolerance, 1e-12):
+                                second_largest = 0.0
+                            if second_largest > 0.0 and max_residual >= isolated_ratio * second_largest:
+                                candidate_mask = np.zeros(n, dtype=bool)
+                                break
+                        candidate_mask = abs_residual >= max_residual - 1e-12
+                        if np.count_nonzero(candidate_mask) >= n:
+                            candidate_mask = np.zeros(n, dtype=bool)
+                else:
+                    median_val = np.nanmedian(corrected)
+                    deviation = np.abs(corrected - median_val)
+                    max_deviation = float(deviation.max(initial=0.0))
+                    deviation_mask = deviation > 1e-12
+                    if (
+                        max_deviation > max(residual_tolerance, 1e-12)
+                        and np.any(deviation_mask)
+                        and np.count_nonzero(deviation_mask) < n
+                    ):
+                        candidate_mask = deviation >= max_deviation - 1e-12
+                        if np.count_nonzero(candidate_mask) >= n:
+                            candidate_mask = np.zeros(n, dtype=bool)
+                    else:
+                        candidate_mask = np.zeros(n, dtype=bool)
+            new_points = candidate_mask & ~mask
+            mask = mask | candidate_mask
+            if not np.any(new_points):
+                break
             indices = np.arange(n)
             good = indices[~mask]
             if good.size >= 2:
@@ -1435,34 +1482,57 @@ def despike_spectrum(
     overall_mask = np.zeros(n, dtype=bool)
 
     for start, stop in zip(boundaries[:-1], boundaries[1:]):
-        segment = y[start:stop]
+        segment = corrected[start:stop]
         seg_len = segment.size
         seg_window = _effective_window(seg_len)
         if seg_window is None:
             continue
 
-        baseline = median_filter(segment, size=seg_window, mode="nearest")
-        residual = segment - baseline
-        mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
-        if np.isfinite(mad) and mad > 0:
-            threshold = float(zscore) * 1.4826 * mad
-            mask = np.abs(residual) > threshold
-        else:
-            nonzero = np.abs(residual) > 1e-12
-            if not np.any(nonzero) or np.count_nonzero(nonzero) >= seg_len:
-                continue
-            mask = nonzero
-        if not np.any(mask):
-            continue
-
-        indices = np.arange(seg_len)
-        good = indices[~mask]
-        target = corrected[start:stop]
-        if good.size >= 2:
-            target[mask] = np.interp(indices[mask], good, target[~mask])
-        else:
-            target[mask] = baseline[mask]
-        overall_mask[start:stop] = mask
+        seg_mask = np.zeros(seg_len, dtype=bool)
+        for _ in range(max_iter):
+            baseline = median_filter(segment, size=seg_window, mode="nearest")
+            residual = segment - baseline
+            mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
+            if np.isfinite(mad) and mad > 0:
+                threshold = float(zscore) * 1.4826 * mad
+                candidate_mask = np.abs(residual) > threshold
+            else:
+                nonzero = np.abs(residual) > 1e-12
+                if np.any(nonzero) and np.count_nonzero(nonzero) < seg_len:
+                    abs_residual = np.abs(residual)
+                    max_residual = float(abs_residual.max(initial=0.0))
+                    if max_residual <= max(residual_tolerance, 1e-12):
+                        candidate_mask = np.zeros(seg_len, dtype=bool)
+                    else:
+                        candidate_mask = abs_residual >= max_residual - 1e-12
+                        if np.count_nonzero(candidate_mask) >= seg_len:
+                            candidate_mask = np.zeros(seg_len, dtype=bool)
+                else:
+                    median_val = np.nanmedian(segment)
+                    deviation = np.abs(segment - median_val)
+                    max_deviation = float(deviation.max(initial=0.0))
+                    deviation_mask = deviation > 1e-12
+                    if (
+                        max_deviation > max(residual_tolerance, 1e-12)
+                        and np.any(deviation_mask)
+                        and np.count_nonzero(deviation_mask) < seg_len
+                    ):
+                        candidate_mask = deviation >= max_deviation - 1e-12
+                        if np.count_nonzero(candidate_mask) >= seg_len:
+                            candidate_mask = np.zeros(seg_len, dtype=bool)
+                    else:
+                        candidate_mask = np.zeros(seg_len, dtype=bool)
+            new_points = candidate_mask & ~seg_mask
+            seg_mask = seg_mask | candidate_mask
+            if not np.any(new_points):
+                break
+            indices = np.arange(seg_len)
+            good = indices[~seg_mask]
+            if good.size >= 2:
+                segment[seg_mask] = np.interp(indices[seg_mask], good, segment[~seg_mask])
+            else:
+                segment[seg_mask] = baseline[seg_mask]
+        overall_mask[start:stop] = seg_mask
 
     return _final_spectrum(corrected, mask=overall_mask)
 
