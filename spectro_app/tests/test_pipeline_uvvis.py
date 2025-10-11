@@ -701,6 +701,25 @@ def test_detect_joins_auto_threshold_handles_windowed_mixed_magnitudes():
     assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
 
 
+def test_detect_joins_auto_threshold_balances_overlap_magnitudes():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 332.0] += 6.0
+    intensity[wl >= 362.0] += 1.5
+
+    windows = [
+        {"min_nm": 332.0, "max_nm": 332.0},
+        {"min_nm": 362.0, "max_nm": 362.0},
+    ]
+
+    joins = pipeline.detect_joins(wl, intensity, window=5, windows=windows)
+
+    assert len(joins) == 2
+    join_wavelengths = np.sort(wl[np.asarray(joins, dtype=int)])
+    expected_wavelengths = np.array([332.0, 362.0])
+    assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
+
+
 def test_detect_joins_visits_all_windows():
     wl = np.linspace(300.0, 400.0, 201)
     intensity = np.zeros_like(wl)

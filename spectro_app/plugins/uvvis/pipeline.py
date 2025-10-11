@@ -649,26 +649,42 @@ def detect_joins(
         return []
 
     candidate_scores = scores[valid_positions]
+    peak_pos = None
+    if candidate_scores.size:
+        try:
+            peak_index = int(np.nanargmax(candidate_scores))
+        except ValueError:
+            peak_index = None
+        if peak_index is not None and 0 <= peak_index < valid_positions.size:
+            peak_pos = int(valid_positions[peak_index])
     if threshold is None:
         median = float(np.nanmedian(candidate_scores))
         mad = float(np.nanmedian(np.abs(candidate_scores - median)))
         peak = float(np.nanmax(candidate_scores))
         if not np.isfinite(peak) or peak <= 0:
             return []
+        exclusion_radius = max(raw_window, half_window)
+        original_positive_scores = np.sort(
+            candidate_scores[np.isfinite(candidate_scores) & (candidate_scores > 0)]
+        )
+
         if not np.isfinite(mad) or mad == 0:
-            positive_scores = np.sort(
-                candidate_scores[np.isfinite(candidate_scores) & (candidate_scores > 0)]
-            )
+            positive_mask = np.isfinite(candidate_scores) & (candidate_scores > 0)
+            if peak_pos is not None:
+                proximity_mask = np.abs(valid_positions - peak_pos) < exclusion_radius
+                positive_mask &= ~proximity_mask
+            positive_scores = np.sort(candidate_scores[positive_mask])
             if positive_scores.size == 0:
-                return []
-            unique_scores = np.unique(positive_scores)
-            if unique_scores.size == 1:
-                threshold = unique_scores[0]
+                threshold = peak * 0.5
             else:
-                candidate = unique_scores[-2]
-                if candidate <= 0:
-                    candidate = unique_scores[-1] * 0.5
-                threshold = candidate
+                unique_scores = np.unique(positive_scores)
+                if unique_scores.size == 1:
+                    threshold = unique_scores[0]
+                else:
+                    candidate = unique_scores[-2]
+                    if candidate <= 0:
+                        candidate = unique_scores[-1] * 0.5
+                    threshold = candidate
             if not np.isfinite(threshold) or threshold <= 0:
                 threshold = peak
         else:
@@ -677,32 +693,45 @@ def detect_joins(
             if not np.isfinite(computed) or computed <= 0:
                 threshold = peak
             elif peak <= computed:
-                positive_scores = np.sort(
-                    candidate_scores[
-                        np.isfinite(candidate_scores) & (candidate_scores > 0)
-                    ]
-                )
-                if positive_scores.size == 0:
-                    return []
-                below_peak = positive_scores[positive_scores < peak]
-                if below_peak.size == 0:
-                    threshold = peak * 0.99
-                else:
-                    max_below = float(np.nanmax(below_peak))
-                    if not np.isfinite(max_below) or max_below <= 0:
-                        max_below = peak * 0.5
-                    separation_ratio = max_below / peak if peak else 1.0
-                    if separation_ratio > 0.999:
+                original_below_peak = original_positive_scores[
+                    original_positive_scores < peak
+                ]
+                if original_below_peak.size > 0:
+                    original_max_below = float(np.nanmax(original_below_peak))
+                    if (
+                        np.isfinite(original_max_below)
+                        and original_max_below > 0
+                        and peak > 0
+                        and original_max_below / peak > 0.999
+                    ):
                         return []
-                    percentile = float(np.nanpercentile(below_peak, 97.5))
-                    if not np.isfinite(percentile) or percentile <= 0:
-                        percentile = max_below
-                    threshold_candidate = min(percentile, max_below)
-                    if not np.isfinite(threshold_candidate) or threshold_candidate <= 0:
-                        threshold_candidate = max_below
-                    threshold = min(threshold_candidate, peak * 0.99)
-                    if not np.isfinite(threshold) or threshold <= 0:
-                        threshold = max_below if max_below > 0 else peak * 0.99
+                positive_mask = np.isfinite(candidate_scores) & (candidate_scores > 0)
+                if peak_pos is not None:
+                    proximity_mask = np.abs(valid_positions - peak_pos) < exclusion_radius
+                    positive_mask &= ~proximity_mask
+                positive_scores = np.sort(candidate_scores[positive_mask])
+                if positive_scores.size == 0:
+                    threshold = peak * 0.5
+                else:
+                    below_peak = positive_scores[positive_scores < peak]
+                    if below_peak.size == 0:
+                        threshold = peak * 0.99
+                    else:
+                        max_below = float(np.nanmax(below_peak))
+                        if not np.isfinite(max_below) or max_below <= 0:
+                            max_below = peak * 0.5
+                        separation_ratio = max_below / peak if peak else 1.0
+                        if separation_ratio > 0.999:
+                            return []
+                        percentile = float(np.nanpercentile(below_peak, 97.5))
+                        if not np.isfinite(percentile) or percentile <= 0:
+                            percentile = max_below
+                        threshold_candidate = min(percentile, max_below)
+                        if not np.isfinite(threshold_candidate) or threshold_candidate <= 0:
+                            threshold_candidate = max_below
+                        threshold = min(threshold_candidate, peak * 0.99)
+                        if not np.isfinite(threshold) or threshold <= 0:
+                            threshold = max_below if max_below > 0 else peak * 0.99
             else:
                 threshold = computed
     else:
