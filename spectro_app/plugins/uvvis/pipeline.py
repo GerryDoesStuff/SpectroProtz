@@ -558,20 +558,80 @@ def _normalise_anchor_windows(windows_cfg: object) -> List[Dict[str, object]]:
     return normalised
 
 
-def normalise_join_windows(windows_cfg: object) -> List[Dict[str, float | None]]:
+def normalise_join_windows(windows_cfg: object) -> List[Dict[str, float | int | None]]:
     """Normalise a join window configuration into explicit numeric bounds."""
 
     if windows_cfg is None:
         return []
 
-    windows = _normalise_anchor_windows(windows_cfg)
-    normalised: List[Dict[str, float | None]] = []
-    for entry in windows:
-        lower = entry.get("lower_nm")
-        upper = entry.get("upper_nm")
-        lower_val = float(lower) if lower is not None else None
-        upper_val = float(upper) if upper is not None else None
-        normalised.append({"lower_nm": lower_val, "upper_nm": upper_val})
+    if isinstance(windows_cfg, Mapping):
+        windows_iterable = windows_cfg.get("windows")
+        if windows_iterable is None:
+            return []
+    else:
+        windows_iterable = windows_cfg
+
+    if not isinstance(windows_iterable, Sequence) or isinstance(windows_iterable, (str, bytes)):
+        return []
+
+    normalised: List[Dict[str, float | int | None]] = []
+    for entry in windows_iterable:
+        if entry is None:
+            continue
+
+        lower_val: float | None
+        upper_val: float | None
+        spikes_val: int
+
+        if isinstance(entry, Mapping):
+            lo = entry.get("min_nm")
+            if lo is None:
+                lo = entry.get("lower_nm")
+            if lo is None:
+                lo = entry.get("min")
+            if lo is None:
+                lo = entry.get("lower")
+            hi = entry.get("max_nm")
+            if hi is None:
+                hi = entry.get("upper_nm")
+            if hi is None:
+                hi = entry.get("max")
+            if hi is None:
+                hi = entry.get("upper")
+
+            spikes_raw = entry.get("spikes")
+        elif isinstance(entry, Sequence):
+            data = list(entry)
+            if len(data) < 2:
+                continue
+            lo = data[0]
+            hi = data[1]
+            spikes_raw = data[3] if len(data) > 3 else None
+        else:
+            continue
+
+        lower_val = float(lo) if lo is not None else None
+        upper_val = float(hi) if hi is not None else None
+        if lower_val is not None and upper_val is not None and lower_val > upper_val:
+            lower_val, upper_val = upper_val, lower_val
+
+        spikes_val = 1
+        if spikes_raw is not None:
+            try:
+                spikes_val = int(spikes_raw)
+            except (TypeError, ValueError):
+                spikes_val = 1
+        if spikes_val < 0:
+            spikes_val = 0
+
+        normalised.append(
+            {
+                "lower_nm": lower_val,
+                "upper_nm": upper_val,
+                "spikes": spikes_val,
+            }
+        )
+
     return normalised
 
 
@@ -614,8 +674,11 @@ def detect_joins(
         deltas[idx] = delta
         scores[idx] = abs(delta)
 
+    explicit_threshold = float(threshold) if threshold is not None else None
+
     valid_positions = np.where(np.isfinite(scores))[0]
     window_masks: list[np.ndarray] = []
+    window_spike_limits: list[int | None] = []
     if windows is not None:
         bounds = normalise_join_windows(windows)
         if not bounds:
@@ -627,12 +690,24 @@ def detect_joins(
             return []
         mask = np.zeros_like(wl, dtype=bool)
         for entry in bounds:
+            spikes_val = entry.get("spikes")
+            spikes_int: int | None
+            if spikes_val is None:
+                spikes_int = 1
+            else:
+                try:
+                    spikes_int = int(spikes_val)
+                except (TypeError, ValueError):
+                    spikes_int = 1
+            if spikes_int is not None and spikes_int < 0:
+                spikes_int = 0
             lo = entry.get("lower_nm")
             hi = entry.get("upper_nm")
             if lo is None and hi is None:
                 window_condition = np.isfinite(wl)
                 mask |= window_condition
                 window_masks.append(window_condition)
+                window_spike_limits.append(spikes_int)
                 continue
             lo_val = float(lo) if lo is not None else None
             hi_val = float(hi) if hi is not None else None
@@ -645,12 +720,18 @@ def detect_joins(
                 window_condition &= wl <= hi_val
             mask |= window_condition
             window_masks.append(window_condition)
+            window_spike_limits.append(spikes_int)
         mask &= np.isfinite(wl)
         if not np.any(mask):
             return []
         valid_positions = valid_positions[mask[valid_positions]]
     if valid_positions.size == 0:
         return []
+
+    if explicit_threshold is not None:
+        valid_scores = scores[valid_positions]
+        if valid_scores.size == 0 or not np.any(valid_scores >= explicit_threshold):
+            return []
 
     def _auto_threshold(span_positions: np.ndarray, span_scores: np.ndarray) -> float | None:
         if span_scores.size == 0:
@@ -741,7 +822,6 @@ def detect_joins(
         return float(threshold_value)
 
     candidate_info: Dict[int, Dict[str, Any]] = {}
-    explicit_threshold = float(threshold) if threshold is not None else None
 
     def _record_candidate(idx: int, span_key: tuple[int, int], local_threshold: float) -> None:
         if idx < 0 or idx >= n:
@@ -1077,6 +1157,48 @@ def detect_joins(
             if not np.isfinite(score) or score >= local_threshold:
                 filtered_candidates.append(idx)
         refined_sorted = filtered_candidates
+
+    if refined_sorted and windows is not None and window_spike_limits:
+        keep: set[int] = set(refined_sorted)
+        per_window: Dict[int, list[tuple[float, int]]] = {}
+        for idx in refined_sorted:
+            spans = final_refined_spans.get(idx, set())
+            if not spans:
+                continue
+            stored_score = final_refined_scores.get(idx)
+            if stored_score is None or not np.isfinite(stored_score):
+                raw_score = float(scores[idx]) if 0 <= idx < scores.size else float("nan")
+                score_value = raw_score
+            else:
+                score_value = float(stored_score)
+            score_for_sort = score_value if np.isfinite(score_value) else float("-inf")
+            for window_idx, _segment_idx in spans:
+                if window_idx < 0 or window_idx >= len(window_spike_limits):
+                    continue
+                per_window.setdefault(window_idx, []).append((score_for_sort, idx))
+
+        for window_idx, candidates in per_window.items():
+            limit_value = window_spike_limits[window_idx]
+            if limit_value is None:
+                continue
+            limit_int = int(limit_value)
+            if limit_int < 0:
+                limit_int = 0
+            if limit_int == 0:
+                for _, idx in candidates:
+                    keep.discard(idx)
+                continue
+            ordered = sorted(
+                candidates,
+                key=lambda item: (item[0], -item[1]),
+                reverse=True,
+            )
+            allowed = {idx for _, idx in ordered[:limit_int]}
+            for _, idx in candidates:
+                if idx not in allowed:
+                    keep.discard(idx)
+
+        refined_sorted = [idx for idx in refined_sorted if idx in keep]
 
     return refined_sorted
 

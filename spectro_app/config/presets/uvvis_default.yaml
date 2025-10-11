@@ -13,6 +13,7 @@ params:
       helios:
         - min_nm: 340.0
           max_nm: 360.0
+          spikes: 1
   qc:
     quiet_window:
       min: 850.0
