@@ -182,6 +182,17 @@ def test_correct_joins_records_channel():
     assert np.allclose(channels["joined"], corrected.intensity)
 
 
+def test_despike_preserves_leading_slope_with_joins():
+    wl = np.linspace(200.0, 400.0, 60)
+    intensity = np.exp(-np.linspace(0.0, 5.0, wl.size))
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(spec, window=10, join_indices=[30])
+
+    assert np.allclose(despiked.intensity[:5], intensity[:5])
+    assert np.allclose(np.diff(despiked.intensity[:5]), np.diff(intensity[:5]))
+
+
 def test_preprocess_join_correction_emits_channel_without_detected_joins(monkeypatch):
     plugin = UvVisPlugin()
     wl = np.linspace(400, 420, 11)
