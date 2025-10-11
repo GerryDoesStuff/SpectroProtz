@@ -677,22 +677,32 @@ def detect_joins(
             if not np.isfinite(computed) or computed <= 0:
                 threshold = peak
             elif peak <= computed:
-                fallback_threshold = None
-                for factor in (5.0, 4.0, 3.0, 2.5, 2.0, 1.5, 1.0):
-                    candidate = median + factor * scale
-                    if np.isfinite(candidate) and 0 < candidate < peak:
-                        fallback_threshold = candidate
-                        break
-                if fallback_threshold is None:
-                    ratio = abs(mad / peak) if peak else float("inf")
-                    if ratio < 0.25:
+                positive_scores = np.sort(
+                    candidate_scores[
+                        np.isfinite(candidate_scores) & (candidate_scores > 0)
+                    ]
+                )
+                if positive_scores.size == 0:
+                    return []
+                below_peak = positive_scores[positive_scores < peak]
+                if below_peak.size == 0:
+                    threshold = peak * 0.99
+                else:
+                    max_below = float(np.nanmax(below_peak))
+                    if not np.isfinite(max_below) or max_below <= 0:
+                        max_below = peak * 0.5
+                    separation_ratio = max_below / peak if peak else 1.0
+                    if separation_ratio > 0.999:
                         return []
-                    percentile = float(np.nanpercentile(candidate_scores, 95))
-                    if np.isfinite(percentile) and 0 < percentile < peak:
-                        fallback_threshold = percentile
-                    elif peak > 0:
-                        fallback_threshold = peak * 0.99
-                threshold = fallback_threshold if fallback_threshold is not None else peak
+                    percentile = float(np.nanpercentile(below_peak, 97.5))
+                    if not np.isfinite(percentile) or percentile <= 0:
+                        percentile = max_below
+                    threshold_candidate = min(percentile, max_below)
+                    if not np.isfinite(threshold_candidate) or threshold_candidate <= 0:
+                        threshold_candidate = max_below
+                    threshold = min(threshold_candidate, peak * 0.99)
+                    if not np.isfinite(threshold) or threshold <= 0:
+                        threshold = max_below if max_below > 0 else peak * 0.99
             else:
                 threshold = computed
     else:

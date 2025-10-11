@@ -682,6 +682,25 @@ def test_detect_joins_auto_threshold_retains_multiple_join_candidates():
     assert np.allclose(join_wavelengths, expected_wavelengths, atol=3 * (wl[1] - wl[0]))
 
 
+def test_detect_joins_auto_threshold_handles_windowed_mixed_magnitudes():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 320.0] += 0.6
+    intensity[wl >= 350.0] += 3.0
+
+    windows = [
+        {"min_nm": 318.0, "max_nm": 322.0},
+        {"min_nm": 350.5, "max_nm": 352.0},
+    ]
+
+    joins = pipeline.detect_joins(wl, intensity, window=5, windows=windows)
+
+    assert len(joins) == 2
+    join_wavelengths = np.sort(wl[np.asarray(joins, dtype=int)])
+    expected_wavelengths = np.array([320.0, 350.0])
+    assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
+
+
 def test_detect_joins_visits_all_windows():
     wl = np.linspace(300.0, 400.0, 201)
     intensity = np.zeros_like(wl)
