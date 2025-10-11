@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -615,6 +615,7 @@ def detect_joins(
         scores[idx] = abs(delta)
 
     valid_positions = np.where(np.isfinite(scores))[0]
+    window_masks: list[np.ndarray] = []
     if windows is not None:
         bounds = normalise_join_windows(windows)
         if not bounds:
@@ -629,8 +630,10 @@ def detect_joins(
             lo = entry.get("lower_nm")
             hi = entry.get("upper_nm")
             if lo is None and hi is None:
-                mask |= np.isfinite(wl)
-                break
+                window_condition = np.isfinite(wl)
+                mask |= window_condition
+                window_masks.append(window_condition)
+                continue
             lo_val = float(lo) if lo is not None else None
             hi_val = float(hi) if hi is not None else None
             if lo_val is not None and hi_val is not None and lo_val > hi_val:
@@ -641,6 +644,7 @@ def detect_joins(
             if hi_val is not None:
                 window_condition &= wl <= hi_val
             mask |= window_condition
+            window_masks.append(window_condition)
         mask &= np.isfinite(wl)
         if not np.any(mask):
             return []
@@ -648,50 +652,49 @@ def detect_joins(
     if valid_positions.size == 0:
         return []
 
-    candidate_scores = scores[valid_positions]
-    peak_pos = None
-    if candidate_scores.size:
+    def _auto_threshold(span_positions: np.ndarray, span_scores: np.ndarray) -> float | None:
+        if span_scores.size == 0:
+            return None
         try:
-            peak_index = int(np.nanargmax(candidate_scores))
+            peak_index = int(np.nanargmax(span_scores))
         except ValueError:
-            peak_index = None
-        if peak_index is not None and 0 <= peak_index < valid_positions.size:
-            peak_pos = int(valid_positions[peak_index])
-    if threshold is None:
-        median = float(np.nanmedian(candidate_scores))
-        mad = float(np.nanmedian(np.abs(candidate_scores - median)))
-        peak = float(np.nanmax(candidate_scores))
+            return None
+        if peak_index < 0 or peak_index >= span_positions.size:
+            return None
+        peak_pos = int(span_positions[peak_index])
+        median = float(np.nanmedian(span_scores))
+        mad = float(np.nanmedian(np.abs(span_scores - median)))
+        peak = float(np.nanmax(span_scores))
         if not np.isfinite(peak) or peak <= 0:
-            return []
+            return None
         exclusion_radius = max(raw_window, half_window)
         original_positive_scores = np.sort(
-            candidate_scores[np.isfinite(candidate_scores) & (candidate_scores > 0)]
+            span_scores[np.isfinite(span_scores) & (span_scores > 0)]
         )
 
         if not np.isfinite(mad) or mad == 0:
-            positive_mask = np.isfinite(candidate_scores) & (candidate_scores > 0)
-            if peak_pos is not None:
-                proximity_mask = np.abs(valid_positions - peak_pos) < exclusion_radius
-                positive_mask &= ~proximity_mask
-            positive_scores = np.sort(candidate_scores[positive_mask])
+            positive_mask = np.isfinite(span_scores) & (span_scores > 0)
+            proximity_mask = np.abs(span_positions - peak_pos) < exclusion_radius
+            positive_mask &= ~proximity_mask
+            positive_scores = np.sort(span_scores[positive_mask])
             if positive_scores.size == 0:
-                threshold = peak * 0.5
+                threshold_value = peak * 0.5
             else:
                 unique_scores = np.unique(positive_scores)
                 if unique_scores.size == 1:
-                    threshold = unique_scores[0]
+                    threshold_value = unique_scores[0]
                 else:
                     candidate = unique_scores[-2]
                     if candidate <= 0:
                         candidate = unique_scores[-1] * 0.5
-                    threshold = candidate
-            if not np.isfinite(threshold) or threshold <= 0:
-                threshold = peak
+                    threshold_value = candidate
+            if not np.isfinite(threshold_value) or threshold_value <= 0:
+                threshold_value = peak
         else:
             scale = 1.4826 * mad
             computed = median + 6.0 * scale
             if not np.isfinite(computed) or computed <= 0:
-                threshold = peak
+                threshold_value = peak
             elif peak <= computed:
                 original_below_peak = original_positive_scores[
                     original_positive_scores < peak
@@ -704,128 +707,233 @@ def detect_joins(
                         and peak > 0
                         and original_max_below / peak > 0.999
                     ):
-                        return []
-                positive_mask = np.isfinite(candidate_scores) & (candidate_scores > 0)
-                if peak_pos is not None:
-                    proximity_mask = np.abs(valid_positions - peak_pos) < exclusion_radius
-                    positive_mask &= ~proximity_mask
-                positive_scores = np.sort(candidate_scores[positive_mask])
+                        return None
+                positive_mask = np.isfinite(span_scores) & (span_scores > 0)
+                proximity_mask = np.abs(span_positions - peak_pos) < exclusion_radius
+                positive_mask &= ~proximity_mask
+                positive_scores = np.sort(span_scores[positive_mask])
                 if positive_scores.size == 0:
-                    threshold = peak * 0.5
+                    threshold_value = peak * 0.5
                 else:
                     below_peak = positive_scores[positive_scores < peak]
                     if below_peak.size == 0:
-                        threshold = peak * 0.99
+                        threshold_value = peak * 0.99
                     else:
                         max_below = float(np.nanmax(below_peak))
                         if not np.isfinite(max_below) or max_below <= 0:
                             max_below = peak * 0.5
                         separation_ratio = max_below / peak if peak else 1.0
                         if separation_ratio > 0.999:
-                            return []
+                            return None
                         percentile = float(np.nanpercentile(below_peak, 97.5))
                         if not np.isfinite(percentile) or percentile <= 0:
                             percentile = max_below
                         threshold_candidate = min(percentile, max_below)
                         if not np.isfinite(threshold_candidate) or threshold_candidate <= 0:
                             threshold_candidate = max_below
-                        threshold = min(threshold_candidate, peak * 0.99)
-                        if not np.isfinite(threshold) or threshold <= 0:
-                            threshold = max_below if max_below > 0 else peak * 0.99
+                        threshold_value = min(threshold_candidate, peak * 0.99)
+                        if not np.isfinite(threshold_value) or threshold_value <= 0:
+                            threshold_value = max_below if max_below > 0 else peak * 0.99
             else:
-                threshold = computed
+                threshold_value = computed
+        if not np.isfinite(threshold_value) or threshold_value <= 0:
+            return None
+        return float(threshold_value)
+
+    candidate_info: Dict[int, Dict[str, Any]] = {}
+    explicit_threshold = float(threshold) if threshold is not None else None
+
+    def _record_candidate(idx: int, span_key: tuple[int, int], local_threshold: float) -> None:
+        if idx < 0 or idx >= n:
+            return
+        info = candidate_info.get(idx)
+        score = float(scores[idx]) if 0 <= idx < scores.size else float("nan")
+        if info is None:
+            info = {
+                "score": score,
+                "threshold": float(local_threshold),
+                "spans": {span_key},
+            }
+            candidate_info[idx] = info
+            return
+        if np.isfinite(score):
+            prev_score = info.get("score")
+            if prev_score is None or not np.isfinite(prev_score) or score > prev_score:
+                info["score"] = score
+        info_threshold = info.get("threshold")
+        if info_threshold is None or not np.isfinite(info_threshold) or local_threshold < info_threshold:
+            info["threshold"] = float(local_threshold)
+        spans: set[tuple[int, int]] = info.setdefault("spans", set())
+        spans.add(span_key)
+
+    def _binary_segment_span(
+        span_positions: np.ndarray,
+        start: int,
+        stop: int,
+        local_threshold: float,
+        span_key: tuple[int, int],
+    ) -> None:
+        if span_positions.size == 0:
+            return
+
+        def _binary_segment(start_idx: int, stop_idx: int) -> None:
+            segment_mask = (span_positions >= start_idx) & (span_positions < stop_idx)
+            segment_positions = span_positions[segment_mask]
+            if segment_positions.size == 0:
+                return
+            segment_scores = scores[segment_positions]
+            best_score = float(np.nanmax(segment_scores))
+            if not np.isfinite(best_score):
+                return
+            maxima_mask = np.isclose(segment_scores, best_score, rtol=0.0, atol=1e-12)
+            maxima_positions = segment_positions[maxima_mask]
+            if maxima_positions.size == 0:
+                return
+            center = (start_idx + stop_idx) / 2.0
+            representative_delta = float(deltas[int(maxima_positions[0])])
+            if np.isfinite(representative_delta) and representative_delta != 0:
+                median_idx = int(np.median(maxima_positions))
+                best_idx = median_idx
+            else:
+                best_idx = int(
+                    maxima_positions[int(np.argmin(np.abs(maxima_positions - center)))]
+                )
+            eligible_positions = [
+                int(pos)
+                for pos in maxima_positions
+                if pos - start_idx >= half_window and stop_idx - pos >= half_window
+            ]
+            if (
+                best_idx - start_idx < half_window or stop_idx - best_idx < half_window
+            ) and eligible_positions:
+                best_idx = int(np.median(eligible_positions))
+            if not np.isfinite(best_score) or best_score < local_threshold:
+                return
+            if best_idx - start_idx < half_window or stop_idx - best_idx < half_window:
+                return
+            delta_value = float(deltas[best_idx])
+            sign = 0
+            if np.isfinite(delta_value):
+                if delta_value > 0:
+                    sign = 1
+                elif delta_value < 0:
+                    sign = -1
+            left_idx = best_idx
+            while (
+                left_idx - 1 >= start_idx
+                and left_idx - 1 >= best_idx - (half_window - 1)
+                and scores[left_idx - 1] >= local_threshold
+                and (
+                    sign == 0
+                    or not np.isfinite(deltas[left_idx - 1])
+                    or np.sign(deltas[left_idx - 1]) == sign
+                )
+            ):
+                left_idx -= 1
+            right_idx = best_idx
+            max_right = best_idx + (half_window - 1)
+            while (
+                right_idx + 1 < stop_idx
+                and right_idx + 1 <= max_right
+                and scores[right_idx + 1] >= local_threshold
+                and (
+                    sign == 0
+                    or not np.isfinite(deltas[right_idx + 1])
+                    or np.sign(deltas[right_idx + 1]) == sign
+                )
+            ):
+                right_idx += 1
+            if sign > 0:
+                if raw_window <= 2:
+                    chosen = right_idx
+                elif raw_window == 3:
+                    chosen = left_idx
+                else:
+                    chosen = best_idx
+            elif sign < 0:
+                if raw_window <= 3:
+                    chosen = left_idx
+                else:
+                    chosen = best_idx
+            else:
+                chosen = int(round((left_idx + right_idx) / 2.0))
+            _record_candidate(chosen, span_key, local_threshold)
+            _binary_segment(start_idx, chosen)
+            _binary_segment(chosen + 1, stop_idx)
+
+        _binary_segment(start, stop)
+
+    if windows is None:
+        span_positions = valid_positions
+        if span_positions.size == 0:
+            return []
+        span_scores = scores[span_positions]
+        if explicit_threshold is None:
+            threshold_value = _auto_threshold(span_positions, span_scores)
+            if threshold_value is None:
+                return []
+        else:
+            threshold_value = explicit_threshold
+        span_start = half_window
+        span_stop = n - half_window + 1
+        if span_start < span_stop:
+            _binary_segment_span(
+                span_positions,
+                span_start,
+                span_stop,
+                threshold_value,
+                (0, 0),
+            )
     else:
-        threshold = float(threshold)
+        wl_valid_positions = valid_positions
+        for window_index, window_mask in enumerate(window_masks):
+            if window_mask.size != n:
+                continue
+            window_positions = wl_valid_positions[window_mask[wl_valid_positions]]
+            if window_positions.size == 0:
+                continue
+            splits = np.where(np.diff(window_positions) > 1)[0]
+            segment_starts = np.concatenate(([0], splits + 1))
+            segment_stops = np.concatenate((splits + 1, [window_positions.size]))
+            for segment_index, (seg_start, seg_stop) in enumerate(zip(segment_starts, segment_stops)):
+                span_positions = window_positions[seg_start:seg_stop]
+                if span_positions.size == 0:
+                    continue
+                span_scores = scores[span_positions]
+                if explicit_threshold is None:
+                    threshold_value = _auto_threshold(span_positions, span_scores)
+                    if threshold_value is None:
+                        continue
+                else:
+                    threshold_value = explicit_threshold
+                span_start = half_window
+                span_stop = n - half_window + 1
+                if span_start >= span_stop:
+                    continue
+                _binary_segment_span(
+                    span_positions,
+                    span_start,
+                    span_stop,
+                    threshold_value,
+                    (window_index, segment_index),
+                )
 
-    if not np.isfinite(threshold) or threshold <= 0:
+    if not candidate_info:
         return []
 
-    result: list[int] = []
-
-    def _binary_segment(start: int, stop: int) -> None:
-        segment_mask = (valid_positions >= start) & (valid_positions < stop)
-        segment_positions = valid_positions[segment_mask]
-        if segment_positions.size == 0:
-            return
-        segment_scores = scores[segment_positions]
-        best_score = float(np.nanmax(segment_scores))
-        if not np.isfinite(best_score):
-            return
-        maxima_mask = np.isclose(segment_scores, best_score, rtol=0.0, atol=1e-12)
-        maxima_positions = segment_positions[maxima_mask]
-        if maxima_positions.size == 0:
-            return
-        center = (start + stop) / 2.0
-        representative_delta = float(deltas[int(maxima_positions[0])])
-        if np.isfinite(representative_delta) and representative_delta != 0:
-            median_idx = int(np.median(maxima_positions))
-            best_idx = median_idx
-        else:
-            best_idx = int(maxima_positions[int(np.argmin(np.abs(maxima_positions - center)))])
-        eligible_positions = [
-            int(pos)
-            for pos in maxima_positions
-            if pos - start >= half_window and stop - pos >= half_window
-        ]
-        if (best_idx - start < half_window or stop - best_idx < half_window) and eligible_positions:
-            best_idx = int(np.median(eligible_positions))
-        if not np.isfinite(best_score) or best_score < threshold:
-            return
-        if best_idx - start < half_window or stop - best_idx < half_window:
-            return
-        delta_value = float(deltas[best_idx])
-        sign = 0
-        if np.isfinite(delta_value):
-            if delta_value > 0:
-                sign = 1
-            elif delta_value < 0:
-                sign = -1
-        left_idx = best_idx
-        while (
-            left_idx - 1 >= start
-            and left_idx - 1 >= best_idx - (half_window - 1)
-            and scores[left_idx - 1] >= threshold
-            and (sign == 0 or not np.isfinite(deltas[left_idx - 1]) or np.sign(deltas[left_idx - 1]) == sign)
-        ):
-            left_idx -= 1
-        right_idx = best_idx
-        max_right = best_idx + (half_window - 1)
-        while (
-            right_idx + 1 < stop
-            and right_idx + 1 <= max_right
-            and scores[right_idx + 1] >= threshold
-            and (sign == 0 or not np.isfinite(deltas[right_idx + 1]) or np.sign(deltas[right_idx + 1]) == sign)
-        ):
-            right_idx += 1
-        if sign > 0:
-            if raw_window <= 2:
-                chosen = right_idx
-            elif raw_window == 3:
-                chosen = left_idx
-            else:
-                chosen = best_idx
-        elif sign < 0:
-            if raw_window <= 3:
-                chosen = left_idx
-            else:
-                chosen = best_idx
-        else:
-            chosen = int(round((left_idx + right_idx) / 2.0))
-        result.append(chosen)
-        _binary_segment(start, chosen)
-        _binary_segment(chosen + 1, stop)
-
-    _binary_segment(half_window, n - half_window + 1)
-
-    if not result:
-        return []
-
-    result = sorted(set(idx for idx in result if half_window <= idx < n))
+    candidate_indices = sorted(
+        idx for idx in candidate_info.keys() if half_window <= idx < n
+    )
     filtered: list[int] = []
     min_spacing = max(1, raw_window)
-    for idx in result:
+    for idx in candidate_indices:
         if filtered and idx - filtered[-1] < min_spacing:
             prev = filtered[-1]
+            current_spans = candidate_info[idx]["spans"]
+            previous_spans = candidate_info[prev]["spans"]
+            if current_spans.isdisjoint(previous_spans):
+                filtered.append(idx)
+                continue
             if scores[idx] > scores[prev]:
                 filtered[-1] = idx
             continue
@@ -837,6 +945,8 @@ def detect_joins(
     diffs = np.abs(np.diff(y))
     refined: list[int] = []
     refined_source_scores: Dict[int, float] = {}
+    refined_thresholds: Dict[int, float] = {}
+    refined_span_map: Dict[int, set[tuple[int, int]]] = {}
 
     def _update_refined_score(index: int, score: float) -> None:
         existing = refined_source_scores.get(index)
@@ -850,13 +960,24 @@ def detect_joins(
         refined_source_scores[index] = score
 
     for idx in filtered:
+        info = candidate_info[idx]
+        local_threshold = float(info.get("threshold", float("nan")))
+        span_ids = set(info.get("spans", set()))
+        candidate_score = float(info.get("score", float("nan")))
         lo = max(1, idx - half_window)
         hi = min(n - 1, idx + half_window)
         window_diffs = diffs[lo - 1 : hi]
         if window_diffs.size == 0:
             refined.append(idx)
             if 0 <= idx < scores.size:
-                _update_refined_score(idx, float(scores[idx]))
+                _update_refined_score(idx, candidate_score)
+                refined_thresholds[idx] = (
+                    local_threshold
+                    if np.isfinite(local_threshold)
+                    else refined_thresholds.get(idx, local_threshold)
+                )
+                existing_spans = refined_span_map.setdefault(idx, set())
+                existing_spans.update(span_ids)
             continue
         rel = int(np.nanargmax(window_diffs))
         refined_idx = lo - 1 + rel + 1
@@ -868,10 +989,19 @@ def detect_joins(
                 refined_idx = idx
         refined.append(refined_idx)
         if 0 <= idx < scores.size:
-            _update_refined_score(refined_idx, float(scores[idx]))
+            _update_refined_score(refined_idx, candidate_score)
+            prev_threshold = refined_thresholds.get(refined_idx)
+            if prev_threshold is None or not np.isfinite(prev_threshold) or (
+                np.isfinite(local_threshold) and local_threshold < prev_threshold
+            ):
+                refined_thresholds[refined_idx] = local_threshold
+            existing_spans = refined_span_map.setdefault(refined_idx, set())
+            existing_spans.update(span_ids)
 
     refined_sorted: list[int] = []
     final_refined_scores: Dict[int, float] = {}
+    final_refined_thresholds: Dict[int, float] = {}
+    final_refined_spans: Dict[int, set[tuple[int, int]]] = {}
 
     def _combine_scores(first: float | None, second: float | None) -> float | None:
         if first is None or not np.isfinite(first):
@@ -884,6 +1014,14 @@ def detect_joins(
         if 0 < idx < n:
             if refined_sorted and idx - refined_sorted[-1] < min_spacing:
                 prev_idx = refined_sorted[-1]
+                prev_spans = final_refined_spans.get(prev_idx, set())
+                curr_spans = refined_span_map.get(idx, set())
+                if prev_spans and curr_spans and prev_spans.isdisjoint(curr_spans):
+                    refined_sorted.append(idx)
+                    final_refined_scores[idx] = refined_source_scores.get(idx)
+                    final_refined_thresholds[idx] = refined_thresholds.get(idx)
+                    final_refined_spans[idx] = set(curr_spans)
+                    continue
                 prev_diff = diffs[prev_idx - 1] if 0 < prev_idx <= diffs.size else float("nan")
                 curr_diff = diffs[idx - 1] if 0 < idx <= diffs.size else float("nan")
                 prev_diff_val = np.nan_to_num(prev_diff, nan=float("-inf"))
@@ -892,12 +1030,35 @@ def detect_joins(
                     previous_score = final_refined_scores.pop(prev_idx, refined_source_scores.get(prev_idx))
                     refined_sorted[-1] = idx
                     final_refined_scores[idx] = _combine_scores(previous_score, refined_source_scores.get(idx))
+                    previous_threshold = final_refined_thresholds.pop(prev_idx, refined_thresholds.get(prev_idx))
+                    curr_threshold = refined_thresholds.get(idx)
+                    thresholds = [t for t in (previous_threshold, curr_threshold) if t is not None]
+                    if thresholds:
+                        final_refined_thresholds[idx] = min(
+                            float(t) for t in thresholds if np.isfinite(float(t))
+                        )
+                    else:
+                        final_refined_thresholds[idx] = curr_threshold
+                    combined_spans = refined_span_map.get(idx, set()).union(
+                        final_refined_spans.get(prev_idx, set())
+                    )
+                    final_refined_spans[idx] = combined_spans
                 else:
                     previous_score = final_refined_scores.get(prev_idx, refined_source_scores.get(prev_idx))
                     final_refined_scores[prev_idx] = _combine_scores(previous_score, refined_source_scores.get(idx))
+                    prev_threshold = final_refined_thresholds.get(prev_idx)
+                    candidate_threshold = refined_thresholds.get(idx)
+                    if candidate_threshold is not None and np.isfinite(candidate_threshold):
+                        if prev_threshold is None or not np.isfinite(prev_threshold) or candidate_threshold < prev_threshold:
+                            final_refined_thresholds[prev_idx] = candidate_threshold
+                    final_refined_spans.setdefault(prev_idx, set()).update(
+                        refined_span_map.get(idx, set())
+                    )
                 continue
             refined_sorted.append(idx)
             final_refined_scores[idx] = refined_source_scores.get(idx)
+            final_refined_thresholds[idx] = refined_thresholds.get(idx)
+            final_refined_spans[idx] = set(refined_span_map.get(idx, set()))
 
     if refined_sorted:
         filtered_candidates: list[int] = []
@@ -908,7 +1069,12 @@ def detect_joins(
             score = float(scores[idx])
             if stored_score is not None and np.isfinite(stored_score):
                 score = float(stored_score)
-            if not np.isfinite(score) or score >= threshold:
+            local_threshold = final_refined_thresholds.get(idx)
+            if local_threshold is None or not np.isfinite(local_threshold):
+                local_threshold = explicit_threshold
+            if local_threshold is None or not np.isfinite(local_threshold):
+                local_threshold = 0.0
+            if not np.isfinite(score) or score >= local_threshold:
                 filtered_candidates.append(idx)
         refined_sorted = filtered_candidates
 
