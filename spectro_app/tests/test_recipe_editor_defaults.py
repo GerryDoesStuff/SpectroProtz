@@ -31,6 +31,28 @@ def test_recipe_editor_default_blank_flags(qt_app):
         qt_app.processEvents()
 
 
+def test_join_window_spikes_column_defaults(qt_app):
+    dock = RecipeEditorDock()
+    try:
+        assert dock.join_windows_table.columnCount() == 3
+        headers = [
+            dock.join_windows_table.horizontalHeaderItem(i).text()
+            for i in range(dock.join_windows_table.columnCount())
+        ]
+        assert headers == ["Min (nm)", "Max (nm)", "Spikes"]
+        dock.join_enable.setChecked(True)
+        qt_app.processEvents()
+        dock.join_windows_add_row.click()
+        qt_app.processEvents()
+        assert dock.join_windows_table.rowCount() == 1
+        spikes_widget = dock.join_windows_table.cellWidget(0, 2)
+        assert isinstance(spikes_widget, QtWidgets.QSpinBox)
+        assert spikes_widget.value() == 1
+    finally:
+        dock.deleteLater()
+        qt_app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("checkbox_attr", "widget_attrs", "expect_enabled_when_checked"),
     [

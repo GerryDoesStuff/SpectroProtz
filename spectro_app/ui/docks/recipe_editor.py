@@ -206,11 +206,16 @@ class RecipeEditorDock(QDockWidget):
 
         join_windows_layout.addLayout(join_windows_scope_row)
 
-        self.join_windows_table = QTableWidget(0, 2)
-        self.join_windows_table.setHorizontalHeaderLabels(["Min (nm)", "Max (nm)"])
+        self.join_windows_table = QTableWidget(0, 3)
+        self.join_windows_table.setHorizontalHeaderLabels([
+            "Min (nm)",
+            "Max (nm)",
+            "Spikes",
+        ])
         header = self.join_windows_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.join_windows_table.verticalHeader().setVisible(False)
         self.join_windows_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
@@ -814,10 +819,14 @@ class RecipeEditorDock(QDockWidget):
         for entry in value:
             if not isinstance(entry, Mapping):
                 continue
+            spikes_value = entry.get("spikes")
+            spikes_text = self._format_optional(spikes_value)
+            spikes_text = spikes_text if spikes_text else "1"
             rows.append(
                 {
                     "min": self._format_optional(entry.get("min_nm")),
                     "max": self._format_optional(entry.get("max_nm")),
+                    "spikes": spikes_text,
                 }
             )
         return rows
@@ -964,18 +973,26 @@ class RecipeEditorDock(QDockWidget):
             self.join_windows_table.setRowCount(0)
             rows = self._join_windows_store.get(key, [])
             for row in rows:
-                self._insert_join_window_row(row.get("min", ""), row.get("max", ""))
+                self._insert_join_window_row(
+                    row.get("min", ""),
+                    row.get("max", ""),
+                    row.get("spikes", ""),
+                )
         finally:
             self._join_windows_loading = False
         self._update_join_window_buttons()
 
-    def _insert_join_window_row(self, min_text: str = "", max_text: str = "") -> None:
+    def _insert_join_window_row(
+        self, min_text: str = "", max_text: str = "", spikes_value: str | int = ""
+    ) -> None:
         row_index = self.join_windows_table.rowCount()
         self.join_windows_table.insertRow(row_index)
         min_field = self._create_join_window_field("Min (nm)", min_text)
         max_field = self._create_join_window_field("Max (nm)", max_text)
+        spikes_field = self._create_join_window_spikes_field(spikes_value)
         self.join_windows_table.setCellWidget(row_index, 0, min_field)
         self.join_windows_table.setCellWidget(row_index, 1, max_field)
+        self.join_windows_table.setCellWidget(row_index, 2, spikes_field)
 
     def _create_join_window_field(self, placeholder: str, text: str) -> QLineEdit:
         field = QLineEdit()
@@ -989,7 +1006,35 @@ class RecipeEditorDock(QDockWidget):
         field.textChanged.connect(self._on_join_window_value_changed)
         return field
 
+    def _create_join_window_spikes_field(
+        self, value: str | int | float | None
+    ) -> QSpinBox:
+        field = QSpinBox()
+        field.setRange(1, 999)
+        if isinstance(value, (int, float)):
+            int_value = int(value)
+        else:
+            text_value = str(value).strip() if value not in (None, "") else ""
+            if text_value:
+                try:
+                    int_value = int(text_value)
+                except ValueError:
+                    int_value = 1
+            else:
+                int_value = 1
+        if int_value < 1:
+            int_value = 1
+        field.setValue(int_value)
+        field.valueChanged.connect(self._on_join_window_spikes_changed)
+        return field
+
     def _on_join_window_value_changed(self, *_):
+        if self._join_windows_loading:
+            return
+        self._save_current_join_windows()
+        self._update_model_from_ui()
+
+    def _on_join_window_spikes_changed(self, *_):
         if self._join_windows_loading:
             return
         self._save_current_join_windows()
@@ -1003,9 +1048,14 @@ class RecipeEditorDock(QDockWidget):
         for index in range(self.join_windows_table.rowCount()):
             min_widget = self.join_windows_table.cellWidget(index, 0)
             max_widget = self.join_windows_table.cellWidget(index, 1)
+            spikes_widget = self.join_windows_table.cellWidget(index, 2)
             min_text = min_widget.text().strip() if isinstance(min_widget, QLineEdit) else ""
             max_text = max_widget.text().strip() if isinstance(max_widget, QLineEdit) else ""
-            rows.append({"min": min_text, "max": max_text})
+            if isinstance(spikes_widget, QSpinBox):
+                spikes_value = str(max(1, int(spikes_widget.value())))
+            else:
+                spikes_value = "1"
+            rows.append({"min": min_text, "max": max_text, "spikes": spikes_value})
         self._join_windows_store[key] = rows
 
     def _on_join_windows_instrument_changed(self):
@@ -1123,12 +1173,13 @@ class RecipeEditorDock(QDockWidget):
 
     def _build_join_windows_payload(self) -> tuple[object | None, list[str]]:
         errors: list[str] = []
-        cleaned: dict[str, list[dict[str, float]]] = {}
+        cleaned: dict[str, list[dict[str, float | int]]] = {}
         for key, rows in self._join_windows_store.items():
-            cleaned_rows: list[dict[str, float]] = []
+            cleaned_rows: list[dict[str, float | int]] = []
             for index, row in enumerate(rows, start=1):
                 min_text = str(row.get("min", "")).strip()
                 max_text = str(row.get("max", "")).strip()
+                spikes_text = str(row.get("spikes", "")).strip()
                 if not min_text and not max_text:
                     continue
                 if not min_text or not max_text:
@@ -1161,7 +1212,26 @@ class RecipeEditorDock(QDockWidget):
                         f"Join window min must be ≤ max for {label} row {index}"
                     )
                     continue
-                cleaned_rows.append({"min_nm": min_float, "max_nm": max_float})
+                if not spikes_text:
+                    spikes_int = 1
+                else:
+                    try:
+                        spikes_int = int(spikes_text)
+                    except (TypeError, ValueError):
+                        label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                        errors.append(
+                            f"Join window spikes for {label} row {index} must be a positive integer"
+                        )
+                        continue
+                    if spikes_int < 1:
+                        label = "Global" if key == self._JOIN_WINDOWS_GLOBAL_KEY else key
+                        errors.append(
+                            f"Join window spikes for {label} row {index} must be a positive integer"
+                        )
+                        continue
+                cleaned_rows.append(
+                    {"min_nm": min_float, "max_nm": max_float, "spikes": spikes_int}
+                )
             if cleaned_rows:
                 cleaned[key] = cleaned_rows
         global_rows = cleaned.get(self._JOIN_WINDOWS_GLOBAL_KEY, [])
@@ -1171,7 +1241,7 @@ class RecipeEditorDock(QDockWidget):
             if key != self._JOIN_WINDOWS_GLOBAL_KEY and key in cleaned
         ]
         if non_global_keys:
-            payload: dict[str, list[dict[str, float]]] = {}
+            payload: dict[str, list[dict[str, float | int]]] = {}
             if global_rows:
                 payload["default"] = global_rows
             for key in non_global_keys:
