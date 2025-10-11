@@ -710,6 +710,25 @@ def test_detect_joins_change_point_localises_join():
     assert joins == [30]
 
 
+def test_detect_joins_retains_strong_source_score_after_refinement():
+    wl = np.linspace(400.0, 700.0, 61)
+    intensity = np.zeros_like(wl)
+    intensity[28:31] = 6.0
+    intensity[32:] = 10.0
+
+    joins = pipeline.detect_joins(wl, intensity, window=5, threshold=6.0)
+
+    assert joins == [32]
+
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+    corrected = pipeline.correct_joins(spec, joins, window=5)
+
+    original_tail = intensity[32:]
+    corrected_tail = corrected.intensity[32:]
+    assert not np.allclose(corrected_tail, original_tail)
+    assert corrected_tail.mean() == pytest.approx(6.0)
+
+
 def test_correct_joins_clamps_offsets_with_bounds():
     wl = np.linspace(400, 500, 21)
     intensity = np.concatenate([np.zeros(10), np.ones(11) * 10.0])

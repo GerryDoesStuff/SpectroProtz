@@ -770,12 +770,27 @@ def detect_joins(
 
     diffs = np.abs(np.diff(y))
     refined: list[int] = []
+    refined_source_scores: Dict[int, float] = {}
+
+    def _update_refined_score(index: int, score: float) -> None:
+        existing = refined_source_scores.get(index)
+        if existing is None:
+            refined_source_scores[index] = score
+            return
+        if np.isfinite(existing):
+            if np.isfinite(score) and score > existing:
+                refined_source_scores[index] = score
+            return
+        refined_source_scores[index] = score
+
     for idx in filtered:
         lo = max(1, idx - half_window)
         hi = min(n - 1, idx + half_window)
         window_diffs = diffs[lo - 1 : hi]
         if window_diffs.size == 0:
             refined.append(idx)
+            if 0 <= idx < scores.size:
+                _update_refined_score(idx, float(scores[idx]))
             continue
         rel = int(np.nanargmax(window_diffs))
         refined_idx = lo - 1 + rel + 1
@@ -786,22 +801,47 @@ def detect_joins(
             elif delta_value < 0 and refined_idx > idx:
                 refined_idx = idx
         refined.append(refined_idx)
+        if 0 <= idx < scores.size:
+            _update_refined_score(refined_idx, float(scores[idx]))
 
     refined_sorted: list[int] = []
+    final_refined_scores: Dict[int, float] = {}
+
+    def _combine_scores(first: float | None, second: float | None) -> float | None:
+        if first is None or not np.isfinite(first):
+            return second
+        if second is None or not np.isfinite(second):
+            return first
+        return first if first >= second else second
+
     for idx in sorted(set(refined)):
         if 0 < idx < n:
             if refined_sorted and idx - refined_sorted[-1] < min_spacing:
-                if diffs[idx - 1] > diffs[refined_sorted[-1] - 1]:
+                prev_idx = refined_sorted[-1]
+                prev_diff = diffs[prev_idx - 1] if 0 < prev_idx <= diffs.size else float("nan")
+                curr_diff = diffs[idx - 1] if 0 < idx <= diffs.size else float("nan")
+                prev_diff_val = np.nan_to_num(prev_diff, nan=float("-inf"))
+                curr_diff_val = np.nan_to_num(curr_diff, nan=float("-inf"))
+                if curr_diff_val > prev_diff_val:
+                    previous_score = final_refined_scores.pop(prev_idx, refined_source_scores.get(prev_idx))
                     refined_sorted[-1] = idx
+                    final_refined_scores[idx] = _combine_scores(previous_score, refined_source_scores.get(idx))
+                else:
+                    previous_score = final_refined_scores.get(prev_idx, refined_source_scores.get(prev_idx))
+                    final_refined_scores[prev_idx] = _combine_scores(previous_score, refined_source_scores.get(idx))
                 continue
             refined_sorted.append(idx)
+            final_refined_scores[idx] = refined_source_scores.get(idx)
 
     if refined_sorted:
         filtered_candidates: list[int] = []
         for idx in refined_sorted:
             if idx >= scores.size:
                 continue
+            stored_score = final_refined_scores.get(idx)
             score = float(scores[idx])
+            if stored_score is not None and np.isfinite(stored_score):
+                score = float(stored_score)
             if not np.isfinite(score) or score >= threshold:
                 filtered_candidates.append(idx)
         refined_sorted = filtered_candidates
