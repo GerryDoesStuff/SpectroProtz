@@ -659,6 +659,29 @@ def test_detect_joins_keeps_all_peaks_above_threshold():
     assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
 
 
+def test_detect_joins_auto_threshold_retains_multiple_join_candidates():
+    wl = np.linspace(300.0, 500.0, 401)
+    intensity = np.zeros_like(wl)
+
+    first_join = 160
+    second_join = 260
+    ramp_width = 11
+    ramp1 = np.linspace(0.0, 6.0, ramp_width)
+    ramp1_start = first_join - ramp_width // 2
+    intensity[ramp1_start : ramp1_start + ramp_width] += ramp1
+    intensity[ramp1_start + ramp_width :] += 6.0
+    intensity[second_join:] += 3.0
+
+    joins = pipeline.detect_joins(wl, intensity, window=5)
+
+    assert len(joins) == 2
+    assert any(abs(idx - first_join) <= 3 for idx in joins)
+    assert any(abs(idx - second_join) <= 1 for idx in joins)
+    join_wavelengths = wl[np.asarray(sorted(joins), dtype=int)]
+    expected_wavelengths = np.array([wl[first_join], wl[second_join]])
+    assert np.allclose(join_wavelengths, expected_wavelengths, atol=3 * (wl[1] - wl[0]))
+
+
 def test_detect_joins_visits_all_windows():
     wl = np.linspace(300.0, 400.0, 201)
     intensity = np.zeros_like(wl)
