@@ -7,7 +7,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
-from scipy.signal import medfilt, savgol_filter
+from scipy.ndimage import median_filter
+from scipy.signal import savgol_filter
 from scipy.sparse.linalg import spsolve
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -1387,8 +1388,6 @@ def despike_spectrum(
     base_window = int(window)
     if base_window <= 1:
         base_window = 3
-    if base_window % 2 == 0:
-        base_window += 1
     if base_window < 3:
         return _final_spectrum(y.copy())
 
@@ -1399,10 +1398,10 @@ def despike_spectrum(
             return None
         eff = base_window
         if eff > length:
-            eff = length if length % 2 else length - 1
+            eff = length
         if eff < 3:
             return None
-        return eff
+        return int(eff)
 
     joins: list[int] = []
     if join_indices:
@@ -1413,7 +1412,7 @@ def despike_spectrum(
         if window_size is None:
             return _final_spectrum(y.copy())
 
-        baseline = medfilt(y, kernel_size=window_size)
+        baseline = median_filter(y, size=window_size, mode="nearest")
         residual = y - baseline
         mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
         if not np.isfinite(mad) or mad == 0:
@@ -1442,7 +1441,7 @@ def despike_spectrum(
         if seg_window is None:
             continue
 
-        baseline = medfilt(segment, kernel_size=seg_window)
+        baseline = median_filter(segment, size=seg_window, mode="nearest")
         residual = segment - baseline
         mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
         if np.isfinite(mad) and mad > 0:
