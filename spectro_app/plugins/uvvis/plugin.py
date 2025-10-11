@@ -86,7 +86,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         str, Sequence[Mapping[str, float | int | None]]
     ] = {
         "helios": (
-            {"min_nm": 340.0, "max_nm": 360.0},
+            {"min_nm": 340.0, "max_nm": 360.0, "spikes": 1},
         ),
     }
     DEFAULT_QC_QUIET_WINDOW_NM = (850.0, 900.0)

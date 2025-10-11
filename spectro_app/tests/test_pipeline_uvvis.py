@@ -659,6 +659,47 @@ def test_detect_joins_keeps_all_peaks_above_threshold():
     assert np.allclose(join_wavelengths, expected_wavelengths, atol=0.5)
 
 
+def test_detect_joins_short_circuits_when_threshold_unmet(monkeypatch):
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.linspace(0.0, 1.0, wl.size)
+
+    def fail_nanargmax(*args, **kwargs):
+        raise AssertionError("nanargmax should not be called when threshold is unattainable")
+
+    monkeypatch.setattr(pipeline.np, "nanargmax", fail_nanargmax)
+
+    joins = pipeline.detect_joins(wl, intensity, window=5, threshold=10.0)
+
+    assert joins == []
+
+
+def test_detect_joins_respects_window_spike_limits():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    intensity[wl >= 330.0] += 5.0
+    intensity[wl >= 360.0] += 9.0
+
+    limited = pipeline.detect_joins(
+        wl,
+        intensity,
+        window=3,
+        threshold=0.5,
+        windows=[{"min_nm": 330.0, "max_nm": 365.0, "spikes": 1}],
+    )
+
+    assert limited == [120]
+
+    expanded = pipeline.detect_joins(
+        wl,
+        intensity,
+        window=3,
+        threshold=0.5,
+        windows=[{"min_nm": 330.0, "max_nm": 365.0, "spikes": 2}],
+    )
+
+    assert sorted(expanded) == [60, 120]
+
+
 def test_detect_joins_auto_threshold_retains_multiple_join_candidates():
     wl = np.linspace(300.0, 500.0, 401)
     intensity = np.zeros_like(wl)

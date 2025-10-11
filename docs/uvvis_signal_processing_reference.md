@@ -42,10 +42,10 @@
 ## Join Detection and Correction
 
 ### `normalise_join_windows`
-- Reuses the anchor normaliser to produce explicit wavelength bounds that focus join detection on known overlap regions.
+- Canonicalises join windows into explicit wavelength bounds while preserving per-window `spikes` limits (defaulting to a single join per window).
 
 ### `detect_joins`
-- Computes rolling-median change scores, constrains candidates to configured windows, derives an adaptive MAD-based threshold, recursively segments to isolate peaks, and refines indices by local gradients and spacing rules.
+- Computes rolling-median change scores, constrains candidates to configured windows, short-circuits when an explicit threshold cannot be met, derives an adaptive MAD-based threshold, recursively segments to isolate peaks, refines indices by local gradients and spacing rules, and trims results to each window’s spike allowance.
 
 ### `correct_joins`
 - Measures pre/post window means, overlap errors, and robust median offsets around each detected join, clamps corrections to optional bounds, adjusts downstream samples, and logs raw/corrected segments plus rich diagnostics.
