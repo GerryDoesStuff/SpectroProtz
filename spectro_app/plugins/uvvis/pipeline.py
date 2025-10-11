@@ -747,7 +747,7 @@ def detect_joins(
             chosen = int(round((left_idx + right_idx) / 2.0))
         result.append(chosen)
         _binary_segment(start, chosen)
-        _binary_segment(chosen, stop)
+        _binary_segment(chosen + 1, stop)
 
     _binary_segment(half_window, n - half_window + 1)
 
