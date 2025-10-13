@@ -80,6 +80,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._single_window_size: int = 1
 
         self._total_spectra: int = 0
+        self._smoothed_fallback_active: bool = False
 
         self._build_ui()
 
@@ -204,6 +205,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         stage_datasets: Dict[str, List[_StageDataset]] = {key: [] for key in self.STAGE_LABELS}
         self._stage_datasets = {key: [] for key in self.STAGE_LABELS}
         smoothed_fallbacks: List[_StageDataset] = []
+        self._smoothed_fallback_active = False
         self._curve_items.clear()
         self._visible_stages.clear()
         self._color_map.clear()
@@ -264,6 +266,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
         if smoothed_fallbacks:
             stage_datasets.setdefault("smoothed", []).extend(smoothed_fallbacks)
+            self._smoothed_fallback_active = True
 
         has_usable_stage_data = any(stage_datasets[stage] for stage in self.STAGE_LABELS)
 
@@ -272,6 +275,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._sample_labels = []
             self._total_spectra = 0
             self._single_mode = False
+            self._smoothed_fallback_active = False
             for checkbox in self._stage_controls.values():
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
@@ -320,10 +324,18 @@ class SpectraPlotWidget(QtWidgets.QWidget):
     def _choose_default_stage(self, available: Optional[Set[str]] = None) -> Optional[str]:
         if available is None:
             available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
+        candidates = set(available)
+        if (
+            self._smoothed_fallback_active
+            and "smoothed" in candidates
+            and any(stage != "smoothed" for stage in candidates)
+        ):
+            candidates.discard("smoothed")
+
         for stage in self.DEFAULT_STAGE_PRIORITY:
-            if stage in available:
+            if stage in candidates:
                 return stage
-        return next(iter(available), None)
+        return next(iter(candidates), None)
 
     def _collect_labels(self, stage_datasets: Dict[str, List[_StageDataset]]) -> List[str]:
         labels: List[str] = []
