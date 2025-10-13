@@ -1481,6 +1481,9 @@ def despike_spectrum(
                     if max_residual <= max(residual_tolerance, 1e-12):
                         candidate_mask = np.zeros(n, dtype=bool)
                     else:
+                        candidate_mask = abs_residual >= max_residual - 1e-12
+                        if np.count_nonzero(candidate_mask) >= n:
+                            candidate_mask = np.zeros(n, dtype=bool)
                         if not np.any(mask):
                             unmasked = abs_residual
                             if unmasked.size > 1:
@@ -1491,13 +1494,14 @@ def despike_spectrum(
                                 second_largest = 0.0
                             if second_largest <= max(residual_tolerance, 1e-12):
                                 second_largest = 0.0
-                            if second_largest > 0.0 and max_residual >= isolated_ratio * second_largest:
-                                candidate_mask = abs_residual >= max_residual - 1e-12
-                                if np.count_nonzero(candidate_mask) >= n:
-                                    candidate_mask = np.zeros(n, dtype=bool)
-                        candidate_mask = abs_residual >= max_residual - 1e-12
-                        if np.count_nonzero(candidate_mask) >= n:
-                            candidate_mask = np.zeros(n, dtype=bool)
+                            if not (
+                                second_largest > 0.0
+                                and max_residual >= isolated_ratio * second_largest
+                            ):
+                                candidate_mask = np.zeros(n, dtype=bool)
+                                if max_residual > max(residual_tolerance, 1e-12):
+                                    max_index = int(np.nanargmax(abs_residual))
+                                    candidate_mask[max_index] = True
                 else:
                     median_val = np.nanmedian(corrected)
                     deviation = np.abs(corrected - median_val)
