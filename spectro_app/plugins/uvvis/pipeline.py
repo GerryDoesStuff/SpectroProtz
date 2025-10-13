@@ -1415,6 +1415,8 @@ def despike_spectrum(
     isolation_ratio: float = 20.0,
     max_passes: int = 10,
     join_indices: Sequence[int] | None = None,
+    leading_padding: int = 0,
+    trailing_padding: int = 0,
 ) -> Spectrum:
     """Replace impulsive spikes using adaptive rolling baselines per segment.
 
@@ -1510,17 +1512,38 @@ def despike_spectrum(
             return float(med * 1.4826)
         return float(np.nanstd(finite_residual))
 
+    pad_leading = max(0, int(leading_padding))
+    pad_trailing = max(0, int(trailing_padding))
+
     for seg_start, seg_stop in zip(boundaries[:-1], boundaries[1:]):
         segment = corrected[seg_start:seg_stop]
+        original_segment = y[seg_start:seg_stop]
         seg_len = segment.size
         if seg_len < 3:
             continue
 
-        seg_baseline_window = _normalise_window(seg_len, baseline_window, base_window)
+        leading = min(pad_leading, seg_len)
+        trailing = min(pad_trailing, max(0, seg_len - leading))
+        work_start = leading
+        work_stop = seg_len - trailing
+        work_len = work_stop - work_start
+
+        if work_len < 3:
+            if leading:
+                segment[:leading] = original_segment[:leading]
+            if trailing:
+                segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
+            continue
+
+        seg_baseline_window = _normalise_window(work_len, baseline_window, base_window)
         if seg_baseline_window is None:
+            if leading:
+                segment[:leading] = original_segment[:leading]
+            if trailing:
+                segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
             continue
         seg_spread_window = _normalise_window(
-            seg_len,
+            work_len,
             spread_window,
             seg_baseline_window if baseline_window is not None else base_window,
         )
@@ -1528,10 +1551,12 @@ def despike_spectrum(
             seg_spread_window = seg_baseline_window
 
         seg_mask = np.zeros(seg_len, dtype=bool)
+        working = segment[work_start:work_stop]
+        working_mask = seg_mask[work_start:work_stop]
 
         for _ in range(int(max_passes)):
-            baseline = _rolling_baseline(segment, seg_baseline_window)
-            residual = segment - baseline
+            baseline = _rolling_baseline(working, seg_baseline_window)
+            residual = working - baseline
             spread = _rolling_spread(residual, seg_spread_window, method=spread_method)
             spread = np.asarray(spread, dtype=float)
 
@@ -1553,15 +1578,22 @@ def despike_spectrum(
                         if second <= 0 or max_residual >= isolation_ratio * second:
                             candidate_mask = abs_residual >= max_residual - 1e-12
                         else:
-                            candidate_mask = np.zeros(seg_len, dtype=bool)
+                            candidate_mask = np.zeros(work_len, dtype=bool)
                     else:
-                        candidate_mask = np.zeros(seg_len, dtype=bool)
+                        candidate_mask = np.zeros(work_len, dtype=bool)
 
-            if not np.any(candidate_mask & ~seg_mask):
+            if not np.any(candidate_mask & ~working_mask):
                 break
 
-            seg_mask |= candidate_mask
-            segment[candidate_mask] = baseline[candidate_mask]
+            working_mask |= candidate_mask
+            working[candidate_mask] = baseline[candidate_mask]
+
+        if leading:
+            segment[:leading] = original_segment[:leading]
+            seg_mask[:leading] = False
+        if trailing:
+            segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
+            seg_mask[seg_len - trailing :] = False
 
         overall_mask[seg_start:seg_stop] = seg_mask
 

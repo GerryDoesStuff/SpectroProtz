@@ -219,10 +219,13 @@ The preprocessing stage honours the following recipe keys:
 - **Despiking** – `despike.enabled`, `despike.zscore`, `despike.window`,
   `despike.baseline_window`, `despike.spread_window`,
   `despike.spread_method`, `despike.spread_epsilon`,
-  `despike.residual_floor`, `despike.max_passes` and `despike.isolation_ratio`
-  shape the adaptive spike remover. Start with the defaults (rolling median
-  baseline, MAD spread, five point window) and tighten the z-score or window
-  sizes when impulsive noise leaks through.【F:spectro_app/plugins/uvvis/plugin.py†L1015-L1042】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L260】
+  `despike.residual_floor`, `despike.max_passes`,
+  `despike.isolation_ratio`, `despike.leading_padding` and
+  `despike.trailing_padding` shape the adaptive spike remover. Start with the
+  defaults (rolling median baseline, MAD spread, five point window, zero
+  padding) and tighten the z-score or window sizes when impulsive noise leaks
+  through. Add padding when a steep slope or guard band at a detector boundary
+  should be left untouched.【F:spectro_app/plugins/uvvis/plugin.py†L1015-L1042】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L260】
 - **Baseline correction** – `baseline.method` selects `asls`, `rubberband` or
   `snip`. Combine with the parameters listed above; choose `asls` when gradual
   drift dominates, `rubberband` for broad curvature and `snip` for fluorescence
