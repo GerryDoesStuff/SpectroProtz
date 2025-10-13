@@ -19,6 +19,7 @@ __all__ = [
     "apply_baseline",
     "detect_joins",
     "correct_joins",
+    "normalise_exclusion_windows",
     "despike_spectrum",
     "smooth_spectrum",
     "average_replicates",
@@ -632,6 +633,83 @@ def normalise_join_windows(windows_cfg: object) -> List[Dict[str, float | int | 
                 "spikes": spikes_val,
             }
         )
+
+    return normalised
+
+
+def normalise_exclusion_windows(exclusions_cfg: object) -> List[Dict[str, float | None]]:
+    """Normalise spike exclusion window configuration into numeric bounds."""
+
+    if exclusions_cfg is None:
+        return []
+
+    windows_iterable: object
+    if isinstance(exclusions_cfg, Mapping):
+        if any(
+            key in exclusions_cfg
+            for key in ("min", "max", "min_nm", "max_nm", "lower", "upper", "lower_nm", "upper_nm")
+        ):
+            windows_iterable = [exclusions_cfg]
+        else:
+            windows_iterable = exclusions_cfg.get("windows")
+            if windows_iterable is None:
+                return []
+    else:
+        windows_iterable = exclusions_cfg
+
+    if not isinstance(windows_iterable, Sequence) or isinstance(windows_iterable, (str, bytes)):
+        return []
+
+    normalised: List[Dict[str, float | None]] = []
+    for entry in windows_iterable:
+        if entry is None:
+            continue
+
+        lower_val: float | None
+        upper_val: float | None
+
+        if isinstance(entry, Mapping):
+            lo = (
+                entry.get("min_nm")
+                if entry.get("min_nm") is not None
+                else entry.get("lower_nm")
+            )
+            if lo is None:
+                lo = entry.get("min")
+            if lo is None:
+                lo = entry.get("lower")
+            hi = (
+                entry.get("max_nm")
+                if entry.get("max_nm") is not None
+                else entry.get("upper_nm")
+            )
+            if hi is None:
+                hi = entry.get("max")
+            if hi is None:
+                hi = entry.get("upper")
+        elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)):
+            data = list(entry)
+            lo = data[0] if data else None
+            hi = data[1] if len(data) > 1 else None
+        else:
+            continue
+
+        try:
+            lower_val = float(lo) if lo is not None else None
+        except (TypeError, ValueError):
+            lower_val = None
+        try:
+            upper_val = float(hi) if hi is not None else None
+        except (TypeError, ValueError):
+            upper_val = None
+
+        if lower_val is not None and upper_val is not None and lower_val > upper_val:
+            lower_val, upper_val = upper_val, lower_val
+
+        if lower_val is None and upper_val is None:
+            continue
+
+        normalised.append({"lower_nm": lower_val, "upper_nm": upper_val})
 
     return normalised
 
@@ -1420,6 +1498,7 @@ def despike_spectrum(
     noise_scale_multiplier: float = 1.0,
     rng: np.random.Generator | None = None,
     rng_seed: int | np.random.SeedSequence | None = None,
+    exclusion_windows: Sequence[Mapping[str, float | None]] | Sequence[Sequence[float | None]] | None = None,
 ) -> Spectrum:
     """Replace impulsive spikes using adaptive rolling baselines.
 
@@ -1437,6 +1516,8 @@ def despike_spectrum(
     surrounding noise floor. ``noise_scale_multiplier`` can expand or shrink
     that perturbation and callers may provide ``rng`` or ``rng_seed`` to control
     reproducibility (both default to fresh ``default_rng`` draws when omitted).
+    Optional ``exclusion_windows`` (expressed as wavelength bounds) fence off
+    spectral regions that should be ignored by spike detection and replacement.
     """
 
     if noise_scale_multiplier < 0:
@@ -1450,6 +1531,7 @@ def despike_spectrum(
     else:
         noise_rng = rng
 
+    x = np.asarray(spec.wavelength, dtype=float)
     y = np.asarray(spec.intensity, dtype=float)
 
     def _final_spectrum(values: np.ndarray, *, mask: np.ndarray | None = None) -> Spectrum:
@@ -1491,6 +1573,42 @@ def despike_spectrum(
 
     corrected = y.copy()
     overall_mask = np.zeros(n, dtype=bool)
+
+    exclusion_mask = np.zeros(n, dtype=bool)
+    if exclusion_windows:
+        finite_wavelength = np.isfinite(x)
+        for entry in exclusion_windows:
+            lower_val: float | None = None
+            upper_val: float | None = None
+            if isinstance(entry, Mapping):
+                lo = entry.get("lower_nm")
+                if lo is None:
+                    lo = entry.get("min_nm")
+                hi = entry.get("upper_nm")
+                if hi is None:
+                    hi = entry.get("max_nm")
+            elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)):
+                data = list(entry)
+                lo = data[0] if data else None
+                hi = data[1] if len(data) > 1 else None
+            else:
+                continue
+            try:
+                lower_val = float(lo) if lo is not None else None
+            except (TypeError, ValueError):
+                lower_val = None
+            try:
+                upper_val = float(hi) if hi is not None else None
+            except (TypeError, ValueError):
+                upper_val = None
+            if lower_val is not None and upper_val is not None and lower_val > upper_val:
+                lower_val, upper_val = upper_val, lower_val
+            mask = finite_wavelength.copy()
+            if lower_val is not None:
+                mask &= x >= lower_val
+            if upper_val is not None:
+                mask &= x <= upper_val
+            exclusion_mask |= mask
 
     def _rolling_baseline(values: np.ndarray, size: int) -> np.ndarray:
         if size <= 1:
@@ -1561,6 +1679,7 @@ def despike_spectrum(
 
     working = corrected[work_start:work_stop]
     working_mask = overall_mask[work_start:work_stop]
+    working_exclusion = exclusion_mask[work_start:work_stop]
 
     for _ in range(int(max_passes)):
         baseline = _rolling_baseline(working, seg_baseline_window)
@@ -1570,6 +1689,8 @@ def despike_spectrum(
 
         valid_spread = spread > spread_epsilon
         candidate_mask = np.abs(residual) > float(zscore) * np.maximum(spread, spread_epsilon)
+        if working_exclusion.size:
+            candidate_mask &= ~working_exclusion
 
         if np.any(candidate_mask):
             newly_detected = candidate_mask & ~working_mask
@@ -1640,6 +1761,9 @@ def despike_spectrum(
                         candidate_mask = np.zeros(work_len, dtype=bool)
                 else:
                     candidate_mask = np.zeros(work_len, dtype=bool)
+
+        if working_exclusion.size:
+            candidate_mask &= ~working_exclusion
 
         newly_flagged = candidate_mask & ~working_mask
         if not np.any(newly_flagged):

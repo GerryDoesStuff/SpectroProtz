@@ -53,11 +53,60 @@ def test_join_window_spikes_column_defaults(qt_app):
         qt_app.processEvents()
 
 
+def test_despike_exclusion_roundtrip(qt_app):
+    dock = RecipeEditorDock()
+    try:
+        dock.despike_enable.setChecked(True)
+        qt_app.processEvents()
+        dock.despike_exclusions_add_row.click()
+        qt_app.processEvents()
+        dock.despike_exclusions_table.item(0, 0).setText("495")
+        dock.despike_exclusions_table.item(0, 1).setText("505")
+        dock.despike_exclusions_add_row.click()
+        qt_app.processEvents()
+        dock.despike_exclusions_table.item(1, 1).setText("420")
+        qt_app.processEvents()
+        dock._update_model_from_ui(force=True)
+        params = dock.recipe.params.get("despike", {})
+        exclusions = params.get("exclusions")
+        assert isinstance(exclusions, dict)
+        windows = exclusions.get("windows")
+        assert isinstance(windows, list)
+        assert windows and len(windows) == 2
+        first, second = windows
+        assert first.get("min_nm") == pytest.approx(495.0)
+        assert first.get("max_nm") == pytest.approx(505.0)
+        assert "min_nm" not in second or second.get("min_nm") is None
+        assert second.get("max_nm") == pytest.approx(420.0)
+
+        recipe_dict = dock.recipe_dict()
+        dock.set_recipe(recipe_dict)
+        qt_app.processEvents()
+        assert dock.despike_exclusions_table.rowCount() == 2
+        first_min = dock.despike_exclusions_table.item(0, 0)
+        first_max = dock.despike_exclusions_table.item(0, 1)
+        second_min = dock.despike_exclusions_table.item(1, 0)
+        second_max = dock.despike_exclusions_table.item(1, 1)
+        assert first_min is not None and float(first_min.text()) == pytest.approx(495.0)
+        assert first_max is not None and float(first_max.text()) == pytest.approx(505.0)
+        assert second_min is not None and second_min.text() == ""
+        assert second_max is not None and float(second_max.text()) == pytest.approx(420.0)
+    finally:
+        dock.deleteLater()
+        qt_app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("checkbox_attr", "widget_attrs", "expect_enabled_when_checked"),
     [
         ("smooth_enable", ["smooth_window", "smooth_poly"], True),
         ("despike_enable", ["despike_window", "despike_zscore"], True),
+        (
+            "despike_enable",
+            ["despike_exclusions_table", "despike_exclusions_add_row"],
+            True,
+        ),
+        ("despike_enable", ["despike_exclusions_remove_row"], False),
         (
             "join_enable",
             [

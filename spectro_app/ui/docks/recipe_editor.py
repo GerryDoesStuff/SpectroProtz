@@ -94,6 +94,7 @@ class RecipeEditorDock(QDockWidget):
         self._join_windows_loading = False
         self._join_windows_errors: list[str] = []
         self._baseline_anchor_errors: list[str] = []
+        self._despike_exclusion_errors: list[str] = []
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -441,14 +442,48 @@ class RecipeEditorDock(QDockWidget):
         padding_layout.addRow("RNG seed", self.despike_rng_seed)
         padding_group.setLayout(padding_layout)
 
+        exclusion_group = QGroupBox("Spike exclusion regions")
+        exclusion_layout = QVBoxLayout(exclusion_group)
+        exclusion_layout.setContentsMargins(6, 6, 6, 6)
+        exclusion_layout.setSpacing(6)
+
+        self.despike_exclusions_table = QTableWidget(0, 2)
+        self.despike_exclusions_table.setHorizontalHeaderLabels(["Min (nm)", "Max (nm)"])
+        header = self.despike_exclusions_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.despike_exclusions_table.verticalHeader().setVisible(False)
+        self.despike_exclusions_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.despike_exclusions_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        exclusion_layout.addWidget(self.despike_exclusions_table)
+
+        exclusion_buttons = QHBoxLayout()
+        exclusion_buttons.setContentsMargins(0, 0, 0, 0)
+        exclusion_buttons.setSpacing(6)
+        exclusion_buttons.addStretch(1)
+
+        self.despike_exclusions_add_row = QPushButton("Add window")
+        exclusion_buttons.addWidget(self.despike_exclusions_add_row)
+
+        self.despike_exclusions_remove_row = QPushButton("Remove selected")
+        exclusion_buttons.addWidget(self.despike_exclusions_remove_row)
+
+        exclusion_layout.addLayout(exclusion_buttons)
+
         despike_form.addRow(activation_group)
         despike_form.addRow(baseline_group)
         despike_form.addRow(isolation_group)
         despike_form.addRow(padding_group)
+        despike_form.addRow(exclusion_group)
         self._despike_control_groups = (
             baseline_group,
             isolation_group,
             padding_group,
+            exclusion_group,
         )
         layout.addWidget(despike_section)
 
@@ -722,6 +757,18 @@ class RecipeEditorDock(QDockWidget):
         self.join_windows_remove_row.clicked.connect(
             self._on_join_windows_remove_row
         )
+        self.despike_exclusions_add_row.clicked.connect(
+            self._on_despike_exclusions_add_row
+        )
+        self.despike_exclusions_remove_row.clicked.connect(
+            self._on_despike_exclusions_remove_row
+        )
+        self.despike_exclusions_table.itemChanged.connect(
+            self._on_despike_exclusions_item_changed
+        )
+        self.despike_exclusions_table.itemSelectionChanged.connect(
+            self._update_despike_exclusion_buttons
+        )
         self.baseline_enable.toggled.connect(self._on_baseline_enable_toggled)
         self.baseline_method.currentIndexChanged.connect(
             self._on_baseline_method_changed
@@ -990,6 +1037,7 @@ class RecipeEditorDock(QDockWidget):
                     self.despike_trailing_padding.value(),
                 )
             )
+            self._load_despike_exclusions(despike_cfg.get("exclusions"))
             self.despike_noise_scale_multiplier.setValue(
                 self._safe_float(
                     despike_cfg.get("noise_scale_multiplier"),
@@ -1000,8 +1048,10 @@ class RecipeEditorDock(QDockWidget):
             self.despike_rng_seed.setText(
                 "" if rng_seed in (None, "") else str(rng_seed)
             )
+        else:
+            self._load_despike_exclusions(None)
 
-            join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
+        join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
             self.join_enable.setChecked(bool(join_cfg.get("enabled", False)))
             self.join_window.setValue(
                 self._safe_int(join_cfg.get("window"), self.join_window.value())
@@ -1048,6 +1098,47 @@ class RecipeEditorDock(QDockWidget):
         if value is None:
             return ""
         return str(value)
+
+    def _load_despike_exclusions(self, config) -> None:
+        self.despike_exclusions_table.setRowCount(0)
+        windows_iter: Sequence[object] | None = None
+        if isinstance(config, Mapping):
+            if "windows" in config:
+                candidate = config.get("windows")
+                if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+                    windows_iter = candidate
+            if windows_iter is None and any(
+                key in config for key in ("min", "max", "min_nm", "max_nm", "lower", "upper", "lower_nm", "upper_nm")
+            ):
+                windows_iter = [config]
+        elif isinstance(config, Sequence) and not isinstance(config, (str, bytes)):
+            windows_iter = config
+
+        if windows_iter is None:
+            windows_iter = []
+
+        for entry in windows_iter:
+            if not isinstance(entry, Mapping):
+                continue
+            min_val = None
+            max_val = None
+            for key in ("min_nm", "lower_nm", "min", "lower"):
+                if entry.get(key) is not None:
+                    min_val = entry.get(key)
+                    break
+            for key in ("max_nm", "upper_nm", "max", "upper"):
+                if entry.get(key) is not None:
+                    max_val = entry.get(key)
+                    break
+            row = self.despike_exclusions_table.rowCount()
+            self.despike_exclusions_table.insertRow(row)
+            min_item = QTableWidgetItem(self._format_optional(min_val))
+            max_item = QTableWidgetItem(self._format_optional(max_val))
+            self.despike_exclusions_table.setItem(row, 0, min_item)
+            self.despike_exclusions_table.setItem(row, 1, max_item)
+
+        self._despike_exclusion_errors = []
+        self._update_despike_exclusion_buttons()
 
     def _load_join_windows(self, config) -> None:
         store: dict[str, list[dict[str, str]]] = {
@@ -1096,6 +1187,39 @@ class RecipeEditorDock(QDockWidget):
                 }
             )
         return rows
+
+    def _on_despike_exclusions_add_row(self) -> None:
+        row = self.despike_exclusions_table.rowCount()
+        self.despike_exclusions_table.insertRow(row)
+        for column in range(2):
+            item = QTableWidgetItem("")
+            self.despike_exclusions_table.setItem(row, column, item)
+        self.despike_exclusions_table.setCurrentCell(row, 0)
+        self._update_despike_exclusion_buttons()
+        self._update_model_from_ui()
+
+    def _on_despike_exclusions_remove_row(self) -> None:
+        selection = self.despike_exclusions_table.selectionModel()
+        if selection and selection.hasSelection():
+            row = selection.selectedRows()[0].row()
+        else:
+            row = self.despike_exclusions_table.rowCount() - 1
+        if row < 0:
+            return
+        self.despike_exclusions_table.removeRow(row)
+        self._update_despike_exclusion_buttons()
+        self._update_model_from_ui()
+
+    def _on_despike_exclusions_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating:
+            return
+        self._update_model_from_ui()
+
+    def _update_despike_exclusion_buttons(self) -> None:
+        enabled = self.despike_enable.isChecked()
+        row_count = self.despike_exclusions_table.rowCount()
+        self.despike_exclusions_add_row.setEnabled(enabled)
+        self.despike_exclusions_remove_row.setEnabled(enabled and row_count > 0)
 
     def _on_baseline_enable_toggled(self, checked: bool) -> None:
         self._update_baseline_controls_enabled()
@@ -1186,6 +1310,7 @@ class RecipeEditorDock(QDockWidget):
         self.despike_rng_seed.setEnabled(despike_enabled)
         for group in getattr(self, "_despike_control_groups", ()):
             group.setEnabled(despike_enabled)
+        self._update_despike_exclusion_buttons()
 
         join_enabled = self.join_enable.isChecked()
         self.join_window.setEnabled(join_enabled)
@@ -1449,6 +1574,50 @@ class RecipeEditorDock(QDockWidget):
         )
         self.join_windows_add_instrument.setEnabled(join_enabled)
         self.join_windows_remove_instrument.setEnabled(join_enabled and removable)
+
+    def _build_despike_exclusions_payload(self) -> tuple[object | None, list[str]]:
+        errors: list[str] = []
+        windows: list[dict[str, float]] = []
+        for row in range(self.despike_exclusions_table.rowCount()):
+            min_item = self.despike_exclusions_table.item(row, 0)
+            max_item = self.despike_exclusions_table.item(row, 1)
+            min_text = min_item.text().strip() if isinstance(min_item, QTableWidgetItem) else ""
+            max_text = max_item.text().strip() if isinstance(max_item, QTableWidgetItem) else ""
+            if not min_text and not max_text:
+                continue
+            min_value: float | None = None
+            max_value: float | None = None
+            if min_text:
+                try:
+                    min_value = float(min_text)
+                except ValueError:
+                    errors.append(
+                        f"Despike exclusion row {row + 1} minimum must be numeric"
+                    )
+                    continue
+            if max_text:
+                try:
+                    max_value = float(max_text)
+                except ValueError:
+                    errors.append(
+                        f"Despike exclusion row {row + 1} maximum must be numeric"
+                    )
+                    continue
+            if min_value is not None and max_value is not None and min_value > max_value:
+                errors.append(
+                    f"Despike exclusion row {row + 1} minimum must be ≤ maximum"
+                )
+                continue
+            payload: dict[str, float] = {}
+            if min_value is not None:
+                payload["min_nm"] = float(min_value)
+            if max_value is not None:
+                payload["max_nm"] = float(max_value)
+            windows.append(payload)
+
+        if not windows:
+            return (None, errors)
+        return ({"windows": windows}, errors)
 
     def _build_join_windows_payload(self) -> tuple[object | None, list[str]]:
         errors: list[str] = []
@@ -1757,6 +1926,12 @@ class RecipeEditorDock(QDockWidget):
             despike_cfg["noise_scale_multiplier"] = float(
                 self.despike_noise_scale_multiplier.value()
             )
+            exclusions_payload, exclusion_errors = self._build_despike_exclusions_payload()
+            self._despike_exclusion_errors = exclusion_errors
+            if exclusions_payload is None:
+                despike_cfg.pop("exclusions", None)
+            else:
+                despike_cfg["exclusions"] = exclusions_payload
             seed_text = self.despike_rng_seed.text().strip()
             if seed_text:
                 try:
@@ -1782,6 +1957,8 @@ class RecipeEditorDock(QDockWidget):
                 "rng_seed",
             ):
                 despike_cfg.pop(key, None)
+            despike_cfg.pop("exclusions", None)
+            self._despike_exclusion_errors = []
 
         join_cfg = self._ensure_dict(params, "join")
         threshold_text = self.join_threshold.text().strip()
@@ -1885,6 +2062,8 @@ class RecipeEditorDock(QDockWidget):
             errors.extend(self._join_windows_errors)
         if self._baseline_anchor_errors:
             errors.extend(self._baseline_anchor_errors)
+        if self._despike_exclusion_errors:
+            errors.extend(self._despike_exclusion_errors)
         if errors:
             self.validation_label.setStyleSheet("color: #b00020;")
             formatted = "\n".join(f"• {err}" for err in errors)
