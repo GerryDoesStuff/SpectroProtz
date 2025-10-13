@@ -269,9 +269,127 @@ class RecipeEditorDock(QDockWidget):
             " stay between 2.5 and 6.0."
         )
 
+        self.despike_baseline_window = QSpinBox()
+        self.despike_baseline_window.setRange(0, 999)
+        self.despike_baseline_window.setSpecialValueText("Auto")
+        self.despike_baseline_window.setValue(0)
+        self.despike_baseline_window.setToolTip(
+            "Odd-length window for the rolling baseline. Leave on Auto to let"
+            " the despiker pick a segment-aware default sized relative to the"
+            " main detection window."
+        )
+
+        self.despike_spread_window = QSpinBox()
+        self.despike_spread_window.setRange(0, 999)
+        self.despike_spread_window.setSpecialValueText("Auto")
+        self.despike_spread_window.setValue(0)
+        self.despike_spread_window.setToolTip(
+            "Odd-length window for local spread estimation. Auto follows the"
+            " detection window; set explicitly to widen or tighten the"
+            " variance measurement."
+        )
+
+        self.despike_spread_method = QComboBox()
+        self.despike_spread_method.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.despike_spread_method.addItem(
+            "Median absolute deviation (MAD)", "mad"
+        )
+        self.despike_spread_method.addItem(
+            "Standard deviation (STD)", "std"
+        )
+        self.despike_spread_method.setToolTip(
+            "Statistic used for the spread term in the z-score; MAD is more"
+            " robust to spikes while STD tracks noise with fewer samples."
+        )
+
+        self.despike_spread_epsilon = QDoubleSpinBox()
+        self.despike_spread_epsilon.setDecimals(8)
+        self.despike_spread_epsilon.setRange(1e-9, 1.0)
+        self.despike_spread_epsilon.setSingleStep(1e-6)
+        self.despike_spread_epsilon.setValue(1e-6)
+        self.despike_spread_epsilon.setToolTip(
+            "Minimum spread used when MAD/STD collapses. Increase if fully"
+            " flat regions still trigger spikes."
+        )
+
+        self.despike_residual_floor = QDoubleSpinBox()
+        self.despike_residual_floor.setDecimals(4)
+        self.despike_residual_floor.setRange(0.0, 1.0)
+        self.despike_residual_floor.setSingleStep(1e-3)
+        self.despike_residual_floor.setValue(2e-2)
+        self.despike_residual_floor.setToolTip(
+            "Floor applied to the residual-based fallback when windows collapse"
+            " so isolated spikes stay removable without flattening peaks."
+        )
+
+        self.despike_isolation_ratio = QDoubleSpinBox()
+        self.despike_isolation_ratio.setDecimals(2)
+        self.despike_isolation_ratio.setRange(1.0, 1e3)
+        self.despike_isolation_ratio.setSingleStep(0.5)
+        self.despike_isolation_ratio.setValue(20.0)
+        self.despike_isolation_ratio.setToolTip(
+            "Minimum ratio between spike amplitude and residual floor before"
+            " a point is considered isolated and replaced."
+        )
+
+        self.despike_max_passes = QSpinBox()
+        self.despike_max_passes.setRange(1, 100)
+        self.despike_max_passes.setValue(10)
+        self.despike_max_passes.setToolTip(
+            "Upper bound on iterative despiking passes per segment; raise when"
+            " clusters of spikes persist."
+        )
+
+        self.despike_leading_padding = QSpinBox()
+        self.despike_leading_padding.setRange(0, 999)
+        self.despike_leading_padding.setValue(0)
+        self.despike_leading_padding.setToolTip(
+            "Samples to protect at the start of each segment before"
+            " despiking engages; helps preserve steep leading edges."
+        )
+
+        self.despike_trailing_padding = QSpinBox()
+        self.despike_trailing_padding.setRange(0, 999)
+        self.despike_trailing_padding.setValue(0)
+        self.despike_trailing_padding.setToolTip(
+            "Samples to protect at the end of each segment so trailing"
+            " curvature survives despiking."
+        )
+
+        self.despike_noise_scale_multiplier = QDoubleSpinBox()
+        self.despike_noise_scale_multiplier.setDecimals(3)
+        self.despike_noise_scale_multiplier.setRange(0.0, 10.0)
+        self.despike_noise_scale_multiplier.setSingleStep(0.1)
+        self.despike_noise_scale_multiplier.setValue(1.0)
+        self.despike_noise_scale_multiplier.setToolTip(
+            "Multiplier for the synthetic noise injected into corrected"
+            " samples; 1.0 mirrors the detected spread."
+        )
+
+        self.despike_rng_seed = QLineEdit()
+        self.despike_rng_seed.setPlaceholderText("Leave blank for random seed")
+        self.despike_rng_seed.setClearButtonEnabled(True)
+        self.despike_rng_seed.setToolTip(
+            "Optional integer seed for reproducible noise injection. Leave"
+            " empty to draw a fresh seed each run."
+        )
+
         despike_form.addRow(self.despike_enable)
         despike_form.addRow("Window", self.despike_window)
         despike_form.addRow("Z-score", self.despike_zscore)
+        despike_form.addRow("Baseline window", self.despike_baseline_window)
+        despike_form.addRow("Spread window", self.despike_spread_window)
+        despike_form.addRow("Spread method", self.despike_spread_method)
+        despike_form.addRow("Spread epsilon", self.despike_spread_epsilon)
+        despike_form.addRow("Residual floor", self.despike_residual_floor)
+        despike_form.addRow("Isolation ratio", self.despike_isolation_ratio)
+        despike_form.addRow("Max passes", self.despike_max_passes)
+        despike_form.addRow("Leading padding", self.despike_leading_padding)
+        despike_form.addRow("Trailing padding", self.despike_trailing_padding)
+        despike_form.addRow("Noise scale", self.despike_noise_scale_multiplier)
+        despike_form.addRow("RNG seed", self.despike_rng_seed)
         layout.addWidget(despike_section)
 
         # --- Blank handling ---
@@ -580,6 +698,17 @@ class RecipeEditorDock(QDockWidget):
             self.despike_enable.toggled,
             self.despike_window.valueChanged,
             self.despike_zscore.valueChanged,
+            self.despike_baseline_window.valueChanged,
+            self.despike_spread_window.valueChanged,
+            self.despike_spread_method.currentIndexChanged,
+            self.despike_spread_epsilon.valueChanged,
+            self.despike_residual_floor.valueChanged,
+            self.despike_isolation_ratio.valueChanged,
+            self.despike_max_passes.valueChanged,
+            self.despike_leading_padding.valueChanged,
+            self.despike_trailing_padding.valueChanged,
+            self.despike_noise_scale_multiplier.valueChanged,
+            self.despike_rng_seed.textChanged,
             self.join_enable.toggled,
             self.join_window.valueChanged,
             self.join_threshold.textChanged,
@@ -733,6 +862,83 @@ class RecipeEditorDock(QDockWidget):
             )
             self.despike_zscore.setValue(
                 self._safe_float(despike_cfg.get("zscore"), self.despike_zscore.value())
+            )
+            baseline_window = despike_cfg.get("baseline_window")
+            if baseline_window in (None, ""):
+                self.despike_baseline_window.setValue(
+                    self.despike_baseline_window.minimum()
+                )
+            else:
+                self.despike_baseline_window.setValue(
+                    self._safe_int(
+                        baseline_window, self.despike_baseline_window.minimum()
+                    )
+                )
+            spread_window = despike_cfg.get("spread_window")
+            if spread_window in (None, ""):
+                self.despike_spread_window.setValue(
+                    self.despike_spread_window.minimum()
+                )
+            else:
+                self.despike_spread_window.setValue(
+                    self._safe_int(
+                        spread_window, self.despike_spread_window.minimum()
+                    )
+                )
+            spread_method = str(despike_cfg.get("spread_method") or "mad").strip().lower()
+            if spread_method not in {"mad", "std"}:
+                spread_method = "mad"
+            spread_index = self.despike_spread_method.findData(
+                spread_method, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if spread_index < 0:
+                spread_index = 0
+            self.despike_spread_method.setCurrentIndex(spread_index)
+            self.despike_spread_epsilon.setValue(
+                self._safe_float(
+                    despike_cfg.get("spread_epsilon"),
+                    self.despike_spread_epsilon.value(),
+                )
+            )
+            self.despike_residual_floor.setValue(
+                self._safe_float(
+                    despike_cfg.get("residual_floor"),
+                    self.despike_residual_floor.value(),
+                )
+            )
+            self.despike_isolation_ratio.setValue(
+                self._safe_float(
+                    despike_cfg.get("isolation_ratio"),
+                    self.despike_isolation_ratio.value(),
+                )
+            )
+            self.despike_max_passes.setValue(
+                self._safe_int(
+                    despike_cfg.get("max_passes"),
+                    self.despike_max_passes.value(),
+                )
+            )
+            self.despike_leading_padding.setValue(
+                self._safe_int(
+                    despike_cfg.get("leading_padding"),
+                    self.despike_leading_padding.value(),
+                )
+            )
+            self.despike_trailing_padding.setValue(
+                self._safe_int(
+                    despike_cfg.get("trailing_padding"),
+                    self.despike_trailing_padding.value(),
+                )
+            )
+            self.despike_noise_scale_multiplier.setValue(
+                self._safe_float(
+                    despike_cfg.get("noise_scale_multiplier"),
+                    self.despike_noise_scale_multiplier.value(),
+                )
+            )
+            rng_seed = despike_cfg.get("rng_seed")
+            self.despike_rng_seed.setText(
+                "" if rng_seed in (None, "") else str(rng_seed)
             )
 
             join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
@@ -907,6 +1113,17 @@ class RecipeEditorDock(QDockWidget):
         despike_enabled = self.despike_enable.isChecked()
         self.despike_window.setEnabled(despike_enabled)
         self.despike_zscore.setEnabled(despike_enabled)
+        self.despike_baseline_window.setEnabled(despike_enabled)
+        self.despike_spread_window.setEnabled(despike_enabled)
+        self.despike_spread_method.setEnabled(despike_enabled)
+        self.despike_spread_epsilon.setEnabled(despike_enabled)
+        self.despike_residual_floor.setEnabled(despike_enabled)
+        self.despike_isolation_ratio.setEnabled(despike_enabled)
+        self.despike_max_passes.setEnabled(despike_enabled)
+        self.despike_leading_padding.setEnabled(despike_enabled)
+        self.despike_trailing_padding.setEnabled(despike_enabled)
+        self.despike_noise_scale_multiplier.setEnabled(despike_enabled)
+        self.despike_rng_seed.setEnabled(despike_enabled)
 
         join_enabled = self.join_enable.isChecked()
         self.join_window.setEnabled(join_enabled)
@@ -1437,9 +1654,72 @@ class RecipeEditorDock(QDockWidget):
         if despike_enabled:
             despike_cfg["window"] = int(self.despike_window.value())
             despike_cfg["zscore"] = float(self.despike_zscore.value())
+            baseline_window = int(self.despike_baseline_window.value())
+            if baseline_window > 0:
+                despike_cfg["baseline_window"] = baseline_window
+            else:
+                despike_cfg.pop("baseline_window", None)
+            spread_window = int(self.despike_spread_window.value())
+            if spread_window > 0:
+                despike_cfg["spread_window"] = spread_window
+            else:
+                despike_cfg.pop("spread_window", None)
+            spread_method_data = self.despike_spread_method.currentData(
+                QtCore.Qt.ItemDataRole.UserRole
+            )
+            spread_method = (
+                str(spread_method_data).strip().lower()
+                if isinstance(spread_method_data, str)
+                else ""
+            )
+            if spread_method and spread_method != "mad":
+                despike_cfg["spread_method"] = spread_method
+            else:
+                despike_cfg.pop("spread_method", None)
+            despike_cfg["spread_epsilon"] = float(
+                self.despike_spread_epsilon.value()
+            )
+            despike_cfg["residual_floor"] = float(
+                self.despike_residual_floor.value()
+            )
+            despike_cfg["isolation_ratio"] = float(
+                self.despike_isolation_ratio.value()
+            )
+            despike_cfg["max_passes"] = int(self.despike_max_passes.value())
+            despike_cfg["leading_padding"] = int(
+                self.despike_leading_padding.value()
+            )
+            despike_cfg["trailing_padding"] = int(
+                self.despike_trailing_padding.value()
+            )
+            despike_cfg["noise_scale_multiplier"] = float(
+                self.despike_noise_scale_multiplier.value()
+            )
+            seed_text = self.despike_rng_seed.text().strip()
+            if seed_text:
+                try:
+                    despike_cfg["rng_seed"] = int(seed_text)
+                except ValueError:
+                    despike_cfg["rng_seed"] = seed_text
+            else:
+                despike_cfg.pop("rng_seed", None)
         else:
             despike_cfg.pop("window", None)
             despike_cfg.pop("zscore", None)
+            for key in (
+                "baseline_window",
+                "spread_window",
+                "spread_method",
+                "spread_epsilon",
+                "residual_floor",
+                "isolation_ratio",
+                "max_passes",
+                "leading_padding",
+                "trailing_padding",
+                "noise_scale_multiplier",
+                "rng_seed",
+            ):
+                despike_cfg.pop(key, None)
 
         join_cfg = self._ensure_dict(params, "join")
         threshold_text = self.join_threshold.text().strip()
