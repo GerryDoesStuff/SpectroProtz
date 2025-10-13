@@ -182,15 +182,26 @@ def test_correct_joins_records_channel():
     assert np.allclose(channels["joined"], corrected.intensity)
 
 
-def test_despike_preserves_leading_slope_with_joins():
-    wl = np.linspace(200.0, 400.0, 60)
-    intensity = np.exp(-np.linspace(0.0, 5.0, wl.size))
+def test_despike_removes_spikes_straddling_join_window():
+    wl = np.linspace(200.0, 400.0, 120)
+    baseline = 0.35 + 0.02 * np.sin(wl / 30.0)
+    intensity = baseline.copy()
+    join_idx = 60
+    spike_indices = np.array([join_idx - 1, join_idx, join_idx + 1])
+    intensity[spike_indices] += np.array([3.5, 4.5, 3.0])
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
-    despiked = pipeline.despike_spectrum(spec, window=10, join_indices=[30])
+    despiked = pipeline.despike_spectrum(
+        spec,
+        window=11,
+        join_indices=[join_idx],
+        noise_scale_multiplier=0.0,
+    )
 
-    assert np.allclose(despiked.intensity[:5], intensity[:5])
-    assert np.allclose(np.diff(despiked.intensity[:5]), np.diff(intensity[:5]))
+    assert np.allclose(despiked.intensity[spike_indices], baseline[spike_indices], atol=5e-2)
+    mask = np.ones_like(wl, dtype=bool)
+    mask[spike_indices] = False
+    assert np.allclose(despiked.intensity[mask], baseline[mask], atol=3e-2)
 
 
 def test_despike_iteratively_handles_clustered_spikes():
@@ -389,42 +400,37 @@ def test_despike_padding_only_applies_at_global_edges():
     assert despiked.meta.get("despiked") is True
 
 
-def test_despike_respects_join_segments_with_local_baseline():
-    wl = np.linspace(220.0, 380.0, 81)
-    left = 0.2 + 0.002 * (wl - 220.0)
-    right = 0.6 + 0.0015 * (wl - 300.0)
-    curvature = np.where(wl < 300.0, left, right)
-    intensity = curvature.copy()
-    left_spike, right_spike = 25, 60
-    intensity[left_spike] += 0.8
-    intensity[right_spike] -= 0.7
+def test_despike_regression_join_metadata_does_not_block_spikes():
+    wl = np.linspace(220.0, 420.0, 161)
+    left = 0.25 + 0.0025 * (wl - wl.min())
+    right = 0.45 + 0.0018 * (wl - 320.0)
+    baseline = np.where(wl < 320.0, left, right)
+    intensity = baseline.copy()
+    spike_indices = np.array([45, 80, 120])
+    intensity[spike_indices] += np.array([1.6, -1.8, 2.1])
+    joins = [30, 60, 90, 130]
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
     despiked = pipeline.despike_spectrum(
         spec,
-        window=7,
-        baseline_window=9,
-        spread_window=9,
-        join_indices=[40],
+        window=9,
+        baseline_window=11,
+        spread_window=11,
+        join_indices=joins,
         noise_scale_multiplier=0.0,
     )
 
-    assert np.isclose(despiked.intensity[left_spike], curvature[left_spike], atol=5e-3)
-    assert np.isclose(despiked.intensity[right_spike], curvature[right_spike], atol=5e-3)
+    assert np.allclose(despiked.intensity[spike_indices], baseline[spike_indices], atol=1.5e-2)
     preserved = np.ones_like(wl, dtype=bool)
-    preserved[[left_spike, right_spike]] = False
     guard = np.zeros_like(wl, dtype=bool)
-    guard[left_spike - 4 : left_spike + 5] = True
-    guard[right_spike - 4 : right_spike + 5] = True
+    for idx in spike_indices:
+        preserved[idx] = False
+        guard[idx - 4 : idx + 5] = True
     guard[:4] = True
     guard[-4:] = True
-    guard[38:43] = True
     preserved &= ~guard
-    assert np.allclose(despiked.intensity[preserved], curvature[preserved], atol=1e-2)
-    left_window = curvature[left_spike - 4 : left_spike + 5]
-    right_window = curvature[right_spike - 4 : right_spike + 5]
-    assert left_window.min() <= despiked.intensity[left_spike] <= left_window.max()
-    assert right_window.min() <= despiked.intensity[right_spike] <= right_window.max()
+    assert np.allclose(despiked.intensity[preserved], baseline[preserved], atol=1e-2)
+    assert despiked.meta.get("despiked") is True
 
 
 def test_despike_handles_isolated_spike_with_zero_mad():
@@ -803,7 +809,7 @@ def test_baseline_methods_reduce_background():
         assert corrected.intensity.max() > 0.8
 
 
-def test_despike_respects_join_boundaries():
+def test_despike_handles_step_change_without_join_segmentation():
     wl = np.linspace(400, 500, 11)
     baseline = np.concatenate([np.zeros(5), np.ones(6) * 10])
     spike_idx = 4
@@ -819,14 +825,15 @@ def test_despike_respects_join_boundaries():
     )
 
     assert corrected.meta.get("despiked") is True
-    assert corrected.intensity[spike_idx] == pytest.approx(baseline[spike_idx])
-    assert corrected.intensity[spike_idx + 1] == pytest.approx(baseline[spike_idx + 1])
-    assert corrected.intensity[spike_idx + 1] - corrected.intensity[spike_idx] == pytest.approx(
-        baseline[spike_idx + 1] - baseline[spike_idx]
-    )
+    assert corrected.intensity[spike_idx] == pytest.approx(baseline[spike_idx - 1]) or corrected.intensity[
+        spike_idx
+    ] == pytest.approx(baseline[spike_idx + 1])
+    mask = np.ones_like(wl, dtype=bool)
+    mask[spike_idx] = False
+    assert np.allclose(corrected.intensity[mask], baseline[mask])
 
 
-def test_preprocess_threads_join_indices_to_despike(monkeypatch):
+def test_preprocess_no_longer_threads_join_indices_to_despike(monkeypatch):
     wl = np.linspace(400, 500, 11)
     intensity = np.concatenate([np.zeros(5), np.ones(6) * 12])
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample"})
@@ -850,7 +857,8 @@ def test_preprocess_threads_join_indices_to_despike(monkeypatch):
     plugin.preprocess([spec], recipe)
 
     expected_joins = tuple(pipeline.detect_joins(wl, intensity, window=3))
-    assert captured.get("join_indices") == expected_joins
+    assert expected_joins == (5,)
+    assert captured.get("join_indices") == ()
 
 
 def test_preprocess_defaults_limit_join_windows_for_helios():

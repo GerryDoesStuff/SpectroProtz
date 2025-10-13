@@ -1421,10 +1421,11 @@ def despike_spectrum(
     rng: np.random.Generator | None = None,
     rng_seed: int | np.random.SeedSequence | None = None,
 ) -> Spectrum:
-    """Replace impulsive spikes using adaptive rolling baselines per segment.
+    """Replace impulsive spikes using adaptive rolling baselines.
 
-    Each contiguous segment between detector joins is processed independently.
-    Within a segment the intensity trace is iteratively compared against a
+    The entire intensity trace is processed in a single pass and the
+    previously-used ``join_indices`` argument is retained only for backwards
+    compatibility. The intensity trace is iteratively compared against a
     rolling baseline and local spread estimate; samples exceeding
     ``baseline ± zscore * spread`` are replaced with the contemporaneous
     baseline and detection repeats until no spikes remain or ``max_passes`` is
@@ -1488,11 +1489,6 @@ def despike_spectrum(
 
     n = y.size
 
-    joins: list[int] = []
-    if join_indices:
-        joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
-
-    boundaries = [0, *joins, n]
     corrected = y.copy()
     overall_mask = np.zeros(n, dtype=bool)
 
@@ -1534,167 +1530,154 @@ def despike_spectrum(
     pad_leading = max(0, int(leading_padding))
     pad_trailing = max(0, int(trailing_padding))
 
-    for seg_start, seg_stop in zip(boundaries[:-1], boundaries[1:]):
-        segment = corrected[seg_start:seg_stop]
-        original_segment = y[seg_start:seg_stop]
-        seg_len = segment.size
-        if seg_len < 3:
-            continue
+    leading = min(pad_leading, n)
+    trailing = min(pad_trailing, max(0, n - leading))
+    work_start = leading
+    work_stop = n - trailing
+    work_len = work_stop - work_start
 
-        leading = min(pad_leading, seg_len) if seg_start == 0 else 0
-        trailing_candidate = seg_len - leading
-        if seg_stop == n:
-            trailing = min(pad_trailing, max(0, trailing_candidate))
-        else:
-            trailing = 0
-        work_start = leading
-        work_stop = seg_len - trailing
-        work_len = work_stop - work_start
+    if work_len < 3:
+        if leading:
+            corrected[:leading] = y[:leading]
+        if trailing:
+            corrected[n - trailing :] = y[n - trailing :]
+        return _final_spectrum(corrected, mask=overall_mask)
 
-        if work_len < 3:
-            if leading:
-                segment[:leading] = original_segment[:leading]
-            if trailing:
-                segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
-            continue
+    seg_baseline_window = _normalise_window(work_len, baseline_window, base_window)
+    if seg_baseline_window is None:
+        if leading:
+            corrected[:leading] = y[:leading]
+        if trailing:
+            corrected[n - trailing :] = y[n - trailing :]
+        return _final_spectrum(corrected, mask=overall_mask)
 
-        seg_baseline_window = _normalise_window(work_len, baseline_window, base_window)
-        if seg_baseline_window is None:
-            if leading:
-                segment[:leading] = original_segment[:leading]
-            if trailing:
-                segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
-            continue
-        seg_spread_window = _normalise_window(
-            work_len,
-            spread_window,
-            seg_baseline_window if baseline_window is not None else base_window,
-        )
-        if seg_spread_window is None:
-            seg_spread_window = seg_baseline_window
+    seg_spread_window = _normalise_window(
+        work_len,
+        spread_window,
+        seg_baseline_window if baseline_window is not None else base_window,
+    )
+    if seg_spread_window is None:
+        seg_spread_window = seg_baseline_window
 
-        seg_mask = np.zeros(seg_len, dtype=bool)
-        working = segment[work_start:work_stop]
-        working_mask = seg_mask[work_start:work_stop]
+    working = corrected[work_start:work_stop]
+    working_mask = overall_mask[work_start:work_stop]
 
-        for _ in range(int(max_passes)):
-            baseline = _rolling_baseline(working, seg_baseline_window)
-            residual = working - baseline
-            spread = _rolling_spread(residual, seg_spread_window, method=spread_method)
-            spread = np.asarray(spread, dtype=float)
+    for _ in range(int(max_passes)):
+        baseline = _rolling_baseline(working, seg_baseline_window)
+        residual = working - baseline
+        spread = _rolling_spread(residual, seg_spread_window, method=spread_method)
+        spread = np.asarray(spread, dtype=float)
 
-            valid_spread = spread > spread_epsilon
-            candidate_mask = np.abs(residual) > float(zscore) * np.maximum(spread, spread_epsilon)
+        valid_spread = spread > spread_epsilon
+        candidate_mask = np.abs(residual) > float(zscore) * np.maximum(spread, spread_epsilon)
 
-            if np.any(candidate_mask):
-                newly_detected = candidate_mask & ~working_mask
-                if np.any(newly_detected):
-                    new_indices = np.flatnonzero(newly_detected)
-                    split_points = np.where(np.diff(new_indices) > 1)[0] + 1
-                    clusters = np.split(new_indices, split_points)
-                    tail_decay_ratio = 0.85
-                    for cluster in clusters:
-                        if cluster.size == 0:
-                            continue
-                        cluster_abs_residual = np.abs(residual[cluster])
-                        peak_local = int(cluster[np.argmax(cluster_abs_residual)])
-                        peak_residual = residual[peak_local]
-                        if peak_residual == 0:
-                            continue
-                        sign = 1.0 if peak_residual > 0 else -1.0
-                        peak_magnitude = float(abs(peak_residual))
-                        if peak_magnitude <= spread_epsilon:
-                            continue
+        if np.any(candidate_mask):
+            newly_detected = candidate_mask & ~working_mask
+            if np.any(newly_detected):
+                new_indices = np.flatnonzero(newly_detected)
+                split_points = np.where(np.diff(new_indices) > 1)[0] + 1
+                clusters = np.split(new_indices, split_points)
+                tail_decay_ratio = 0.85
+                for cluster in clusters:
+                    if cluster.size == 0:
+                        continue
+                    cluster_abs_residual = np.abs(residual[cluster])
+                    peak_local = int(cluster[np.argmax(cluster_abs_residual)])
+                    peak_residual = residual[peak_local]
+                    if peak_residual == 0:
+                        continue
+                    sign = 1.0 if peak_residual > 0 else -1.0
+                    peak_magnitude = float(abs(peak_residual))
+                    if peak_magnitude <= spread_epsilon:
+                        continue
 
-                        tail_start_floor = max(residual_floor, spread_epsilon)
+                    tail_start_floor = max(residual_floor, spread_epsilon)
 
-                        def _extend(start: int, stop: int, step: int) -> list[int]:
-                            collected: list[int] = []
-                            previous = peak_magnitude
-                            for idx in range(start, stop, step):
-                                value = residual[idx]
-                                if value * sign <= 0:
-                                    break
-                                magnitude = float(abs(value))
-                                if magnitude <= spread_epsilon:
-                                    break
-                                if magnitude < tail_start_floor and not collected:
-                                    break
-                                if magnitude > peak_magnitude * tail_decay_ratio:
-                                    break
-                                if magnitude > previous * tail_decay_ratio:
-                                    break
-                                collected.append(idx)
-                                previous = magnitude if magnitude > spread_epsilon else spread_epsilon
-                            return collected
+                    def _extend(start: int, stop: int, step: int) -> list[int]:
+                        collected: list[int] = []
+                        previous = peak_magnitude
+                        for idx in range(start, stop, step):
+                            value = residual[idx]
+                            if value * sign <= 0:
+                                break
+                            magnitude = float(abs(value))
+                            if magnitude <= spread_epsilon:
+                                break
+                            if magnitude < tail_start_floor and not collected:
+                                break
+                            if magnitude > peak_magnitude * tail_decay_ratio:
+                                break
+                            if magnitude > previous * tail_decay_ratio:
+                                break
+                            collected.append(idx)
+                            previous = magnitude if magnitude > spread_epsilon else spread_epsilon
+                        return collected
 
-                        if sign > 0:
-                            right_indices = _extend(peak_local + 1, work_len, 1)
-                            if right_indices:
-                                candidate_mask[right_indices] = True
-                        else:
-                            left_indices = _extend(peak_local - 1, -1, -1)
-                            if left_indices:
-                                candidate_mask[left_indices] = True
+                    if sign > 0:
+                        right_indices = _extend(peak_local + 1, work_len, 1)
+                        if right_indices:
+                            candidate_mask[right_indices] = True
+                    else:
+                        left_indices = _extend(peak_local - 1, -1, -1)
+                        if left_indices:
+                            candidate_mask[left_indices] = True
 
-            if not np.any(valid_spread):
-                global_scale = _global_spread(residual, method=spread_method)
-                if np.isfinite(global_scale) and global_scale > spread_epsilon:
-                    candidate_mask |= np.abs(residual) > float(zscore) * global_scale
-                else:
-                    abs_residual = np.abs(residual)
-                    max_residual = float(abs_residual.max(initial=0.0))
-                    if max_residual > max(residual_floor, spread_epsilon):
-                        if abs_residual.size > 1:
-                            second = float(np.partition(abs_residual, -2)[-2])
-                        else:
-                            second = 0.0
-                        if second <= 0 or max_residual >= isolation_ratio * second:
-                            candidate_mask = abs_residual >= max_residual - 1e-12
-                        else:
-                            candidate_mask = np.zeros(work_len, dtype=bool)
+        if not np.any(valid_spread):
+            global_scale = _global_spread(residual, method=spread_method)
+            if np.isfinite(global_scale) and global_scale > spread_epsilon:
+                candidate_mask |= np.abs(residual) > float(zscore) * global_scale
+            else:
+                abs_residual = np.abs(residual)
+                max_residual = float(abs_residual.max(initial=0.0))
+                if max_residual > max(residual_floor, spread_epsilon):
+                    if abs_residual.size > 1:
+                        second = float(np.partition(abs_residual, -2)[-2])
+                    else:
+                        second = 0.0
+                    if second <= 0 or max_residual >= isolation_ratio * second:
+                        candidate_mask = abs_residual >= max_residual - 1e-12
                     else:
                         candidate_mask = np.zeros(work_len, dtype=bool)
-
-            newly_flagged = candidate_mask & ~working_mask
-            if not np.any(newly_flagged):
-                break
-
-            working_mask |= candidate_mask
-
-            if np.any(newly_flagged) and noise_scale_multiplier > 0:
-                local_scale = np.asarray(spread[newly_flagged], dtype=float)
-                background_residual = residual[~candidate_mask]
-                background_scale = _global_spread(background_residual, method=spread_method)
-                if not np.isfinite(background_scale) or background_scale <= spread_epsilon:
-                    background_scale = spread_epsilon
-                if local_scale.size:
-                    invalid = ~np.isfinite(local_scale) | (local_scale <= spread_epsilon)
-                    if np.any(invalid):
-                        local_scale = local_scale.copy()
-                        local_scale[invalid] = background_scale
                 else:
-                    local_scale = np.array([], dtype=float)
-                local_scale = np.maximum(local_scale, spread_epsilon)
-                if np.isfinite(background_scale) and background_scale > 0:
-                    cap = max(background_scale, spread_epsilon) * 3.0
-                    local_scale = np.minimum(local_scale, cap)
-                noise = noise_rng.normal(
-                    loc=0.0,
-                    scale=np.asarray(local_scale, dtype=float) * float(noise_scale_multiplier),
-                )
-                working[newly_flagged] = baseline[newly_flagged] + noise
+                    candidate_mask = np.zeros(work_len, dtype=bool)
+
+        newly_flagged = candidate_mask & ~working_mask
+        if not np.any(newly_flagged):
+            break
+
+        working_mask |= candidate_mask
+
+        if np.any(newly_flagged) and noise_scale_multiplier > 0:
+            local_scale = np.asarray(spread[newly_flagged], dtype=float)
+            background_residual = residual[~candidate_mask]
+            background_scale = _global_spread(background_residual, method=spread_method)
+            if not np.isfinite(background_scale) or background_scale <= spread_epsilon:
+                background_scale = spread_epsilon
+            if local_scale.size:
+                invalid = ~np.isfinite(local_scale) | (local_scale <= spread_epsilon)
+                if np.any(invalid):
+                    local_scale = local_scale.copy()
+                    local_scale[invalid] = background_scale
             else:
-                working[newly_flagged] = baseline[newly_flagged]
+                local_scale = np.array([], dtype=float)
+            local_scale = np.maximum(local_scale, spread_epsilon)
+            if np.isfinite(background_scale) and background_scale > 0:
+                cap = max(background_scale, spread_epsilon) * 3.0
+                local_scale = np.minimum(local_scale, cap)
+            noise = noise_rng.normal(
+                loc=0.0,
+                scale=np.asarray(local_scale, dtype=float) * float(noise_scale_multiplier),
+            )
+            working[newly_flagged] = baseline[newly_flagged] + noise
+        else:
+            working[newly_flagged] = baseline[newly_flagged]
 
-        if leading:
-            segment[:leading] = original_segment[:leading]
-            seg_mask[:leading] = False
-        if trailing:
-            segment[seg_len - trailing :] = original_segment[seg_len - trailing :]
-            seg_mask[seg_len - trailing :] = False
-
-        overall_mask[seg_start:seg_stop] = seg_mask
+    if leading:
+        corrected[:leading] = y[:leading]
+        overall_mask[:leading] = False
+    if trailing:
+        corrected[n - trailing :] = y[n - trailing :]
+        overall_mask[n - trailing :] = False
 
     return _final_spectrum(corrected, mask=overall_mask)
 

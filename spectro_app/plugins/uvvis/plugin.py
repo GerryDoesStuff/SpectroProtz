@@ -1282,7 +1282,6 @@ class UvVisPlugin(SpectroscopyPlugin):
                     residual_floor=despike_cfg.get("residual_floor", 2e-2),
                     isolation_ratio=despike_cfg.get("isolation_ratio", 20.0),
                     max_passes=despike_cfg.get("max_passes", 10),
-                    join_indices=joins,
                     leading_padding=despike_cfg.get("leading_padding", 0),
                     trailing_padding=despike_cfg.get("trailing_padding", 0),
                     noise_scale_multiplier=noise_scale if noise_scale is not None else 1.0,
