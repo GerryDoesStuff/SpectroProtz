@@ -1492,8 +1492,9 @@ def despike_spectrum(
                             if second_largest <= max(residual_tolerance, 1e-12):
                                 second_largest = 0.0
                             if second_largest > 0.0 and max_residual >= isolated_ratio * second_largest:
-                                candidate_mask = np.zeros(n, dtype=bool)
-                                break
+                                candidate_mask = abs_residual >= max_residual - 1e-12
+                                if np.count_nonzero(candidate_mask) >= n:
+                                    candidate_mask = np.zeros(n, dtype=bool)
                         candidate_mask = abs_residual >= max_residual - 1e-12
                         if np.count_nonzero(candidate_mask) >= n:
                             candidate_mask = np.zeros(n, dtype=bool)
