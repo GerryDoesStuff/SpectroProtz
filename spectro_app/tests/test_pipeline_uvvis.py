@@ -670,6 +670,30 @@ def test_join_detection_and_correction():
     assert abs(left_mean - right_mean) < 1e-6
 
 
+def test_detect_joins_handles_short_spike_pair_and_correction_restores_baseline():
+    wl = np.linspace(300.0, 400.0, 201)
+    intensity = np.zeros_like(wl)
+    start = 85
+    width = 3
+    intensity[start : start + width] += 5.0
+
+    joins = pipeline.detect_joins(wl, intensity, window=5)
+
+    assert len(joins) == 2
+    first, second = sorted(joins)
+    assert first < second
+
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+    corrected = pipeline.correct_joins(spec, joins, window=5)
+
+    plateau_after = corrected.intensity[start : start + width]
+    assert np.allclose(plateau_after, 0.0, atol=1e-6)
+
+    tail_region = corrected.intensity[second + 5 :]
+    if tail_region.size:
+        assert np.allclose(tail_region, 0.0, atol=1e-6)
+
+
 def test_detect_joins_keeps_all_peaks_above_threshold():
     wl = np.linspace(300.0, 400.0, 201)
     intensity = np.zeros_like(wl)

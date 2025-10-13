@@ -1005,11 +1005,26 @@ def detect_joins(
     candidate_indices = sorted(
         idx for idx in candidate_info.keys() if half_window <= idx < n
     )
+    candidate_signs: Dict[int, int] = {}
+    for idx in candidate_indices:
+        delta_value = deltas[idx] if 0 <= idx < deltas.size else float("nan")
+        sign = 0
+        if np.isfinite(delta_value):
+            if delta_value > 0:
+                sign = 1
+            elif delta_value < 0:
+                sign = -1
+        candidate_signs[idx] = sign
     filtered: list[int] = []
     min_spacing = max(1, raw_window)
     for idx in candidate_indices:
         if filtered and idx - filtered[-1] < min_spacing:
             prev = filtered[-1]
+            prev_sign = candidate_signs.get(prev, 0)
+            curr_sign = candidate_signs.get(idx, 0)
+            if prev_sign != 0 and curr_sign != 0 and prev_sign != curr_sign:
+                filtered.append(idx)
+                continue
             current_spans = candidate_info[idx]["spans"]
             previous_spans = candidate_info[prev]["spans"]
             if current_spans.isdisjoint(previous_spans):
@@ -1028,6 +1043,7 @@ def detect_joins(
     refined_source_scores: Dict[int, float] = {}
     refined_thresholds: Dict[int, float] = {}
     refined_span_map: Dict[int, set[tuple[int, int]]] = {}
+    refined_signs: Dict[int, set[int]] = {}
 
     def _update_refined_score(index: int, score: float) -> None:
         existing = refined_source_scores.get(index)
@@ -1048,6 +1064,7 @@ def detect_joins(
         lo = max(1, idx - half_window)
         hi = min(n - 1, idx + half_window)
         window_diffs = diffs[lo - 1 : hi]
+        sign_value = candidate_signs.get(idx, 0)
         if window_diffs.size == 0:
             refined.append(idx)
             if 0 <= idx < scores.size:
@@ -1059,6 +1076,7 @@ def detect_joins(
                 )
                 existing_spans = refined_span_map.setdefault(idx, set())
                 existing_spans.update(span_ids)
+                refined_signs.setdefault(idx, set()).add(sign_value)
             continue
         rel = int(np.nanargmax(window_diffs))
         refined_idx = lo - 1 + rel + 1
@@ -1068,6 +1086,17 @@ def detect_joins(
                 refined_idx = idx
             elif delta_value < 0 and refined_idx > idx:
                 refined_idx = idx
+            if delta_value > 0:
+                sign_value = 1
+            elif delta_value < 0:
+                sign_value = -1
+        existing_signs = refined_signs.get(refined_idx)
+        if (
+            existing_signs
+            and sign_value != 0
+            and ((sign_value > 0 and -1 in existing_signs) or (sign_value < 0 and 1 in existing_signs))
+        ):
+            refined_idx = idx
         refined.append(refined_idx)
         if 0 <= idx < scores.size:
             _update_refined_score(refined_idx, candidate_score)
@@ -1078,6 +1107,7 @@ def detect_joins(
                 refined_thresholds[refined_idx] = local_threshold
             existing_spans = refined_span_map.setdefault(refined_idx, set())
             existing_spans.update(span_ids)
+            refined_signs.setdefault(refined_idx, set()).add(sign_value)
 
     refined_sorted: list[int] = []
     final_refined_scores: Dict[int, float] = {}
@@ -1091,10 +1121,23 @@ def detect_joins(
             return first
         return first if first >= second else second
 
+    def _has_opposite_nonzero(first: set[int] | None, second: set[int] | None) -> bool:
+        if not first or not second:
+            return False
+        return (1 in first and -1 in second) or (-1 in first and 1 in second)
+
     for idx in sorted(set(refined)):
         if 0 < idx < n:
             if refined_sorted and idx - refined_sorted[-1] < min_spacing:
                 prev_idx = refined_sorted[-1]
+                prev_signs = refined_signs.get(prev_idx, set())
+                curr_signs = refined_signs.get(idx, set())
+                if _has_opposite_nonzero(prev_signs, curr_signs):
+                    refined_sorted.append(idx)
+                    final_refined_scores[idx] = refined_source_scores.get(idx)
+                    final_refined_thresholds[idx] = refined_thresholds.get(idx)
+                    final_refined_spans[idx] = set(refined_span_map.get(idx, set()))
+                    continue
                 prev_spans = final_refined_spans.get(prev_idx, set())
                 curr_spans = refined_span_map.get(idx, set())
                 if prev_spans and curr_spans and prev_spans.isdisjoint(curr_spans):
@@ -1110,6 +1153,9 @@ def detect_joins(
                 if curr_diff_val > prev_diff_val:
                     previous_score = final_refined_scores.pop(prev_idx, refined_source_scores.get(prev_idx))
                     refined_sorted[-1] = idx
+                    combined_signs = set(prev_signs)
+                    combined_signs.update(curr_signs)
+                    refined_signs[idx] = combined_signs
                     final_refined_scores[idx] = _combine_scores(previous_score, refined_source_scores.get(idx))
                     previous_threshold = final_refined_thresholds.pop(prev_idx, refined_thresholds.get(prev_idx))
                     curr_threshold = refined_thresholds.get(idx)
@@ -1135,6 +1181,7 @@ def detect_joins(
                     final_refined_spans.setdefault(prev_idx, set()).update(
                         refined_span_map.get(idx, set())
                     )
+                    refined_signs.setdefault(prev_idx, set()).update(curr_signs)
                 continue
             refined_sorted.append(idx)
             final_refined_scores[idx] = refined_source_scores.get(idx)
