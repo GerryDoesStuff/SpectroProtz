@@ -157,8 +157,8 @@ class RecipeEditorDock(QDockWidget):
         join_section.setContentLayout(join_form)
         self.join_enable = QCheckBox("Enable detector join correction")
         self.join_enable.setToolTip(
-            "Detect and correct offsets where detectors overlap; enable when"
-            " multi-detector instruments need stitching."
+            "Detect and correct step offsets across detector overlaps; enable when"
+            " multi-detector instruments need plateau joins stitched."
         )
         self.join_window = QSpinBox()
         self.join_window.setRange(1, 999)
@@ -251,9 +251,11 @@ class RecipeEditorDock(QDockWidget):
 
         self.despike_enable = QCheckBox("Enable spike removal")
         self.despike_enable.setToolTip(
-            "Detect and replace narrow spikes using a z-score threshold on a sliding "
-            "window. Start from the documented default window=5/z-score≈5 and only "
-            "deviate when peak fidelity or spike persistence needs tighter tuning."
+            "Detect and replace transient spikes anywhere in the spectrum using a"
+            " z-score threshold on a sliding window. Join correction handles plateau"
+            " discontinuities, while despiking targets impulsive noise; start from"
+            " the documented default window=5/z-score≈5 and only deviate when peak"
+            " fidelity or spike persistence needs tighter tuning."
         )
         self.despike_window = QSpinBox()
         self.despike_window.setRange(3, 999)

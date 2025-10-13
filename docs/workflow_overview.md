@@ -213,23 +213,27 @@ The preprocessing stage honours the following recipe keys:
   existing recipes continue to work.【F:spectro_app/plugins/uvvis/plugin.py†L60-L78】【F:spectro_app/plugins/uvvis/plugin.py†L978-L1268】
 - **Join detection/correction** – `join.enabled`, `join.window`,
   `join.threshold`, `join.windows`, `join.offset_bounds`, `join.min_offset` and
-  `join.max_offset` manage detector stitching. Windows are provided per
-  instrument; detection defaults to a 10-point neighbourhood, so keep custom
-  values above `3` to ensure enough data for offset estimation.【F:spectro_app/plugins/uvvis/plugin.py†L60-L151】【F:spectro_app/plugins/uvvis/plugin.py†L951-L1015】【F:spectro_app/plugins/uvvis/pipeline.py†L700-L884】
+  `join.max_offset` manage detector stitching when adjacent detectors disagree
+  by a step change. Windows are provided per instrument so plateau-style
+  discontinuities can be isolated from transient spikes; detection defaults to
+  a 10-point neighbourhood, so keep custom values above `3` to ensure enough
+  data for offset estimation.【F:spectro_app/plugins/uvvis/plugin.py†L60-L151】【F:spectro_app/plugins/uvvis/plugin.py†L951-L1015】【F:spectro_app/plugins/uvvis/pipeline.py†L700-L884】
 - **Despiking** – `despike.enabled`, `despike.zscore`, `despike.window`,
   `despike.baseline_window`, `despike.spread_window`,
   `despike.spread_method`, `despike.spread_epsilon`,
   `despike.residual_floor`, `despike.max_passes`,
   `despike.isolation_ratio`, `despike.leading_padding`,
-  `despike.trailing_padding`, `despike.noise_scale_multiplier` and
-  `despike.rng_seed` shape the adaptive spike remover. Start with the
-  defaults (rolling median baseline, MAD spread, five point window, zero
-  padding) and tighten the z-score or window sizes when impulsive noise leaks
-  through. Increase or shrink `noise_scale_multiplier` (set it to `0` to
-  fully disable the jitter) when the repaired
-  points should better match neighbouring noise, and pin `rng_seed` for
-  deterministic noise injection during QA. Add padding when a steep slope or
-  guard band at a detector boundary should be left untouched.【F:spectro_app/plugins/uvvis/plugin.py†L1185-L1289】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L280】
+  `despike.trailing_padding`, `despike.noise_scale_multiplier`,
+  `despike.rng_seed` and optional spike exclusion regions shape the adaptive
+  spike remover that now scans the full spectrum instead of segmenting by
+  default. Start with the defaults (rolling median baseline, MAD spread, five
+  point window, zero padding) and tighten the z-score or window sizes when
+  impulsive noise leaks through. Increase or shrink `noise_scale_multiplier`
+  (set it to `0` to fully disable the jitter) when the repaired points should
+  better match neighbouring noise, pin `rng_seed` for deterministic noise
+  injection during QA, and define exclusion regions when narrow, real features
+  must survive untouched. Add padding when a steep slope or guard band at a
+  detector boundary should be left untouched.【F:spectro_app/plugins/uvvis/plugin.py†L1185-L1289】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L280】
 - **Baseline correction** – `baseline.method` selects `asls`, `rubberband` or
   `snip`. Combine with the parameters listed above; choose `asls` when gradual
   drift dominates, `rubberband` for broad curvature and `snip` for fluorescence

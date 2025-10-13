@@ -42,18 +42,18 @@
 ## Join Detection and Correction
 
 ### `normalise_join_windows`
-- Canonicalises join windows into explicit wavelength bounds while preserving per-window `spikes` limits (defaulting to a single join per window).
+- Canonicalises join windows into explicit wavelength bounds while preserving per-window `spikes` limits (defaulting to a single join per window) so plateau-style detector discontinuities can be targeted independently of narrow spikes.
 
 ### `detect_joins`
-- Computes rolling-median change scores, constrains candidates to configured windows, short-circuits when an explicit threshold cannot be met, derives an adaptive MAD-based threshold, recursively segments to isolate peaks, refines indices by local gradients and spacing rules, and trims results to each window’s spike allowance.
+- Computes rolling-median change scores, constrains candidates to configured windows, short-circuits when an explicit threshold cannot be met, derives an adaptive MAD-based threshold, recursively segments to isolate peaks, refines indices by local gradients and spacing rules, and trims results to each window’s spike allowance so only plateau discontinuities at detector overlaps are corrected.
 
 ### `correct_joins`
-- Measures pre/post window means, overlap errors, and robust median offsets around each detected join, clamps corrections to optional bounds, adjusts downstream samples, and logs raw/corrected segments plus rich diagnostics.
+- Measures pre/post window means, overlap errors, and robust median offsets around each detected join, clamps corrections to optional bounds, adjusts downstream samples, and logs raw/corrected segments plus rich diagnostics focused on stitching detectors that diverge by a step change.
 
 ## Spike Removal and Smoothing
 
 ### `despike_spectrum`
-- Segments the trace at detector joins, builds a rolling baseline and spread (median/MAD by default, with optional rolling standard deviation), replaces samples exceeding ``baseline ± zscore * spread`` with the local baseline, and iterates until a pass produces no new spikes or ``max_passes`` is reached. ``baseline_window``, ``spread_window``, ``spread_method``, ``spread_epsilon``, ``residual_floor`` and ``max_passes`` remain configurable so recipes can tighten or relax the adaptive rejection behaviour. ``leading_padding`` and ``trailing_padding`` can now reserve untouched samples at either end of each segment (default ``0``) so steep slopes or guard bands survive despiking intact. When a spike is replaced the corrected point is jittered by a zero-mean Gaussian draw scaled to the same local spread estimate, keeping the repaired sample inside the ambient noise floor. ``noise_scale_multiplier`` expands or shrinks that perturbation (set it to ``0`` to suppress the jitter entirely), while ``rng``/``rng_seed`` enable deterministic playback by passing an explicit Generator or seed to ``numpy.random.default_rng``.
+- Runs the adaptive spike remover across the full spectrum (optionally respecting explicit `join_indices` when supplied), builds a rolling baseline and spread (median/MAD by default, with optional rolling standard deviation), replaces samples exceeding ``baseline ± zscore * spread`` with the local baseline, and iterates until a pass produces no new spikes or ``max_passes`` is reached. ``baseline_window``, ``spread_window``, ``spread_method``, ``spread_epsilon``, ``residual_floor`` and ``max_passes`` remain configurable so recipes can tighten or relax the adaptive rejection behaviour. ``leading_padding`` and ``trailing_padding`` can now reserve untouched samples at either end of the trace (default ``0``) so steep slopes or guard bands survive despiking intact, while configurable spike exclusion regions let recipes fence off transient features that should remain untouched. When a spike is replaced the corrected point is jittered by a zero-mean Gaussian draw scaled to the same local spread estimate, keeping the repaired sample inside the ambient noise floor. ``noise_scale_multiplier`` expands or shrinks that perturbation (set it to ``0`` to suppress the jitter entirely), while ``rng``/``rng_seed`` enable deterministic playback by passing an explicit Generator or seed to ``numpy.random.default_rng``.
 
 ### `smooth_spectrum`
 - Runs Savitzky–Golay smoothing across the full trace or per segment between joins, automatically shrinking the window to fit each segment and tracking whether segmentation was necessary.
