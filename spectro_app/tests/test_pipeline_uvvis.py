@@ -265,6 +265,39 @@ def test_despike_multipass_detects_nested_spikes():
     assert np.allclose(despiked.intensity[untouched], baseline[untouched], atol=1e-8)
 
 
+def test_despike_leading_padding_preserves_prefix():
+    wl = np.linspace(240.0, 420.0, 181)
+    baseline = np.exp(0.02 * (wl - wl.min()))
+    intensity = baseline.copy()
+    spike_idx = np.array([40, 90, 130])
+    intensity[spike_idx] += np.array([4.0, 5.0, 3.0])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked_no_pad = pipeline.despike_spectrum(spec, window=9)
+    despiked_with_pad = pipeline.despike_spectrum(
+        spec,
+        window=9,
+        leading_padding=12,
+    )
+
+    assert np.allclose(despiked_with_pad.intensity[:12], baseline[:12])
+    assert np.allclose(
+        despiked_with_pad.intensity[spike_idx],
+        baseline[spike_idx],
+        rtol=2.5e-2,
+        atol=0.0,
+    )
+    assert np.allclose(
+        despiked_with_pad.intensity[12:],
+        despiked_no_pad.intensity[12:],
+        atol=0.15,
+    )
+    assert np.allclose(
+        despiked_no_pad.intensity,
+        pipeline.despike_spectrum(spec, window=9, leading_padding=0).intensity,
+    )
+
+
 def test_despike_respects_join_segments_with_local_baseline():
     wl = np.linspace(220.0, 380.0, 81)
     left = 0.2 + 0.002 * (wl - 220.0)
