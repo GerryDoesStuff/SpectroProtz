@@ -1582,6 +1582,57 @@ def despike_spectrum(
             valid_spread = spread > spread_epsilon
             candidate_mask = np.abs(residual) > float(zscore) * np.maximum(spread, spread_epsilon)
 
+            if np.any(candidate_mask):
+                newly_detected = candidate_mask & ~working_mask
+                if np.any(newly_detected):
+                    new_indices = np.flatnonzero(newly_detected)
+                    split_points = np.where(np.diff(new_indices) > 1)[0] + 1
+                    clusters = np.split(new_indices, split_points)
+                    tail_decay_ratio = 0.85
+                    for cluster in clusters:
+                        if cluster.size == 0:
+                            continue
+                        cluster_abs_residual = np.abs(residual[cluster])
+                        peak_local = int(cluster[np.argmax(cluster_abs_residual)])
+                        peak_residual = residual[peak_local]
+                        if peak_residual == 0:
+                            continue
+                        sign = 1.0 if peak_residual > 0 else -1.0
+                        peak_magnitude = float(abs(peak_residual))
+                        if peak_magnitude <= spread_epsilon:
+                            continue
+
+                        tail_start_floor = max(residual_floor, spread_epsilon)
+
+                        def _extend(start: int, stop: int, step: int) -> list[int]:
+                            collected: list[int] = []
+                            previous = peak_magnitude
+                            for idx in range(start, stop, step):
+                                value = residual[idx]
+                                if value * sign <= 0:
+                                    break
+                                magnitude = float(abs(value))
+                                if magnitude <= spread_epsilon:
+                                    break
+                                if magnitude < tail_start_floor and not collected:
+                                    break
+                                if magnitude > peak_magnitude * tail_decay_ratio:
+                                    break
+                                if magnitude > previous * tail_decay_ratio:
+                                    break
+                                collected.append(idx)
+                                previous = magnitude if magnitude > spread_epsilon else spread_epsilon
+                            return collected
+
+                        if sign > 0:
+                            right_indices = _extend(peak_local + 1, work_len, 1)
+                            if right_indices:
+                                candidate_mask[right_indices] = True
+                        else:
+                            left_indices = _extend(peak_local - 1, -1, -1)
+                            if left_indices:
+                                candidate_mask[left_indices] = True
+
             if not np.any(valid_spread):
                 global_scale = _global_spread(residual, method=spread_method)
                 if np.isfinite(global_scale) and global_scale > spread_epsilon:
