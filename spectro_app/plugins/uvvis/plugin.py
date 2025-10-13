@@ -1191,6 +1191,10 @@ class UvVisPlugin(SpectroscopyPlugin):
             "enabled": bool(despike_cfg.get("enabled")),
             "window": despike_cfg.get("window"),
             "zscore": self._coerce_float(despike_cfg.get("zscore")),
+            "noise_scale_multiplier": self._coerce_float(
+                despike_cfg.get("noise_scale_multiplier")
+            ),
+            "rng_seed": despike_cfg.get("rng_seed"),
         }
         pre_ctx["smoothing"] = {
             "enabled": bool(smoothing_cfg.get("enabled")),
@@ -1266,6 +1270,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     offset_bounds=bounds if bounds is not None else None,
                 )
             if despike_cfg.get("enabled"):
+                noise_scale = self._coerce_float(despike_cfg.get("noise_scale_multiplier"))
                 processed = pipeline.despike_spectrum(
                     processed,
                     zscore=despike_cfg.get("zscore", 5.0),
@@ -1280,6 +1285,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                     join_indices=joins,
                     leading_padding=despike_cfg.get("leading_padding", 0),
                     trailing_padding=despike_cfg.get("trailing_padding", 0),
+                    noise_scale_multiplier=noise_scale if noise_scale is not None else 1.0,
+                    rng_seed=despike_cfg.get("rng_seed"),
                 )
             processed.meta["join_indices"] = tuple(joins)
             stage_one.append(processed)
@@ -4041,6 +4048,11 @@ class UvVisPlugin(SpectroscopyPlugin):
             zscore_val = _fmt_float(despike_cfg.get("zscore"))
             if zscore_val is not None:
                 detail_parts.append(f"z-score={zscore_val}")
+            noise_scale = _fmt_float(despike_cfg.get("noise_scale_multiplier"))
+            if noise_scale is not None:
+                detail_parts.append(f"noise-scale={noise_scale}")
+            if despike_cfg.get("rng_seed") is not None:
+                detail_parts.append(f"rng-seed={despike_cfg.get('rng_seed')}")
             detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
             preprocessing_lines.append(f"Despiking enabled{detail}.")
         smoothing_cfg = preprocessing.get("smoothing") or {}

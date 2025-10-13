@@ -1417,6 +1417,9 @@ def despike_spectrum(
     join_indices: Sequence[int] | None = None,
     leading_padding: int = 0,
     trailing_padding: int = 0,
+    noise_scale_multiplier: float = 1.0,
+    rng: np.random.Generator | None = None,
+    rng_seed: int | np.random.SeedSequence | None = None,
 ) -> Spectrum:
     """Replace impulsive spikes using adaptive rolling baselines per segment.
 
@@ -1427,8 +1430,24 @@ def despike_spectrum(
     baseline and detection repeats until no spikes remain or ``max_passes`` is
     reached. Degenerate windows that collapse the spread fall back to global
     residual statistics so isolated spikes are still removed while gentle
-    curvature and real peaks are preserved.
+    curvature and real peaks are preserved. Replaced samples receive a small
+    random perturbation (zero-mean Gaussian) with a scale derived from the same
+    spread estimate used for detection so the corrected points blend into the
+    surrounding noise floor. ``noise_scale_multiplier`` can expand or shrink
+    that perturbation and callers may provide ``rng`` or ``rng_seed`` to control
+    reproducibility (both default to fresh ``default_rng`` draws when omitted).
     """
+
+    if noise_scale_multiplier < 0:
+        raise ValueError("noise_scale_multiplier must be non-negative")
+
+    if rng is not None and rng_seed is not None:
+        raise ValueError("Provide either rng or rng_seed, not both")
+
+    if rng is None:
+        noise_rng = np.random.default_rng(rng_seed)
+    else:
+        noise_rng = rng
 
     y = np.asarray(spec.intensity, dtype=float)
 
@@ -1582,11 +1601,36 @@ def despike_spectrum(
                     else:
                         candidate_mask = np.zeros(work_len, dtype=bool)
 
-            if not np.any(candidate_mask & ~working_mask):
+            newly_flagged = candidate_mask & ~working_mask
+            if not np.any(newly_flagged):
                 break
 
             working_mask |= candidate_mask
-            working[candidate_mask] = baseline[candidate_mask]
+
+            if np.any(newly_flagged) and noise_scale_multiplier > 0:
+                local_scale = np.asarray(spread[newly_flagged], dtype=float)
+                background_residual = residual[~candidate_mask]
+                background_scale = _global_spread(background_residual, method=spread_method)
+                if not np.isfinite(background_scale) or background_scale <= spread_epsilon:
+                    background_scale = spread_epsilon
+                if local_scale.size:
+                    invalid = ~np.isfinite(local_scale) | (local_scale <= spread_epsilon)
+                    if np.any(invalid):
+                        local_scale = local_scale.copy()
+                        local_scale[invalid] = background_scale
+                else:
+                    local_scale = np.array([], dtype=float)
+                local_scale = np.maximum(local_scale, spread_epsilon)
+                if np.isfinite(background_scale) and background_scale > 0:
+                    cap = max(background_scale, spread_epsilon) * 3.0
+                    local_scale = np.minimum(local_scale, cap)
+                noise = noise_rng.normal(
+                    loc=0.0,
+                    scale=np.asarray(local_scale, dtype=float) * float(noise_scale_multiplier),
+                )
+                working[newly_flagged] = baseline[newly_flagged] + noise
+            else:
+                working[newly_flagged] = baseline[newly_flagged]
 
         if leading:
             segment[:leading] = original_segment[:leading]

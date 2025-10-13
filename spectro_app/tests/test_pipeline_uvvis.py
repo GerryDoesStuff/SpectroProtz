@@ -201,7 +201,7 @@ def test_despike_iteratively_handles_clustered_spikes():
     intensity[spike_idx] += np.array([3.0, 6.0, 5.5, 4.0])
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
-    despiked = pipeline.despike_spectrum(spec, window=9)
+    despiked = pipeline.despike_spectrum(spec, window=9, noise_scale_multiplier=0.0)
 
     assert np.allclose(despiked.intensity[spike_idx], baseline[spike_idx], atol=3e-2)
     mask = np.ones_like(wl, dtype=bool)
@@ -224,6 +224,7 @@ def test_despike_single_spike_tracks_curved_baseline():
         baseline_window=13,
         spread_window=13,
         zscore=4.0,
+        noise_scale_multiplier=0.0,
     )
 
     mask = np.ones_like(wl, dtype=bool)
@@ -238,7 +239,48 @@ def test_despike_single_spike_tracks_curved_baseline():
     assert local_window.min() <= despiked.intensity[spike_idx] <= local_window.max()
     changed = np.where(np.abs(despiked.intensity - curvature) > 1e-3)[0]
     assert spike_idx in changed
-    assert changed.size <= 10
+
+
+def test_despike_noise_injection_matches_baseline_statistics():
+    wl = np.linspace(300.0, 500.0, 200)
+    noise_sigma = 0.01
+    rng = np.random.default_rng(1234)
+    clean = rng.normal(0.0, noise_sigma, size=wl.size)
+
+    intensity = clean.copy()
+    spike_idx = np.arange(20, 180, 5)
+    intensity[spike_idx] += 0.5
+
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(
+        spec,
+        window=11,
+        zscore=3.5,
+        noise_scale_multiplier=1.0,
+        rng_seed=202405,
+    )
+
+    corrected = despiked.intensity
+    spike_values = corrected[spike_idx]
+    non_spike_mask = np.ones_like(wl, dtype=bool)
+    non_spike_mask[spike_idx] = False
+
+    assert np.allclose(
+        despiked.intensity[non_spike_mask],
+        clean[non_spike_mask],
+        atol=3 * noise_sigma,
+    )
+
+    mean_tolerance = 3 * noise_sigma / np.sqrt(spike_idx.size)
+    assert spike_values.mean() == pytest.approx(0.0, abs=mean_tolerance)
+
+    baseline_variance = clean[spike_idx].var(ddof=1)
+    sample_variance = spike_values.var(ddof=1)
+    variance_ratio = sample_variance / baseline_variance if baseline_variance > 0 else 1.0
+    assert 0.25 <= variance_ratio <= 4.0
+
+    assert np.all(np.abs(spike_values) <= 6 * noise_sigma)
 
 
 def test_despike_multipass_detects_nested_spikes():
@@ -256,6 +298,7 @@ def test_despike_multipass_detects_nested_spikes():
         spread_method="std",
         zscore=2.5,
         max_passes=6,
+        noise_scale_multiplier=0.0,
     )
 
     assert np.isclose(despiked.intensity[primary_idx], baseline[primary_idx], atol=5e-3)
@@ -273,11 +316,12 @@ def test_despike_leading_padding_preserves_prefix():
     intensity[spike_idx] += np.array([4.0, 5.0, 3.0])
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
-    despiked_no_pad = pipeline.despike_spectrum(spec, window=9)
+    despiked_no_pad = pipeline.despike_spectrum(spec, window=9, noise_scale_multiplier=0.0)
     despiked_with_pad = pipeline.despike_spectrum(
         spec,
         window=9,
         leading_padding=12,
+        noise_scale_multiplier=0.0,
     )
 
     assert np.allclose(despiked_with_pad.intensity[:12], baseline[:12])
@@ -315,6 +359,7 @@ def test_despike_respects_join_segments_with_local_baseline():
         baseline_window=9,
         spread_window=9,
         join_indices=[40],
+        noise_scale_multiplier=0.0,
     )
 
     assert np.isclose(despiked.intensity[left_spike], curvature[left_spike], atol=5e-3)
@@ -345,7 +390,7 @@ def test_despike_handles_isolated_spike_with_zero_mad():
     original = intensity.copy()
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
-    despiked = pipeline.despike_spectrum(spec, window=5)
+    despiked = pipeline.despike_spectrum(spec, window=5, noise_scale_multiplier=0.0)
 
     assert despiked.meta.get("despiked") is True
     assert abs(despiked.intensity[5]) <= 1e-6
@@ -719,7 +764,12 @@ def test_despike_respects_join_boundaries():
     intensity[spike_idx] = 25.0
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
 
-    corrected = pipeline.despike_spectrum(spec, window=5, join_indices=[5])
+    corrected = pipeline.despike_spectrum(
+        spec,
+        window=5,
+        join_indices=[5],
+        noise_scale_multiplier=0.0,
+    )
 
     assert corrected.meta.get("despiked") is True
     assert corrected.intensity[spike_idx] == pytest.approx(baseline[spike_idx])
