@@ -1271,6 +1271,9 @@ class UvVisPlugin(SpectroscopyPlugin):
                 )
             if despike_cfg.get("enabled"):
                 noise_scale = self._coerce_float(despike_cfg.get("noise_scale_multiplier"))
+                exclusion_windows = pipeline.normalise_exclusion_windows(
+                    despike_cfg.get("exclusions")
+                )
                 processed = pipeline.despike_spectrum(
                     processed,
                     zscore=despike_cfg.get("zscore", 5.0),
@@ -1286,6 +1289,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     trailing_padding=despike_cfg.get("trailing_padding", 0),
                     noise_scale_multiplier=noise_scale if noise_scale is not None else 1.0,
                     rng_seed=despike_cfg.get("rng_seed"),
+                    exclusion_windows=exclusion_windows,
                 )
             processed.meta["join_indices"] = tuple(joins)
             stage_one.append(processed)

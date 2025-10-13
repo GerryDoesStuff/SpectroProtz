@@ -93,6 +93,22 @@ def test_coerce_domain_interpolates_from_merged_duplicates():
     assert np.allclose(coerced.meta["channels"]["raw"], expected_intensity)
 
 
+def test_normalise_exclusion_windows_accepts_multiple_forms():
+    config = {
+        "windows": [
+            {"min_nm": 400, "max_nm": 410},
+            {"lower": 420, "upper": 430},
+            [440, 450],
+        ]
+    }
+    result = pipeline.normalise_exclusion_windows(config)
+    assert result == [
+        {"lower_nm": 400.0, "upper_nm": 410.0},
+        {"lower_nm": 420.0, "upper_nm": 430.0},
+        {"lower_nm": 440.0, "upper_nm": 450.0},
+    ]
+
+
 def test_subtract_blank_records_channel():
     wl = np.array([400.0, 410.0, 420.0])
     sample_intensity = np.array([1.5, 1.7, 2.0])
@@ -202,6 +218,36 @@ def test_despike_removes_spikes_straddling_join_window():
     mask = np.ones_like(wl, dtype=bool)
     mask[spike_indices] = False
     assert np.allclose(despiked.intensity[mask], baseline[mask], atol=3e-2)
+
+
+def test_despike_respects_exclusion_windows():
+    wl = np.linspace(400.0, 700.0, 301)
+    baseline = 0.02 * np.sin(wl / 40.0)
+    intensity = baseline.copy()
+    excluded_idx = 150
+    neighbor_idx = excluded_idx + 5
+    intensity[excluded_idx] += 4.0
+    intensity[neighbor_idx] += 3.5
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    exclusions = [
+        {
+            "lower_nm": float(wl[excluded_idx]) - 0.5,
+            "upper_nm": float(wl[excluded_idx]) + 0.5,
+        }
+    ]
+
+    corrected = pipeline.despike_spectrum(
+        spec,
+        window=7,
+        zscore=2.5,
+        noise_scale_multiplier=0.0,
+        exclusion_windows=exclusions,
+    )
+
+    assert corrected.intensity[excluded_idx] == pytest.approx(intensity[excluded_idx])
+    assert corrected.intensity[neighbor_idx] == pytest.approx(baseline[neighbor_idx], abs=5e-3)
+    assert corrected.meta.get("despiked") is True
 
 
 def test_despike_iteratively_handles_clustered_spikes():

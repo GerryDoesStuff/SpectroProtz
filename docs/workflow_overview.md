@@ -224,7 +224,8 @@ The preprocessing stage honours the following recipe keys:
   `despike.residual_floor`, `despike.max_passes`,
   `despike.isolation_ratio`, `despike.leading_padding`,
   `despike.trailing_padding`, `despike.noise_scale_multiplier`,
-  `despike.rng_seed` and optional spike exclusion regions shape the adaptive
+  `despike.rng_seed` and optional spike exclusion regions (`despike.exclusions.windows`
+  with `min_nm`/`max_nm` bounds parsed by `normalise_exclusion_windows`) shape the adaptive
   spike remover that now scans the full spectrum instead of segmenting by
   default. Start with the defaults (rolling median baseline, MAD spread, five
   point window, zero padding) and tighten the z-score or window sizes when
