@@ -46,3 +46,33 @@ def test_smoothed_fallback_renders_preview(qt_app):
     finally:
         widget.deleteLater()
         qt_app.processEvents()
+
+
+def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app):
+    widget = SpectraPlotWidget()
+    try:
+        wavelength = np.array([400.0, 500.0, 600.0], dtype=float)
+        intensity = np.array([0.2, 0.5, 0.3], dtype=float)
+        despiked = np.array([0.25, 0.55, 0.35], dtype=float)
+
+        spectrum = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"channels": {"despiked": despiked}},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        despiked_checkbox = widget._stage_controls["despiked"]
+        smoothed_checkbox = widget._stage_controls["smoothed"]
+
+        assert despiked_checkbox.isEnabled()
+        assert despiked_checkbox.isChecked()
+
+        assert smoothed_checkbox.isEnabled()
+        assert not smoothed_checkbox.isChecked()
+        assert widget._smoothed_fallback_active
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
