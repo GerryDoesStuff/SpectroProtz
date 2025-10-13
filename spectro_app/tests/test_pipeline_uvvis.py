@@ -363,6 +363,32 @@ def test_despike_leading_padding_preserves_prefix():
     )
 
 
+def test_despike_padding_only_applies_at_global_edges():
+    wl = np.linspace(200.0, 260.0, 30)
+    baseline = 0.2 + 0.01 * (wl - wl[0])
+    intensity = baseline.copy()
+    interior_spikes = {11: baseline[11] + 3.0, 18: baseline[18] - 2.5}
+    for idx, value in interior_spikes.items():
+        intensity[idx] = value
+
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(
+        spec,
+        window=7,
+        join_indices=[10, 20],
+        leading_padding=2,
+        trailing_padding=2,
+        noise_scale_multiplier=0.0,
+    )
+
+    assert np.allclose(despiked.intensity[:2], baseline[:2])
+    assert np.allclose(despiked.intensity[-2:], baseline[-2:])
+    assert np.isclose(despiked.intensity[11], baseline[11], atol=5e-2)
+    assert np.isclose(despiked.intensity[18], baseline[18], atol=5e-2)
+    assert despiked.meta.get("despiked") is True
+
+
 def test_despike_respects_join_segments_with_local_baseline():
     wl = np.linspace(220.0, 380.0, 81)
     left = 0.2 + 0.002 * (wl - 220.0)

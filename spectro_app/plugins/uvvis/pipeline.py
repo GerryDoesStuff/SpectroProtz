@@ -1541,8 +1541,12 @@ def despike_spectrum(
         if seg_len < 3:
             continue
 
-        leading = min(pad_leading, seg_len)
-        trailing = min(pad_trailing, max(0, seg_len - leading))
+        leading = min(pad_leading, seg_len) if seg_start == 0 else 0
+        trailing_candidate = seg_len - leading
+        if seg_stop == n:
+            trailing = min(pad_trailing, max(0, trailing_candidate))
+        else:
+            trailing = 0
         work_start = leading
         work_stop = seg_len - trailing
         work_len = work_stop - work_start
