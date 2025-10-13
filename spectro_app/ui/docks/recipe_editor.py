@@ -250,14 +250,17 @@ class RecipeEditorDock(QDockWidget):
 
         self.despike_enable = QCheckBox("Enable spike removal")
         self.despike_enable.setToolTip(
-            "Detect and replace narrow spikes using a z-score threshold on a sliding window."
+            "Detect and replace narrow spikes using a z-score threshold on a sliding "
+            "window. Start from the documented default window=5/z-score≈5 and only "
+            "deviate when peak fidelity or spike persistence needs tighter tuning."
         )
         self.despike_window = QSpinBox()
         self.despike_window.setRange(3, 999)
         self.despike_window.setValue(5)
         self.despike_window.setToolTip(
-            "Number of points in the despiking window; the default five-point"
-            " window balances spike suppression with peak preservation."
+            "Number of points in the despiking window. Begin at the default 5 and"
+            " tighten only if spikes linger, typically ending between 7 and 10 when"
+            " broader spikes require more context."
         )
         self.despike_zscore = QDoubleSpinBox()
         self.despike_zscore.setRange(0.1, 99.9)
@@ -265,8 +268,9 @@ class RecipeEditorDock(QDockWidget):
         self.despike_zscore.setSingleStep(0.1)
         self.despike_zscore.setValue(5.0)
         self.despike_zscore.setToolTip(
-            "Z-score threshold for spike detection; UV-Vis recipes typically"
-            " stay between 2.5 and 6.0."
+            "Z-score threshold for spike detection. Start near the default ≈5 and"
+            " tighten toward 2.5–6 when spikes blend into noise or peaks are"
+            " delicate."
         )
 
         self.despike_baseline_window = QSpinBox()
@@ -274,9 +278,9 @@ class RecipeEditorDock(QDockWidget):
         self.despike_baseline_window.setSpecialValueText("Auto")
         self.despike_baseline_window.setValue(0)
         self.despike_baseline_window.setToolTip(
-            "Odd-length window for the rolling baseline. Leave on Auto to let"
-            " the despiker pick a segment-aware default sized relative to the"
-            " main detection window."
+            "Odd-length window for the rolling baseline. Auto (0) mirrors the"
+            " detection window—keep that default unless curvature demands manual"
+            " spans such as 9–13."
         )
 
         self.despike_spread_window = QSpinBox()
@@ -284,9 +288,9 @@ class RecipeEditorDock(QDockWidget):
         self.despike_spread_window.setSpecialValueText("Auto")
         self.despike_spread_window.setValue(0)
         self.despike_spread_window.setToolTip(
-            "Odd-length window for local spread estimation. Auto follows the"
-            " detection window; set explicitly to widen or tighten the"
-            " variance measurement."
+            "Odd-length window for local spread estimation. Auto (0) tracks the"
+            " detection window by default, with manual choices like 9–13 when"
+            " curvature or baseline drift needs extra smoothing."
         )
 
         self.despike_spread_method = QComboBox()
@@ -300,8 +304,9 @@ class RecipeEditorDock(QDockWidget):
             "Standard deviation (STD)", "std"
         )
         self.despike_spread_method.setToolTip(
-            "Statistic used for the spread term in the z-score; MAD is more"
-            " robust to spikes while STD tracks noise with fewer samples."
+            "Statistic used for the spread term in the z-score. MAD is the default"
+            " for robust spike rejection; switch to STD only when smooth,"
+            " Gaussian-like noise dominates."
         )
 
         self.despike_spread_epsilon = QDoubleSpinBox()
@@ -310,8 +315,9 @@ class RecipeEditorDock(QDockWidget):
         self.despike_spread_epsilon.setSingleStep(1e-6)
         self.despike_spread_epsilon.setValue(1e-6)
         self.despike_spread_epsilon.setToolTip(
-            "Minimum spread used when MAD/STD collapses. Increase if fully"
-            " flat regions still trigger spikes."
+            "Minimum spread used when MAD/STD collapses. Leave at the default"
+            " 1e-6 unless flat baselines still trigger spikes, then enlarge"
+            " cautiously."
         )
 
         self.despike_residual_floor = QDoubleSpinBox()
@@ -320,8 +326,9 @@ class RecipeEditorDock(QDockWidget):
         self.despike_residual_floor.setSingleStep(1e-3)
         self.despike_residual_floor.setValue(2e-2)
         self.despike_residual_floor.setToolTip(
-            "Floor applied to the residual-based fallback when windows collapse"
-            " so isolated spikes stay removable without flattening peaks."
+            "Floor applied to the residual-based fallback when windows collapse."
+            " The 0.02 default keeps isolated spikes removable without"
+            " flattening peaks."
         )
 
         self.despike_isolation_ratio = QDoubleSpinBox()
@@ -330,24 +337,27 @@ class RecipeEditorDock(QDockWidget):
         self.despike_isolation_ratio.setSingleStep(0.5)
         self.despike_isolation_ratio.setValue(20.0)
         self.despike_isolation_ratio.setToolTip(
-            "Minimum ratio between spike amplitude and residual floor before"
-            " a point is considered isolated and replaced."
+            "Minimum ratio between spike amplitude and the residual floor before"
+            " a point is considered isolated and replaced. Stay near the"
+            " ≈20 default unless clusters masquerade as noise."
         )
 
         self.despike_max_passes = QSpinBox()
         self.despike_max_passes.setRange(1, 100)
         self.despike_max_passes.setValue(10)
         self.despike_max_passes.setToolTip(
-            "Upper bound on iterative despiking passes per segment; raise when"
-            " clusters of spikes persist."
+            "Upper bound on iterative despiking passes per segment. The ≈10"
+            " default handles most data; raise only when clustered spikes"
+            " persist."
         )
 
         self.despike_leading_padding = QSpinBox()
         self.despike_leading_padding.setRange(0, 999)
         self.despike_leading_padding.setValue(0)
         self.despike_leading_padding.setToolTip(
-            "Samples to protect at the start of each segment before"
-            " despiking engages; helps preserve steep leading edges."
+            "Samples to protect at the start of each segment before despiking"
+            " engages. Leave at the zero-padding default unless sharp leading"
+            " edges smear."
         )
 
         self.despike_trailing_padding = QSpinBox()
@@ -355,7 +365,8 @@ class RecipeEditorDock(QDockWidget):
         self.despike_trailing_padding.setValue(0)
         self.despike_trailing_padding.setToolTip(
             "Samples to protect at the end of each segment so trailing"
-            " curvature survives despiking."
+            " curvature survives. Retain the zero-padding default unless"
+            " peaks roll off too aggressively."
         )
 
         self.despike_noise_scale_multiplier = QDoubleSpinBox()
@@ -364,16 +375,17 @@ class RecipeEditorDock(QDockWidget):
         self.despike_noise_scale_multiplier.setSingleStep(0.1)
         self.despike_noise_scale_multiplier.setValue(1.0)
         self.despike_noise_scale_multiplier.setToolTip(
-            "Multiplier for the synthetic noise injected into corrected"
-            " samples; 1.0 mirrors the detected spread."
+            "Multiplier for the synthetic noise injected into corrected samples."
+            " Hold the 1.0 default unless instrument noise statistics are"
+            " mis-modeled."
         )
 
         self.despike_rng_seed = QLineEdit()
         self.despike_rng_seed.setPlaceholderText("Leave blank for random seed")
         self.despike_rng_seed.setClearButtonEnabled(True)
         self.despike_rng_seed.setToolTip(
-            "Optional integer seed for reproducible noise injection. Leave"
-            " empty to draw a fresh seed each run."
+            "Optional RNG seed for reproducible spike replacement whenever"
+            " stochastic inpainting runs; leave blank for randomized fills."
         )
 
         despike_form.addRow(self.despike_enable)
