@@ -207,6 +207,25 @@ def test_despike_iteratively_handles_clustered_spikes():
     assert despiked.meta.get("despiked") is True
 
 
+def test_despike_handles_isolated_spike_with_zero_mad():
+    wl = np.linspace(400.0, 420.0, 11)
+    baseline = np.zeros_like(wl)
+    intensity = baseline.copy()
+    intensity[5] = 5.0
+    intensity[2] = 0.03
+    intensity[8] = -0.025
+    original = intensity.copy()
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(spec, window=5)
+
+    assert despiked.meta.get("despiked") is True
+    assert abs(despiked.intensity[5]) <= 1e-6
+    assert abs(despiked.intensity[5] - original[5]) >= 4.0
+    assert abs(despiked.intensity[2]) <= abs(original[2]) + 1e-9
+    assert abs(despiked.intensity[8]) <= abs(original[8]) + 1e-9
+
+
 def test_preprocess_join_correction_emits_channel_without_detected_joins(monkeypatch):
     plugin = UvVisPlugin()
     wl = np.linspace(400, 420, 11)
@@ -936,11 +955,12 @@ def test_correct_joins_clamps_offsets_with_bounds():
 
 def test_despike_and_smooth_operations():
     wl = np.linspace(400, 500, 51)
-    intensity = np.sin(wl / 20.0)
+    baseline = np.sin(wl / 20.0)
+    intensity = baseline.copy()
     intensity[25] += 10
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
     despiked = pipeline.despike_spectrum(spec, zscore=3.0, window=7)
-    assert abs(despiked.intensity[25] - intensity[25]) < 5
+    assert despiked.intensity[25] == pytest.approx(baseline[25], abs=5e-3)
 
     noisy = Spectrum(wavelength=wl, intensity=np.sin(wl / 18.0) + 0.2 * np.random.RandomState(0).normal(size=wl.size), meta={})
     smoothed = pipeline.smooth_spectrum(noisy, window=7, polyorder=3)
