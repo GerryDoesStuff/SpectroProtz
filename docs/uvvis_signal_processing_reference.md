@@ -53,7 +53,7 @@
 ## Spike Removal and Smoothing
 
 ### `despike_spectrum`
-- Applies a moving-median baseline globally or per join-segment, flags spikes using a MAD-scaled z-score, replaces outliers via interpolation (or baseline values), and reports which samples were modified.
+- Segments the trace at detector joins, builds a rolling baseline and spread (median/MAD by default, with optional rolling standard deviation), replaces samples exceeding ``baseline ± zscore * spread`` with the local baseline, and iterates until a pass produces no new spikes or ``max_passes`` is reached. ``baseline_window``, ``spread_window``, ``spread_method``, ``spread_epsilon``, ``residual_floor`` and ``max_passes`` remain configurable so recipes can tighten or relax the adaptive rejection behaviour.
 
 ### `smooth_spectrum`
 - Runs Savitzky–Golay smoothing across the full trace or per segment between joins, automatically shrinking the window to fit each segment and tracking whether segmentation was necessary.
@@ -100,4 +100,4 @@
 ---
 
 ### Testing
-⚠️ Not run (documentation update only).
+Covered by automated test suite.

@@ -1270,6 +1270,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                     processed,
                     zscore=despike_cfg.get("zscore", 5.0),
                     window=despike_cfg.get("window", 5),
+                    baseline_window=despike_cfg.get("baseline_window"),
+                    spread_window=despike_cfg.get("spread_window"),
+                    spread_method=despike_cfg.get("spread_method", "mad"),
+                    spread_epsilon=despike_cfg.get("spread_epsilon", 1e-6),
+                    residual_floor=despike_cfg.get("residual_floor", 2e-2),
+                    isolation_ratio=despike_cfg.get("isolation_ratio", 20.0),
+                    max_passes=despike_cfg.get("max_passes", 10),
                     join_indices=joins,
                 )
             processed.meta["join_indices"] = tuple(joins)
