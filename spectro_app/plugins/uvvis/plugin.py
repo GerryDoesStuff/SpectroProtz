@@ -1418,6 +1418,118 @@ class UvVisPlugin(SpectroscopyPlugin):
                 return_mapping=True,
                 outlier=outlier_cfg,
             )
+            corrected_samples: list[Spectrum] = []
+            corrections_by_id: dict[int, Spectrum] = {}
+
+            for averaged_spec in processed_samples:
+                replicates_meta = averaged_spec.meta.get("replicates") or []
+                if len(replicates_meta) <= 1:
+                    existing = averaged_spec.meta.get("join_indices")
+                    if existing is not None:
+                        averaged_spec.meta["join_indices"] = tuple(
+                            int(idx) for idx in existing
+                        )
+                    corrected_samples.append(averaged_spec)
+                    corrections_by_id[id(averaged_spec)] = averaged_spec
+                    continue
+
+                combined_indices: set[int] = set()
+                stored_window: int | None = None
+                stored_bounds: tuple[float | None, float | None] | None = None
+
+                existing_indices = averaged_spec.meta.get("join_indices")
+                if existing_indices:
+                    combined_indices.update(int(idx) for idx in existing_indices)
+
+                def _merge_from_stats(stats: Mapping[str, object] | None) -> None:
+                    nonlocal stored_window, stored_bounds
+                    if not stats:
+                        return
+                    window_val = stats.get("window") if isinstance(stats, Mapping) else None
+                    if stored_window is None and window_val is not None:
+                        try:
+                            stored_window = int(window_val)
+                        except (TypeError, ValueError):
+                            try:
+                                stored_window = int(float(window_val))
+                            except (TypeError, ValueError):
+                                stored_window = None
+                    bounds_val = stats.get("offset_bounds") if isinstance(stats, Mapping) else None
+                    if stored_bounds is None and bounds_val is not None:
+                        if isinstance(bounds_val, Mapping):
+                            stored_bounds = (
+                                bounds_val.get("min"),
+                                bounds_val.get("max"),
+                            )
+                        elif (
+                            isinstance(bounds_val, Sequence)
+                            and len(bounds_val) == 2
+                        ):
+                            stored_bounds = (bounds_val[0], bounds_val[1])
+
+                existing_stats = averaged_spec.meta.get("join_statistics")
+                if isinstance(existing_stats, Mapping):
+                    indices_val = existing_stats.get("indices")
+                    if indices_val:
+                        combined_indices.update(int(idx) for idx in indices_val)
+                    _merge_from_stats(existing_stats)
+
+                for entry in replicates_meta:
+                    entry_meta = entry.get("meta") if isinstance(entry, Mapping) else None
+                    if not isinstance(entry_meta, Mapping):
+                        continue
+                    rep_indices = entry_meta.get("join_indices")
+                    if rep_indices:
+                        combined_indices.update(int(idx) for idx in rep_indices)
+                    rep_stats = entry_meta.get("join_statistics")
+                    if isinstance(rep_stats, Mapping):
+                        indices_val = rep_stats.get("indices")
+                        if indices_val:
+                            combined_indices.update(int(idx) for idx in indices_val)
+                        _merge_from_stats(rep_stats)
+
+                if not combined_indices:
+                    corrected_samples.append(averaged_spec)
+                    corrections_by_id[id(averaged_spec)] = averaged_spec
+                    continue
+
+                sorted_indices = sorted({idx for idx in combined_indices if idx is not None})
+                if not sorted_indices:
+                    corrected_samples.append(averaged_spec)
+                    corrections_by_id[id(averaged_spec)] = averaged_spec
+                    continue
+
+                if stored_window is None:
+                    stored_window = int(join_cfg.get("window", 10))
+
+                offset_bounds_arg: tuple[float | None, float | None] | None = None
+                if stored_bounds is not None:
+                    offset_bounds_arg = tuple(stored_bounds)
+                else:
+                    bounds_cfg = join_cfg.get("offset_bounds")
+                    if isinstance(bounds_cfg, Sequence) and len(bounds_cfg) == 2:
+                        offset_bounds_arg = (bounds_cfg[0], bounds_cfg[1])
+                    else:
+                        min_offset = join_cfg.get("min_offset")
+                        max_offset = join_cfg.get("max_offset")
+                        if min_offset is not None or max_offset is not None:
+                            offset_bounds_arg = (min_offset, max_offset)
+
+                corrected = pipeline.correct_joins(
+                    averaged_spec,
+                    sorted_indices,
+                    window=stored_window,
+                    offset_bounds=offset_bounds_arg,
+                )
+                corrected.meta["join_indices"] = tuple(sorted_indices)
+                corrected_samples.append(corrected)
+                corrections_by_id[id(averaged_spec)] = corrected
+
+            processed_samples = corrected_samples
+            sample_map = {
+                key: corrections_by_id.get(id(spec), spec)
+                for key, spec in sample_map.items()
+            }
         else:
             sample_map = {pipeline.replicate_key(s): s for s in processed_samples}
 

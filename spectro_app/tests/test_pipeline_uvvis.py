@@ -1124,6 +1124,52 @@ def test_plugin_preprocess_full_pipeline():
     assert np.nanmax(processed_sample.intensity) > 0.01
 
 
+def test_replicate_averaging_corrects_mismatched_joins():
+    wl = np.arange(400.0, 520.0, 6.0)
+    base = np.linspace(0.05, 0.95, wl.size)
+
+    sample1_int = base.copy()
+    sample2_int = base.copy()
+    join_a = 5
+    join_b = 6
+    sample1_int[join_a:] += 0.6
+    sample2_int[join_b:] += 0.6
+
+    sample1 = Spectrum(
+        wavelength=wl,
+        intensity=sample1_int,
+        meta={"role": "sample", "sample_id": "S1", "channel": "rep1"},
+    )
+    sample2 = Spectrum(
+        wavelength=wl,
+        intensity=sample2_int,
+        meta={"role": "sample", "sample_id": "S1", "channel": "rep2"},
+    )
+
+    recipe = disable_blank_requirement(
+        {
+            "join": {"enabled": True, "threshold": 0.1, "window": 3},
+            "replicates": {"average": True},
+        }
+    )
+    plugin = UvVisPlugin()
+    processed = plugin.preprocess([sample1, sample2], recipe)
+
+    processed_sample = next(spec for spec in processed if spec.meta.get("role") != "blank")
+
+    join_indices = processed_sample.meta.get("join_indices")
+    assert join_indices == (join_a, join_b)
+
+    channels = processed_sample.meta.get("channels") or {}
+    join_corrected = channels.get("join_corrected")
+    assert join_corrected is not None
+    assert np.allclose(join_corrected, processed_sample.intensity)
+
+    join_stats = processed_sample.meta.get("join_statistics") or {}
+    assert join_stats.get("indices") == [join_a, join_b]
+    post_deltas = join_stats.get("post_deltas") or []
+    assert all(abs(delta) < 0.05 for delta in post_deltas if np.isfinite(delta))
+
 def test_blank_matching_strategy_default_blank_id():
     wl = np.linspace(400, 420, 5)
     blank = Spectrum(
