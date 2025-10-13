@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -376,20 +377,65 @@ class RecipeEditorDock(QDockWidget):
             " empty to draw a fresh seed each run."
         )
 
-        despike_form.addRow(self.despike_enable)
-        despike_form.addRow("Window", self.despike_window)
-        despike_form.addRow("Z-score", self.despike_zscore)
-        despike_form.addRow("Baseline window", self.despike_baseline_window)
-        despike_form.addRow("Spread window", self.despike_spread_window)
-        despike_form.addRow("Spread method", self.despike_spread_method)
-        despike_form.addRow("Spread epsilon", self.despike_spread_epsilon)
-        despike_form.addRow("Residual floor", self.despike_residual_floor)
-        despike_form.addRow("Isolation ratio", self.despike_isolation_ratio)
-        despike_form.addRow("Max passes", self.despike_max_passes)
-        despike_form.addRow("Leading padding", self.despike_leading_padding)
-        despike_form.addRow("Trailing padding", self.despike_trailing_padding)
-        despike_form.addRow("Noise scale", self.despike_noise_scale_multiplier)
-        despike_form.addRow("RNG seed", self.despike_rng_seed)
+        activation_group = QGroupBox("Activation & detection")
+        activation_layout = QFormLayout()
+        activation_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        activation_layout.setContentsMargins(6, 6, 6, 6)
+        activation_layout.setSpacing(6)
+        activation_layout.addRow(self.despike_enable)
+        activation_layout.addRow("Window", self.despike_window)
+        activation_layout.addRow("Z-score", self.despike_zscore)
+        activation_group.setLayout(activation_layout)
+
+        baseline_group = QGroupBox("Baseline & spread")
+        baseline_layout = QFormLayout()
+        baseline_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        baseline_layout.setContentsMargins(6, 6, 6, 6)
+        baseline_layout.setSpacing(6)
+        baseline_layout.addRow("Baseline window", self.despike_baseline_window)
+        baseline_layout.addRow("Spread window", self.despike_spread_window)
+        baseline_layout.addRow("Spread method", self.despike_spread_method)
+        baseline_layout.addRow("Spread epsilon", self.despike_spread_epsilon)
+        baseline_layout.addRow("Residual floor", self.despike_residual_floor)
+        baseline_group.setLayout(baseline_layout)
+
+        isolation_group = QGroupBox("Isolation & passes")
+        isolation_layout = QFormLayout()
+        isolation_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        isolation_layout.setContentsMargins(6, 6, 6, 6)
+        isolation_layout.setSpacing(6)
+        isolation_layout.addRow("Isolation ratio", self.despike_isolation_ratio)
+        isolation_layout.addRow("Max passes", self.despike_max_passes)
+        isolation_group.setLayout(isolation_layout)
+
+        padding_group = QGroupBox("Padding & noise")
+        padding_layout = QFormLayout()
+        padding_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        padding_layout.setContentsMargins(6, 6, 6, 6)
+        padding_layout.setSpacing(6)
+        padding_layout.addRow("Leading padding", self.despike_leading_padding)
+        padding_layout.addRow("Trailing padding", self.despike_trailing_padding)
+        padding_layout.addRow("Noise scale", self.despike_noise_scale_multiplier)
+        padding_layout.addRow("RNG seed", self.despike_rng_seed)
+        padding_group.setLayout(padding_layout)
+
+        despike_form.addRow(activation_group)
+        despike_form.addRow(baseline_group)
+        despike_form.addRow(isolation_group)
+        despike_form.addRow(padding_group)
+        self._despike_control_groups = (
+            baseline_group,
+            isolation_group,
+            padding_group,
+        )
         layout.addWidget(despike_section)
 
         # --- Blank handling ---
@@ -1124,6 +1170,8 @@ class RecipeEditorDock(QDockWidget):
         self.despike_trailing_padding.setEnabled(despike_enabled)
         self.despike_noise_scale_multiplier.setEnabled(despike_enabled)
         self.despike_rng_seed.setEnabled(despike_enabled)
+        for group in getattr(self, "_despike_control_groups", ()):
+            group.setEnabled(despike_enabled)
 
         join_enabled = self.join_enable.isChecked()
         self.join_window.setEnabled(join_enabled)
