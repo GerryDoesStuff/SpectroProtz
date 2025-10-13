@@ -210,6 +210,27 @@ def test_despike_iteratively_handles_clustered_spikes():
     assert despiked.meta.get("despiked") is True
 
 
+def test_despike_handles_tail_spike():
+    wl = np.linspace(260.0, 340.0, 161)
+    baseline = 0.15 + 0.0015 * (wl - wl.min())
+    intensity = baseline.copy()
+    spike_idx = 80
+    intensity[spike_idx] += 2.5
+    tail = 0.12 * np.exp(-np.arange(1, 7) / 1.5)
+    intensity[spike_idx + 1 : spike_idx + 1 + tail.size] += tail
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={})
+
+    despiked = pipeline.despike_spectrum(spec, window=7, noise_scale_multiplier=0.0)
+
+    tail_slice = slice(spike_idx, spike_idx + 1 + tail.size)
+    assert np.allclose(despiked.intensity[tail_slice], baseline[tail_slice], atol=2e-2)
+
+    left_guard = slice(spike_idx - 4, spike_idx)
+    right_guard = slice(spike_idx + 1 + tail.size, spike_idx + 1 + tail.size + 4)
+    assert np.allclose(despiked.intensity[left_guard], baseline[left_guard], atol=5e-3)
+    assert np.allclose(despiked.intensity[right_guard], baseline[right_guard], atol=5e-3)
+
+
 def test_despike_single_spike_tracks_curved_baseline():
     wl = np.linspace(320.0, 720.0, 161)
     curvature = 0.25 + 0.06 * np.sin(wl / 35.0) + 0.0004 * (wl - 520.0) ** 2
