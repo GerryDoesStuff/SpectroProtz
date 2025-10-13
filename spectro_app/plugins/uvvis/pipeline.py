@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, uniform_filter1d
 from scipy.signal import savgol_filter
 from scipy.sparse.linalg import spsolve
 
@@ -1407,13 +1407,25 @@ def despike_spectrum(
     *,
     zscore: float = 5.0,
     window: int = 5,
+    baseline_window: int | None = None,
+    spread_window: int | None = None,
+    spread_method: str = "mad",
+    spread_epsilon: float = 1e-6,
+    residual_floor: float = 2e-2,
+    isolation_ratio: float = 20.0,
+    max_passes: int = 10,
     join_indices: Sequence[int] | None = None,
 ) -> Spectrum:
-    """Replace spikes using a moving median filter with robust detection.
+    """Replace impulsive spikes using adaptive rolling baselines per segment.
 
-    When ``join_indices`` are supplied the spectrum is segmented and each
-    portion is processed independently so spikes near detector joins are
-    corrected without smoothing across the discontinuity.
+    Each contiguous segment between detector joins is processed independently.
+    Within a segment the intensity trace is iteratively compared against a
+    rolling baseline and local spread estimate; samples exceeding
+    ``baseline ± zscore * spread`` are replaced with the contemporaneous
+    baseline and detection repeats until no spikes remain or ``max_passes`` is
+    reached. Degenerate windows that collapse the spread fall back to global
+    residual statistics so isolated spikes are still removed while gentle
+    curvature and real peaks are preserved.
     """
 
     y = np.asarray(spec.intensity, dtype=float)
@@ -1432,159 +1444,126 @@ def despike_spectrum(
     if y.size < 3:
         return _final_spectrum(y.copy())
 
+    def _normalise_window(length: int, requested: int | None, fallback: int) -> int | None:
+        if length < 3:
+            return None
+        base = fallback if requested is None else int(requested)
+        if base <= 1:
+            base = 3
+        eff = min(int(base), length)
+        if eff < 3:
+            return None
+        if eff % 2 == 0:
+            eff = max(3, eff - 1)
+            if eff > length:
+                eff = length if length % 2 == 1 else max(3, length - 1)
+        if eff < 3:
+            return None
+        return eff
+
     base_window = int(window)
     if base_window <= 1:
         base_window = 3
-    if base_window < 3:
-        return _final_spectrum(y.copy())
 
     n = y.size
-
-    def _effective_window(length: int) -> int | None:
-        if length < 3:
-            return None
-        eff = base_window
-        if eff > length:
-            eff = length
-        if eff < 3:
-            return None
-        return int(eff)
 
     joins: list[int] = []
     if join_indices:
         joins = sorted({int(idx) for idx in join_indices if 0 < int(idx) < n})
 
-    max_iter = 10
-
-    residual_tolerance = 2e-2
-    isolated_ratio = 20.0
-
-    if not joins:
-        window_size = _effective_window(n)
-        if window_size is None:
-            return _final_spectrum(y.copy())
-
-        corrected = y.copy()
-        mask = np.zeros(n, dtype=bool)
-        for _ in range(max_iter):
-            baseline = median_filter(corrected, size=window_size, mode="nearest")
-            residual = corrected - baseline
-            mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
-            if np.isfinite(mad) and mad > 0:
-                threshold = float(zscore) * 1.4826 * mad
-                candidate_mask = np.abs(residual) > threshold
-            else:
-                nonzero = np.abs(residual) > 1e-12
-                if np.any(nonzero) and np.count_nonzero(nonzero) < n:
-                    abs_residual = np.abs(residual)
-                    max_residual = float(abs_residual.max(initial=0.0))
-                    if max_residual <= max(residual_tolerance, 1e-12):
-                        candidate_mask = np.zeros(n, dtype=bool)
-                    else:
-                        candidate_mask = abs_residual >= max_residual - 1e-12
-                        if np.count_nonzero(candidate_mask) >= n:
-                            candidate_mask = np.zeros(n, dtype=bool)
-                        if not np.any(mask):
-                            unmasked = abs_residual
-                            if unmasked.size > 1:
-                                second_largest = float(
-                                    np.partition(unmasked, -2)[-2]
-                                )
-                            else:
-                                second_largest = 0.0
-                            if second_largest <= max(residual_tolerance, 1e-12):
-                                second_largest = 0.0
-                            if not (
-                                second_largest > 0.0
-                                and max_residual >= isolated_ratio * second_largest
-                            ):
-                                candidate_mask = np.zeros(n, dtype=bool)
-                                if max_residual > max(residual_tolerance, 1e-12):
-                                    max_index = int(np.nanargmax(abs_residual))
-                                    candidate_mask[max_index] = True
-                else:
-                    median_val = np.nanmedian(corrected)
-                    deviation = np.abs(corrected - median_val)
-                    max_deviation = float(deviation.max(initial=0.0))
-                    deviation_mask = deviation > 1e-12
-                    if (
-                        max_deviation > max(residual_tolerance, 1e-12)
-                        and np.any(deviation_mask)
-                        and np.count_nonzero(deviation_mask) < n
-                    ):
-                        candidate_mask = deviation >= max_deviation - 1e-12
-                        if np.count_nonzero(candidate_mask) >= n:
-                            candidate_mask = np.zeros(n, dtype=bool)
-                    else:
-                        candidate_mask = np.zeros(n, dtype=bool)
-            new_points = candidate_mask & ~mask
-            mask = mask | candidate_mask
-            if not np.any(new_points):
-                break
-            indices = np.arange(n)
-            good = indices[~mask]
-            if good.size >= 2:
-                corrected[mask] = np.interp(indices[mask], good, corrected[~mask])
-            else:
-                corrected[mask] = baseline[mask]
-        return _final_spectrum(corrected, mask=mask)
-
     boundaries = [0, *joins, n]
     corrected = y.copy()
     overall_mask = np.zeros(n, dtype=bool)
 
-    for start, stop in zip(boundaries[:-1], boundaries[1:]):
-        segment = corrected[start:stop]
+    def _rolling_baseline(values: np.ndarray, size: int) -> np.ndarray:
+        if size <= 1:
+            return values
+        return median_filter(values, size=size, mode="reflect")
+
+    def _rolling_spread(residual: np.ndarray, size: int, *, method: str) -> np.ndarray:
+        if size <= 1:
+            spread = np.abs(residual)
+        else:
+            method_lower = method.lower()
+            if method_lower == "mad":
+                spread = median_filter(np.abs(residual), size=size, mode="reflect")
+                spread = spread * 1.4826
+            elif method_lower in {"std", "variance", "var"}:
+                mean = uniform_filter1d(residual, size=size, mode="reflect")
+                mean_sq = uniform_filter1d(residual * residual, size=size, mode="reflect")
+                variance = np.maximum(mean_sq - mean * mean, 0.0)
+                if method_lower == "std":
+                    spread = np.sqrt(variance)
+                else:
+                    spread = np.sqrt(variance)
+            else:
+                raise ValueError(f"Unsupported spread_method '{method}'")
+        return spread
+
+    def _global_spread(residual: np.ndarray, *, method: str) -> float:
+        method_lower = method.lower()
+        finite_residual = residual[np.isfinite(residual)]
+        if finite_residual.size == 0:
+            return float("nan")
+        if method_lower == "mad":
+            med = np.nanmedian(np.abs(finite_residual))
+            return float(med * 1.4826)
+        return float(np.nanstd(finite_residual))
+
+    for seg_start, seg_stop in zip(boundaries[:-1], boundaries[1:]):
+        segment = corrected[seg_start:seg_stop]
         seg_len = segment.size
-        seg_window = _effective_window(seg_len)
-        if seg_window is None:
+        if seg_len < 3:
             continue
 
+        seg_baseline_window = _normalise_window(seg_len, baseline_window, base_window)
+        if seg_baseline_window is None:
+            continue
+        seg_spread_window = _normalise_window(
+            seg_len,
+            spread_window,
+            seg_baseline_window if baseline_window is not None else base_window,
+        )
+        if seg_spread_window is None:
+            seg_spread_window = seg_baseline_window
+
         seg_mask = np.zeros(seg_len, dtype=bool)
-        for _ in range(max_iter):
-            baseline = median_filter(segment, size=seg_window, mode="nearest")
+
+        for _ in range(int(max_passes)):
+            baseline = _rolling_baseline(segment, seg_baseline_window)
             residual = segment - baseline
-            mad = np.nanmedian(np.abs(residual - np.nanmedian(residual)))
-            if np.isfinite(mad) and mad > 0:
-                threshold = float(zscore) * 1.4826 * mad
-                candidate_mask = np.abs(residual) > threshold
-            else:
-                nonzero = np.abs(residual) > 1e-12
-                if np.any(nonzero) and np.count_nonzero(nonzero) < seg_len:
+            spread = _rolling_spread(residual, seg_spread_window, method=spread_method)
+            spread = np.asarray(spread, dtype=float)
+
+            valid_spread = spread > spread_epsilon
+            candidate_mask = np.abs(residual) > float(zscore) * np.maximum(spread, spread_epsilon)
+
+            if not np.any(valid_spread):
+                global_scale = _global_spread(residual, method=spread_method)
+                if np.isfinite(global_scale) and global_scale > spread_epsilon:
+                    candidate_mask |= np.abs(residual) > float(zscore) * global_scale
+                else:
                     abs_residual = np.abs(residual)
                     max_residual = float(abs_residual.max(initial=0.0))
-                    if max_residual <= max(residual_tolerance, 1e-12):
-                        candidate_mask = np.zeros(seg_len, dtype=bool)
-                    else:
-                        candidate_mask = abs_residual >= max_residual - 1e-12
-                        if np.count_nonzero(candidate_mask) >= seg_len:
-                            candidate_mask = np.zeros(seg_len, dtype=bool)
-                else:
-                    median_val = np.nanmedian(segment)
-                    deviation = np.abs(segment - median_val)
-                    max_deviation = float(deviation.max(initial=0.0))
-                    deviation_mask = deviation > 1e-12
-                    if (
-                        max_deviation > max(residual_tolerance, 1e-12)
-                        and np.any(deviation_mask)
-                        and np.count_nonzero(deviation_mask) < seg_len
-                    ):
-                        candidate_mask = deviation >= max_deviation - 1e-12
-                        if np.count_nonzero(candidate_mask) >= seg_len:
+                    if max_residual > max(residual_floor, spread_epsilon):
+                        if abs_residual.size > 1:
+                            second = float(np.partition(abs_residual, -2)[-2])
+                        else:
+                            second = 0.0
+                        if second <= 0 or max_residual >= isolation_ratio * second:
+                            candidate_mask = abs_residual >= max_residual - 1e-12
+                        else:
                             candidate_mask = np.zeros(seg_len, dtype=bool)
                     else:
                         candidate_mask = np.zeros(seg_len, dtype=bool)
-            new_points = candidate_mask & ~seg_mask
-            seg_mask = seg_mask | candidate_mask
-            if not np.any(new_points):
+
+            if not np.any(candidate_mask & ~seg_mask):
                 break
-            indices = np.arange(seg_len)
-            good = indices[~seg_mask]
-            if good.size >= 2:
-                segment[seg_mask] = np.interp(indices[seg_mask], good, segment[~seg_mask])
-            else:
-                segment[seg_mask] = baseline[seg_mask]
-        overall_mask[start:stop] = seg_mask
+
+            seg_mask |= candidate_mask
+            segment[candidate_mask] = baseline[candidate_mask]
+
+        overall_mask[seg_start:seg_stop] = seg_mask
 
     return _final_spectrum(corrected, mask=overall_mask)
 
