@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks, peak_widths, savgol_filter
@@ -3351,7 +3352,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             return None
         channels = spec.meta.get("channels") or {}
         sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = self._create_subplots(figsize=(6, 4))
         ax.plot(wl, intensity, label="Processed", linewidth=1.5)
         stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
         ordered_names = [name for name in stage_order if name in channels]
@@ -3428,7 +3429,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             window = max(10, min(80, n // 10))
             start = max(0, idx - window)
             stop = min(n, idx + window)
-            fig, ax = plt.subplots(figsize=(6, 3.5))
+            fig, ax = self._create_subplots(figsize=(6, 3.5))
             ax.plot(wl[start:stop], raw_vals[start:stop], label="Before join", color="tab:gray", linewidth=1.2)
             ax.plot(
                 wl[start:stop],
@@ -3465,7 +3466,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             if not np.any(np.isfinite(concentrations)) or not np.any(np.isfinite(responses)):
                 continue
 
-            fig, (ax_fit, ax_resid) = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+            fig, (ax_fit, ax_resid) = self._create_subplots(2, 1, figsize=(6, 6), sharex=True)
             inc_x = concentrations[included_mask]
             inc_y = responses[included_mask]
             exc_x = concentrations[~included_mask]
@@ -3560,7 +3561,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     ) -> Figure:
         x = np.arange(len(sample_labels), dtype=float)
         width = max(6.0, len(sample_labels) * 0.6)
-        fig, ax = plt.subplots(figsize=(width, 4.0))
+        fig, ax = UvVisPlugin._create_subplots(figsize=(width, 4.0))
         scatter = ax.scatter(
             x[finite_mask],
             noise_values[finite_mask],
@@ -3588,7 +3589,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         if finite_noise.size < 3:
             return None
         bins = min(30, max(5, int(np.ceil(np.sqrt(finite_noise.size)))))
-        fig, ax = plt.subplots(figsize=(6.0, 4.0))
+        fig, ax = UvVisPlugin._create_subplots(figsize=(6.0, 4.0))
         ax.hist(
             finite_noise,
             bins=bins,
@@ -3657,7 +3658,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         ordered_noise = valid_noise[order]
         ordered_labels = valid_labels[order]
 
-        fig, ax = plt.subplots(figsize=(6.0, 4.0))
+        fig, ax = self._create_subplots(figsize=(6.0, 4.0))
         ordered_python_times = ordered_times.to_pydatetime()
         ax.plot(ordered_python_times, ordered_noise, linestyle="-", marker="o", color="tab:blue")
         for time_val, noise_val, label in zip(ordered_python_times, ordered_noise, ordered_labels):
@@ -4061,7 +4062,7 @@ class UvVisPlugin(SpectroscopyPlugin):
     ) -> None:
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         with PdfPages(pdf_path) as pdf:
-            summary_fig, ax = plt.subplots(figsize=(8.5, 11))
+            summary_fig, ax = self._create_subplots(figsize=(8.5, 11))
             ax.axis("off")
             title = "UV-Vis Export Report"
             ax.text(0.5, 0.95, title, ha="center", va="center", fontsize=16, fontweight="bold")
@@ -4168,3 +4169,15 @@ class UvVisPlugin(SpectroscopyPlugin):
             audit=workbook_audit,
             report_text=report_text,
         )
+    @staticmethod
+    def _create_subplots(*args, **kwargs):
+        """Create a figure and axes without registering them with pyplot."""
+
+        kwargs = dict(kwargs)
+        fig_kwargs: Dict[str, object] = {}
+        if "figsize" in kwargs:
+            fig_kwargs["figsize"] = kwargs.pop("figsize")
+        fig = Figure(**fig_kwargs)
+        FigureCanvasAgg(fig)
+        axes = fig.subplots(*args, **kwargs)
+        return fig, axes
