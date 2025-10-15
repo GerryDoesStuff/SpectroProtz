@@ -1048,10 +1048,7 @@ class RecipeEditorDock(QDockWidget):
             self.despike_rng_seed.setText(
                 "" if rng_seed in (None, "") else str(rng_seed)
             )
-        else:
-            self._load_despike_exclusions(None)
-
-        join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
+            join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
             self.join_enable.setChecked(bool(join_cfg.get("enabled", False)))
             self.join_window.setValue(
                 self._safe_int(join_cfg.get("window"), self.join_window.value())
