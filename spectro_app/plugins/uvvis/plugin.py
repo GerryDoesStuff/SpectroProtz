@@ -1194,6 +1194,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             "noise_scale_multiplier": self._coerce_float(
                 despike_cfg.get("noise_scale_multiplier")
             ),
+            "tail_decay_ratio": self._coerce_float(despike_cfg.get("tail_decay_ratio")),
             "rng_seed": despike_cfg.get("rng_seed"),
         }
         pre_ctx["smoothing"] = {
@@ -1274,6 +1275,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                 exclusion_windows = pipeline.normalise_exclusion_windows(
                     despike_cfg.get("exclusions")
                 )
+                tail_ratio = self._coerce_float(despike_cfg.get("tail_decay_ratio"))
+
                 processed = pipeline.despike_spectrum(
                     processed,
                     zscore=despike_cfg.get("zscore", 5.0),
@@ -1284,6 +1287,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     spread_epsilon=despike_cfg.get("spread_epsilon", 1e-6),
                     residual_floor=despike_cfg.get("residual_floor", 2e-2),
                     isolation_ratio=despike_cfg.get("isolation_ratio", 20.0),
+                    tail_decay_ratio=tail_ratio if tail_ratio is not None else 0.85,
                     max_passes=despike_cfg.get("max_passes", 10),
                     leading_padding=despike_cfg.get("leading_padding", 0),
                     trailing_padding=despike_cfg.get("trailing_padding", 0),
@@ -4054,6 +4058,9 @@ class UvVisPlugin(SpectroscopyPlugin):
             noise_scale = _fmt_float(despike_cfg.get("noise_scale_multiplier"))
             if noise_scale is not None:
                 detail_parts.append(f"noise-scale={noise_scale}")
+            tail_ratio = _fmt_float(despike_cfg.get("tail_decay_ratio"))
+            if tail_ratio is not None:
+                detail_parts.append(f"tail-decay={tail_ratio}")
             if despike_cfg.get("rng_seed") is not None:
                 detail_parts.append(f"rng-seed={despike_cfg.get('rng_seed')}")
             detail = f" ({', '.join(detail_parts)})" if detail_parts else ""

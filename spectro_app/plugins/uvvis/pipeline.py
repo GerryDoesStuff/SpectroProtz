@@ -1491,6 +1491,7 @@ def despike_spectrum(
     spread_epsilon: float = 1e-6,
     residual_floor: float = 2e-2,
     isolation_ratio: float = 20.0,
+    tail_decay_ratio: float = 0.85,
     max_passes: int = 10,
     join_indices: Sequence[int] | None = None,
     leading_padding: int = 0,
@@ -1518,6 +1519,9 @@ def despike_spectrum(
     reproducibility (both default to fresh ``default_rng`` draws when omitted).
     Optional ``exclusion_windows`` (expressed as wavelength bounds) fence off
     spectral regions that should be ignored by spike detection and replacement.
+    ``tail_decay_ratio`` tunes how aggressively spike tails must decay before
+    they are absorbed into the correction cluster; raise it toward ``1`` to
+    chase broader shoulders or lower it to demand steeper fall-offs.
     """
 
     if noise_scale_multiplier < 0:
@@ -1525,6 +1529,10 @@ def despike_spectrum(
 
     if rng is not None and rng_seed is not None:
         raise ValueError("Provide either rng or rng_seed, not both")
+
+    if not (0.0 < float(tail_decay_ratio) <= 1.0):
+        raise ValueError("tail_decay_ratio must be in the interval (0, 1]")
+    tail_decay_ratio = float(tail_decay_ratio)
 
     if rng is None:
         noise_rng = np.random.default_rng(rng_seed)
@@ -1698,7 +1706,6 @@ def despike_spectrum(
                 new_indices = np.flatnonzero(newly_detected)
                 split_points = np.where(np.diff(new_indices) > 1)[0] + 1
                 clusters = np.split(new_indices, split_points)
-                tail_decay_ratio = 0.85
                 for cluster in clusters:
                     if cluster.size == 0:
                         continue
