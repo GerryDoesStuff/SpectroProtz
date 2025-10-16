@@ -2,22 +2,46 @@ import hashlib
 import io
 import json
 import math
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
-import numpy as np
 
 from importlib import metadata
 from openpyxl import Workbook, load_workbook
 
 from scipy.signal import savgol_filter
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+try:  # pragma: no cover - optional dependency at test time
+    from PyQt6 import QtWidgets
+except ImportError:  # pragma: no cover - handled by skip logic
+    QtWidgets = None  # type: ignore[assignment]
+
+from spectro_app.app_context import AppContext
 from spectro_app.engine import excel_writer
-from spectro_app.engine.plugin_api import Spectrum
-from spectro_app.plugins.uvvis.plugin import UvVisPlugin
+from spectro_app.engine.plugin_api import BatchResult, Spectrum
 from spectro_app.plugins.uvvis import pipeline
+from spectro_app.plugins.uvvis.plugin import UvVisPlugin
+
+if QtWidgets is not None:  # pragma: no cover - optional UI dependency
+    from spectro_app.ui.main_window import MainWindow
+else:  # pragma: no cover - optional UI dependency
+    MainWindow = None  # type: ignore[assignment]
+
+
+@pytest.fixture(scope="module")
+def qt_app():
+    if QtWidgets is None:
+        pytest.skip("PyQt6 not available")
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    return app
 
 
 def _mock_spectrum():
@@ -397,6 +421,78 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
                 cell_value = row[column_index[col_name]]
                 assert cell_value is not None
                 assert cell_value == pytest.approx(float(inten_val))
+
+
+def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
+    tmp_path, qt_app, monkeypatch
+):
+    if QtWidgets is None or MainWindow is None:
+        pytest.skip("PyQt6 not available")
+    ctx = AppContext()
+    window = MainWindow(ctx)
+    try:
+        plugin = window._plugin_registry.get("uvvis")
+        assert plugin is not None
+
+        spec = _mock_spectrum()
+        recipe = {"export": {}}
+        processed, qc_rows = plugin.analyze([spec], recipe)
+
+        window._active_plugin = plugin
+        window._active_plugin_id = plugin.id
+        window._last_result = BatchResult(
+            processed=list(processed),
+            qc_table=list(qc_rows),
+            figures={},
+            audit=[],
+            report_text=None,
+        )
+        window._recipe_data.setdefault("export", {})
+
+        export_target = tmp_path / "ui_uvvis_export.xlsx"
+
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(export_target), "xlsx"),
+        )
+
+        monkeypatch.setattr(
+            window,
+            "_prompt_export_layout",
+            lambda current_layout: "wide",
+        )
+
+        window.on_export()
+
+        export_cfg = window._recipe_data.get("export", {})
+        assert export_cfg.get("processed_layout") == "wide"
+
+        assert export_target.exists(), "Workbook should be written via UI export"
+
+        wb = load_workbook(export_target)
+        ws_processed = wb["Processed_Spectra"]
+
+        header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
+        base_columns = ["spectrum_index", "sample_id", "role", "mode"]
+        assert header[: len(base_columns)] == base_columns
+
+        data_rows = list(ws_processed.iter_rows(min_row=2, values_only=True))
+        assert len(data_rows) == len(processed)
+
+        header_dynamic = set(header[len(base_columns) :])
+        expected_columns = set()
+        for spec in processed:
+            wavelengths = np.asarray(spec.wavelength, dtype=float)
+            for channel_label, _ in excel_writer._iter_channels(spec, wavelengths):
+                for wl_val in wavelengths:
+                    expected_columns.add(
+                        excel_writer._format_channel_column(channel_label, float(wl_val))
+                    )
+
+        assert expected_columns == header_dynamic
+    finally:
+        window.close()
 
 
 def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
