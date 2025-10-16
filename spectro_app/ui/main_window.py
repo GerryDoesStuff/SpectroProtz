@@ -11,7 +11,10 @@ from PyQt6.QtGui import QDesktopServices
 
 from spectro_app.engine.plugin_api import BatchResult
 from spectro_app.engine.recipe_model import Recipe
-from spectro_app.engine.run_controller import RunController
+from spectro_app.engine.run_controller import (
+    PREVIEW_EXPORT_DISABLED_FLAG,
+    RunController,
+)
 from spectro_app.plugins.ftir.plugin import FtirPlugin
 from spectro_app.plugins.pees.plugin import PeesPlugin
 from spectro_app.plugins.raman.plugin import RamanPlugin
@@ -676,10 +679,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._config_update_timer.stop()
         self._update_recipe_from_ui()
         recipe_payload = self._build_recipe_payload()
+        effective_recipe_payload = recipe_payload
+        if auto_triggered:
+            effective_recipe_payload = self._build_preview_recipe_payload(recipe_payload)
         recipe_model = Recipe(
-            module=recipe_payload.get("module", "uvvis"),
-            params=recipe_payload.get("params", {}),
-            version=str(recipe_payload.get("version", Recipe().version)),
+            module=effective_recipe_payload.get("module", "uvvis"),
+            params=effective_recipe_payload.get("params", {}),
+            version=str(effective_recipe_payload.get("version", Recipe().version)),
         )
         errors = recipe_model.validate()
         if errors:
@@ -695,7 +701,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         plugin = self._resolve_plugin(
-            self._queued_paths, recipe_payload.get("module")
+            self._queued_paths, effective_recipe_payload.get("module")
         )
         if not plugin:
             if auto_triggered:
@@ -734,7 +740,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
         self._auto_run_pending = False
-        self.runctl.start(plugin, self._queued_paths, recipe_payload)
+        self.runctl.start(plugin, self._queued_paths, effective_recipe_payload)
         return True
 
     def on_run(self):
@@ -1751,6 +1757,33 @@ class MainWindow(QtWidgets.QMainWindow):
         payload.setdefault("version", Recipe().version)
         self._recipe_data = copy.deepcopy(payload)
         return payload
+
+    def _build_preview_recipe_payload(
+        self, recipe_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        preview_payload = copy.deepcopy(recipe_payload)
+        export_cfg = preview_payload.get("export")
+        sanitized_export: Dict[str, Any] = {}
+        if isinstance(export_cfg, dict):
+            sanitized_export = {
+                key: value
+                for key, value in export_cfg.items()
+                if key
+                not in {
+                    "path",
+                    "workbook",
+                    "pdf",
+                    "pdf_path",
+                    "pdf_report",
+                    "report",
+                    "recipe",
+                    "recipe_path",
+                    "recipe_sidecar",
+                }
+            }
+        sanitized_export[PREVIEW_EXPORT_DISABLED_FLAG] = True
+        preview_payload["export"] = sanitized_export
+        return preview_payload
 
     def _select_module(self, module_id: str, *, user_initiated: bool = False):
         module_id = (module_id or "uvvis").strip().lower()

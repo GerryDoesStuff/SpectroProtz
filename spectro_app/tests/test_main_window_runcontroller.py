@@ -1,5 +1,6 @@
 import base64
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -52,6 +53,52 @@ class _DummyPlugin(SpectroscopyPlugin):
         )
 
 
+class _FileExportPlugin(SpectroscopyPlugin):
+    id = "filewriter"
+    label = "File Writer"
+
+    def __init__(self) -> None:
+        self.export_calls = []
+
+    def detect(self, paths):
+        return True
+
+    def load(self, paths):
+        return [
+            Spectrum(
+                wavelength=np.array([1.0, 2.0, 3.0]),
+                intensity=np.array([4.0, 5.0, 6.0]),
+                meta={"path": paths[0] if paths else "dummy"},
+            )
+        ]
+
+    def analyze(self, specs, recipe):
+        return list(specs), [{"metric": "ok"}]
+
+    def export(self, specs, qc, recipe):
+        export_cfg = dict(recipe.get("export", {})) if recipe else {}
+        target = export_cfg.get("path")
+        audit = []
+        if target:
+            path = Path(target)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("workbook", encoding="utf-8")
+            sidecar = path.with_suffix(".recipe.json")
+            sidecar.write_text("recipe", encoding="utf-8")
+            audit.append(f"Workbook written to {path}")
+            audit.append(f"Recipe sidecar written to {sidecar}")
+        else:
+            audit.append("No workbook path provided; workbook not written.")
+        self.export_calls.append((target, dict(export_cfg)))
+        return BatchResult(
+            processed=list(specs),
+            qc_table=list(qc),
+            figures={},
+            audit=audit,
+            report_text=None,
+        )
+
+
 def test_run_controller_populates_docks(qt_app):
     appctx = AppContext()
     window = MainWindow(appctx)
@@ -86,6 +133,83 @@ def test_run_controller_populates_docks(qt_app):
         assert "Dummy narrative summary." in log_text
         assert "analysis complete" in log_text
         assert log_text.index("Dummy narrative summary.") < log_text.index("analysis complete")
+    finally:
+        window.close()
+        window.deleteLater()
+        qt_app.processEvents()
+
+
+def test_auto_preview_does_not_export_files(qt_app, tmp_path, monkeypatch):
+    appctx = AppContext()
+    window = MainWindow(appctx)
+
+    def run_job(auto_triggered: bool) -> BatchResult:
+        finished = []
+        loop = QtCore.QEventLoop()
+
+        def _stop(result):
+            finished.append(result)
+            loop.quit()
+
+        window.runctl.job_finished.connect(_stop)
+        try:
+            assert window._start_processing_job(auto_triggered=auto_triggered)
+            QtCore.QTimer.singleShot(5000, loop.quit)
+            loop.exec()
+        finally:
+            window.runctl.job_finished.disconnect(_stop)
+        qt_app.processEvents()
+        assert finished, "Processing job did not complete"
+        assert isinstance(finished[-1], BatchResult)
+        return finished[-1]
+
+    try:
+        plugin = _FileExportPlugin()
+        window._plugin_registry = {plugin.id: plugin}
+        window._queued_paths = [str(tmp_path / "sample.spc")]
+        window._recipe_data["module"] = plugin.id
+        window._recipe_data.setdefault("export", {})
+        window._active_plugin = plugin
+        window._active_plugin_id = plugin.id
+
+        run_job(auto_triggered=False)
+        assert isinstance(window._last_result, BatchResult)
+
+        export_target = tmp_path / "manual_export.xlsx"
+        sidecar_target = export_target.with_suffix(".recipe.json")
+
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(export_target), "xlsx"),
+        )
+
+        window.on_export()
+
+        assert export_target.exists()
+        assert sidecar_target.exists()
+
+        export_target.unlink()
+        sidecar_target.unlink()
+
+        export_cfg = window._recipe_data.get("export", {})
+        assert export_cfg.get("path") == str(export_target)
+
+        run_job(auto_triggered=True)
+        assert isinstance(window._last_result, BatchResult)
+
+        assert not export_target.exists()
+        assert not sidecar_target.exists()
+
+        assert plugin.export_calls, "Plugin export was not invoked"
+        auto_call_target, auto_call_export = plugin.export_calls[-1]
+        assert auto_call_target is None
+        assert auto_call_export.get("path") is None
+        assert auto_call_export.get("_preview_export_disabled")
+
+        assert window._recipe_data.get("export", {}).get("path") == str(
+            export_target
+        )
     finally:
         window.close()
         window.deleteLater()

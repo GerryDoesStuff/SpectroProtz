@@ -2,6 +2,9 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from typing import Iterable, Optional
 
 
+PREVIEW_EXPORT_DISABLED_FLAG = "_preview_export_disabled"
+
+
 def _flatten_recipe(recipe: Optional[dict]) -> dict:
     """Return a copy of *recipe* with nested ``params`` merged into the top level."""
 
