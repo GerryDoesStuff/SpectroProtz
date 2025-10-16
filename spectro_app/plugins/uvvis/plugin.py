@@ -37,7 +37,11 @@ from scipy.signal import find_peaks, peak_widths, savgol_filter
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
-from spectro_app.engine.excel_writer import write_workbook
+from spectro_app.engine.excel_writer import (
+    write_single_spectrum_csv,
+    write_single_spectrum_workbook,
+    write_workbook,
+)
 from .conversions import convert_intensity_to_absorbance, normalise_mode
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
 from . import pipeline
@@ -4543,6 +4547,17 @@ class UvVisPlugin(SpectroscopyPlugin):
             "pdf": str(pdf_target) if pdf_target else None,
             "recipe": str(recipe_target) if recipe_target else None,
         }
+        results_ctx["per_spectrum_exports"] = []
+
+        per_spectrum_requested = bool(export_cfg.get("per_spectrum_enabled"))
+        per_spectrum_format = self._normalise_per_spectrum_format(
+            export_cfg.get("per_spectrum_format")
+        )
+        legacy_clone_requested = bool(export_cfg.get("clone_sources"))
+        if legacy_clone_requested and not per_spectrum_requested:
+            per_spectrum_requested = True
+            per_spectrum_format = "original"
+        per_spectrum_paths: List[Path] = []
 
         try:
             if preview_disabled:
@@ -4585,14 +4600,42 @@ class UvVisPlugin(SpectroscopyPlugin):
             for _, fig in figure_objs:
                 plt.close(fig)
 
-        if not preview_disabled and export_cfg.get("clone_sources") and specs:
+        if not preview_disabled and per_spectrum_requested and specs:
             try:
-                clone_paths = self._clone_sources_with_processed_data(specs)
+                if per_spectrum_format == "original":
+                    per_spectrum_paths = self._clone_sources_with_processed_data(specs)
+                elif per_spectrum_format == "xlsx":
+                    target_dir = self._resolve_per_spectrum_directory(
+                        export_cfg, workbook_target
+                    )
+                    per_spectrum_paths = self._write_per_spectrum_excels(target_dir, specs)
+                elif per_spectrum_format == "csv":
+                    target_dir = self._resolve_per_spectrum_directory(
+                        export_cfg, workbook_target
+                    )
+                    per_spectrum_paths = self._write_per_spectrum_csvs(target_dir, specs)
+                else:
+                    per_spectrum_paths = []
             except Exception as exc:
-                workbook_audit.append(f"Source cloning failed: {exc}")
+                if per_spectrum_format == "original":
+                    workbook_audit.append(f"Source cloning failed: {exc}")
+                else:
+                    workbook_audit.append(
+                        f"Per-spectrum {per_spectrum_format} export failed: {exc}"
+                    )
             else:
-                for clone_path in clone_paths:
-                    workbook_audit.append(f"Edited source copy written to {clone_path}")
+                if per_spectrum_format == "original":
+                    for clone_path in per_spectrum_paths:
+                        workbook_audit.append(f"Edited source copy written to {clone_path}")
+                elif per_spectrum_format == "xlsx":
+                    for emitted in per_spectrum_paths:
+                        workbook_audit.append(f"Per-spectrum Excel export written to {emitted}")
+                elif per_spectrum_format == "csv":
+                    for emitted in per_spectrum_paths:
+                        workbook_audit.append(f"Per-spectrum CSV export written to {emitted}")
+
+        if per_spectrum_paths:
+            results_ctx["per_spectrum_exports"] = [str(path) for path in per_spectrum_paths]
 
         results_ctx["audit_messages"] = list(workbook_audit)
         report_text = self._build_text_report(workbook_audit)
@@ -4615,3 +4658,88 @@ class UvVisPlugin(SpectroscopyPlugin):
         FigureCanvasAgg(fig)
         axes = fig.subplots(*args, **kwargs)
         return fig, axes
+
+    @staticmethod
+    def _normalise_per_spectrum_format(value: object) -> str:
+        if value is None:
+            return "original"
+        token = str(value).strip().lower()
+        if not token:
+            return "original"
+        if token in {"original", "original header", "original_header", "header"}:
+            return "original"
+        if token in {"xlsx", ".xlsx", "excel", "workbook"}:
+            return "xlsx"
+        if token in {"csv", ".csv"}:
+            return "csv"
+        return "original"
+
+    def _resolve_per_spectrum_directory(
+        self,
+        export_cfg: Mapping[str, object],
+        workbook_target: Optional[Path],
+    ) -> Path:
+        override = export_cfg.get("per_spectrum_directory") or export_cfg.get(
+            "per_spectrum_dir"
+        )
+        if override:
+            try:
+                candidate = Path(os.fspath(override))
+            except TypeError:
+                candidate = Path(str(override))
+            return candidate
+        if workbook_target:
+            return workbook_target.parent
+        raw_target = export_cfg.get("path") or export_cfg.get("workbook")
+        if raw_target:
+            try:
+                candidate = Path(os.fspath(raw_target))
+            except TypeError:
+                candidate = Path(str(raw_target))
+            parent = candidate.parent
+            if str(parent):
+                return parent
+        return Path.cwd()
+
+    @staticmethod
+    def _build_per_spectrum_basename(spec: Spectrum, index: int) -> str:
+        meta = getattr(spec, "meta", {}) or {}
+        raw = (
+            meta.get("sample_id")
+            or meta.get("channel")
+            or meta.get("blank_id")
+            or meta.get("name")
+        )
+        if raw is None:
+            candidate = f"spectrum_{index + 1}"
+        else:
+            candidate = str(raw).strip()
+            if not candidate:
+                candidate = f"spectrum_{index + 1}"
+        sanitized = "".join(
+            ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in candidate
+        )
+        sanitized = sanitized.strip("_") or "spectrum"
+        return f"{sanitized}_{index + 1}"
+
+    def _write_per_spectrum_excels(
+        self, directory: Path, spectra: Sequence[Spectrum]
+    ) -> List[Path]:
+        emitted: List[Path] = []
+        base_dir = Path(directory)
+        for index, spectrum in enumerate(spectra):
+            basename = self._build_per_spectrum_basename(spectrum, index)
+            target = base_dir / f"{basename}.xlsx"
+            emitted.append(write_single_spectrum_workbook(target, spectrum))
+        return emitted
+
+    def _write_per_spectrum_csvs(
+        self, directory: Path, spectra: Sequence[Spectrum]
+    ) -> List[Path]:
+        emitted: List[Path] = []
+        base_dir = Path(directory)
+        for index, spectrum in enumerate(spectra):
+            basename = self._build_per_spectrum_basename(spectrum, index)
+            target = base_dir / f"{basename}.csv"
+            emitted.append(write_single_spectrum_csv(target, spectrum))
+        return emitted
