@@ -54,9 +54,10 @@ def test_queue_preview_opens_raw_window(qt_app, monkeypatch, tmp_path):
             def __init__(self, parent=None):
                 self.last = None
 
-            def set_spectra(self, spectra):
+            def set_spectra(self, spectra, preserve_view=False):
                 self.last = list(spectra)
                 captured["spectra"] = self.last
+                captured["preserve_view"] = preserve_view
                 return True
 
         monkeypatch.setattr(raw_preview, "SpectraPlotWidget", FakePlot)
@@ -71,6 +72,7 @@ def test_queue_preview_opens_raw_window(qt_app, monkeypatch, tmp_path):
         assert window._raw_preview_window is not None
         assert isinstance(window._raw_preview_window._plot_widget, FakePlot)
         assert captured.get("spectra")
+        assert captured.get("preserve_view") is False
     finally:
         if window._raw_preview_window is not None:
             window._raw_preview_window.close()
