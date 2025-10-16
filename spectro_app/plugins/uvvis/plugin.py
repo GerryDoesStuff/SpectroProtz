@@ -181,16 +181,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                         key_str = str(key)
                         if not key_str:
                             continue
-                        if isinstance(value, str):
-                            trimmed = value.strip()
-                            if not trimmed:
-                                continue
-                            if key_str == "role":
-                                sanitized[key_str] = trimmed.lower()
-                            else:
-                                sanitized[key_str] = trimmed
+                        cleaned_value = self._sanitize_manifest_scalar(value)
+                        if cleaned_value is None:
+                            continue
+                        if key_str == "role" and isinstance(cleaned_value, str):
+                            sanitized[key_str] = cleaned_value.lower()
                         else:
-                            sanitized[key_str] = value
+                            sanitized[key_str] = cleaned_value
                 if not sanitized:
                     continue
                 for candidate in self._queue_override_keys(path):
@@ -226,7 +223,17 @@ class UvVisPlugin(SpectroscopyPlugin):
         for key in self._queue_override_keys(path):
             override = self._queue_overrides.get(key)
             if override:
-                return dict(override)
+                sanitized: Dict[str, object] = {}
+                for field, value in override.items():
+                    cleaned = self._sanitize_manifest_scalar(value)
+                    if cleaned is None:
+                        continue
+                    if field == "role" and isinstance(cleaned, str):
+                        sanitized[field] = cleaned.lower()
+                    else:
+                        sanitized[field] = cleaned
+                if sanitized:
+                    return sanitized
         return None
 
     @staticmethod
@@ -434,10 +441,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                 override_meta = self._lookup_queue_override(path)
                 if override_meta:
                     for key, value in override_meta.items():
-                        if key == "role" and isinstance(value, str):
-                            meta[key] = value.strip().lower()
-                        elif value is not None:
-                            meta[key] = value
+                        cleaned_value = self._sanitize_manifest_scalar(value)
+                        if cleaned_value is None:
+                            continue
+                        if key == "role" and isinstance(cleaned_value, str):
+                            meta[key] = cleaned_value.lower()
+                        else:
+                            meta[key] = cleaned_value
                 index_hit = False
                 lookup_hit = False
                 if manifest_allowed and manifest_index:
@@ -445,10 +455,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                     if updates:
                         index_hit = True
                         for key, value in updates.items():
-                            if key == "role" and isinstance(value, str):
-                                meta[key] = value.lower()
+                            cleaned_value = self._sanitize_manifest_scalar(value)
+                            if cleaned_value is None:
+                                continue
+                            if key == "role" and isinstance(cleaned_value, str):
+                                meta[key] = cleaned_value.lower()
                             else:
-                                meta[key] = value
+                                meta[key] = cleaned_value
                         if meta.get("role") == "blank":
                             if not meta.get("blank_id"):
                                 meta["blank_id"] = meta.get("sample_id") or meta.get("channel")
@@ -464,7 +477,17 @@ class UvVisPlugin(SpectroscopyPlugin):
                     )
                     if manifest_meta:
                         lookup_hit = True
-                        meta.update(manifest_meta)
+                        sanitized_meta: Dict[str, object] = {}
+                        for key, value in manifest_meta.items():
+                            cleaned_value = self._sanitize_manifest_scalar(value)
+                            if cleaned_value is None:
+                                continue
+                            if key == "role" and isinstance(cleaned_value, str):
+                                sanitized_meta[key] = cleaned_value.lower()
+                            else:
+                                sanitized_meta[key] = cleaned_value
+                        if sanitized_meta:
+                            meta.update(sanitized_meta)
                 spectra.append(Spectrum(wavelength=wl, intensity=inten, meta=meta))
                 if meta.get("role") == "blank":
                     if not meta.get("blank_id"):
@@ -554,15 +577,10 @@ class UvVisPlugin(SpectroscopyPlugin):
         for row in df.to_dict(orient="records"):
             entry: Dict[str, object] = {}
             for key, value in row.items():
-                if value is None:
+                cleaned_value = self._sanitize_manifest_scalar(value)
+                if cleaned_value is None:
                     continue
-                if isinstance(value, float) and np.isnan(value):
-                    continue
-                if isinstance(value, str):
-                    value = value.strip()
-                    if not value:
-                        continue
-                entry[key] = value
+                entry[key] = cleaned_value
             if entry:
                 entries.append(entry)
         return entries
@@ -737,7 +755,10 @@ class UvVisPlugin(SpectroscopyPlugin):
             normalized_entry: Dict[str, object] = {}
             for key, value in entry.items():
                 norm_key = self._normalize_manifest_key(key)
-                normalized_entry[norm_key] = value
+                cleaned_value = self._sanitize_manifest_scalar(value)
+                if cleaned_value is None:
+                    continue
+                normalized_entry[norm_key] = cleaned_value
 
             assignments = self._extract_manifest_assignments(normalized_entry)
             for key, value in assignments.items():
@@ -746,10 +767,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             for key, value in normalized_entry.items():
                 if key in skip_keys or key in assignments:
                     continue
-                if key == "role" and isinstance(value, str):
-                    merged[key] = value.strip().lower()
+                cleaned_value = self._sanitize_manifest_scalar(value)
+                if cleaned_value is None:
+                    continue
+                if key == "role" and isinstance(cleaned_value, str):
+                    merged[key] = cleaned_value.lower()
                 else:
-                    merged[key] = value
+                    merged[key] = cleaned_value
         return merged
 
     # ------------------------------------------------------------------
@@ -790,7 +814,7 @@ class UvVisPlugin(SpectroscopyPlugin):
 
             df = df.rename(columns=lambda col: str(col).strip())
             for raw_row in df.to_dict(orient="records"):
-                normalized: Dict[str, str] = {}
+                normalized: Dict[str, object] = {}
                 for key, value in raw_row.items():
                     if key is None:
                         continue
@@ -832,15 +856,56 @@ class UvVisPlugin(SpectroscopyPlugin):
         return index, manifest_files
 
     @staticmethod
-    def _clean_manifest_value(value: object) -> Optional[str]:
+    def _sanitize_manifest_scalar(value: object) -> object | None:
         if value is None:
             return None
+        if isinstance(value, np.generic):
+            try:
+                value = value.item()
+            except Exception:
+                value = value.tolist()
+        if isinstance(value, np.datetime64):
+            if np.isnat(value):
+                return None
+            return pd.Timestamp(value).to_pydatetime()
+        if isinstance(value, np.timedelta64):
+            if np.isnat(value):
+                return None
+            return pd.Timedelta(value).to_pytimedelta()
+        if isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                return None
+            return value.to_pydatetime()
+        if isinstance(value, pd.Timedelta):
+            if pd.isna(value):
+                return None
+            return value.to_pytimedelta()
+        if isinstance(value, pd.Period):
+            return value.to_timestamp().to_pydatetime()
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
         if isinstance(value, str):
             trimmed = value.strip()
             return trimmed or None
-        if pd.isna(value):
+        if isinstance(value, float):
+            if math.isnan(value):
+                return None
+            return float(value)
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, int):
+            return int(value)
+        return value
+
+    @staticmethod
+    def _clean_manifest_value(value: object) -> Optional[str]:
+        cleaned = UvVisPlugin._sanitize_manifest_scalar(value)
+        if cleaned is None:
             return None
-        return str(value).strip()
+        return str(cleaned).strip()
 
     @staticmethod
     def _normalize_manifest_token(token: Optional[str]) -> Optional[str]:
@@ -858,7 +923,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         return None
 
     @staticmethod
-    def _extract_manifest_assignments(row: Dict[str, str]) -> Dict[str, object]:
+    def _extract_manifest_assignments(row: Dict[str, object]) -> Dict[str, object]:
         alias_map: Dict[str, Tuple[str, ...]] = {
             "sample_id": ("sample_id", "sample", "name"),
             "blank_id": ("blank_id", "blank", "reference", "ref"),
@@ -870,13 +935,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         assignments: Dict[str, object] = {}
         for target, aliases in alias_map.items():
             for alias in aliases:
-                value = row.get(alias)
-                if value:
-                    if target == "role":
-                        assignments[target] = str(value).strip().lower()
-                    else:
-                        assignments[target] = value
-                    break
+                if alias not in row:
+                    continue
+                cleaned = UvVisPlugin._sanitize_manifest_scalar(row.get(alias))
+                if cleaned is None:
+                    continue
+                if target == "role" and isinstance(cleaned, str):
+                    assignments[target] = cleaned.strip().lower()
+                else:
+                    assignments[target] = cleaned
+                break
         return assignments
 
     def _lookup_manifest_index(
@@ -885,6 +953,18 @@ class UvVisPlugin(SpectroscopyPlugin):
         source_path: Path,
         meta: Dict[str, object],
     ) -> Dict[str, object]:
+        def _sanitise_mapping(values: Mapping[str, object]) -> Dict[str, object]:
+            sanitized: Dict[str, object] = {}
+            for key, value in values.items():
+                cleaned = self._sanitize_manifest_scalar(value)
+                if cleaned is None:
+                    continue
+                if key == "role" and isinstance(cleaned, str):
+                    sanitized[key] = cleaned.lower()
+                else:
+                    sanitized[key] = cleaned
+            return sanitized
+
         candidates_channel: List[str] = []
         candidates_sample: List[str] = []
         channel = meta.get("channel")
@@ -927,23 +1007,31 @@ class UvVisPlugin(SpectroscopyPlugin):
             for channel_key in candidates_channel:
                 match = index.by_file_channel.get((file_key, channel_key))
                 if match:
-                    return match
+                    sanitized = _sanitise_mapping(match)
+                    if sanitized:
+                        return sanitized
         for file_key in file_candidates:
             if file_key is None:
                 continue
             for sample_key in candidates_sample:
                 match = index.by_file_sample.get((file_key, sample_key))
                 if match:
-                    return match
+                    sanitized = _sanitise_mapping(match)
+                    if sanitized:
+                        return sanitized
 
         for channel_key in candidates_channel:
             match = index.by_file_channel.get((None, channel_key))
             if match:
-                return match
+                sanitized = _sanitise_mapping(match)
+                if sanitized:
+                    return sanitized
         for sample_key in candidates_sample:
             match = index.by_file_sample.get((None, sample_key))
             if match:
-                return match
+                sanitized = _sanitise_mapping(match)
+                if sanitized:
+                    return sanitized
 
         return {}
 

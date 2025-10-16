@@ -187,6 +187,51 @@ def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
     assert "qc_summary_noise_trend.png" in result.figures
 
 
+def test_uvvis_export_handles_numeric_manifest(tmp_path):
+    plugin = UvVisPlugin(enable_manifest=True)
+    data_path = tmp_path / "sample.csv"
+    df = pd.DataFrame(
+        {
+            "wavelength": [200.0, 205.0, 210.0],
+            "Sample-1": [0.1, 0.2, 0.3],
+        }
+    )
+    df.to_csv(data_path, index=False)
+
+    manifest_path = tmp_path / "experiment_manifest.csv"
+    manifest_df = pd.DataFrame(
+        {
+            "file": [data_path.name],
+            "sample_id": ["Sample-1"],
+            "pathlength_cm": [np.float64(1.5)],
+            "dilution_factor": [np.int64(2)],
+        }
+    )
+    manifest_df.to_csv(manifest_path, index=False)
+
+    spectra = plugin.load([str(manifest_path), str(data_path)])
+    assert spectra, "Spectra should be loaded from data file"
+
+    workbook_path = tmp_path / "uvvis_manifest.xlsx"
+    recipe_path = tmp_path / "uvvis_manifest.recipe.json"
+    recipe = {
+        "export": {
+            "path": str(workbook_path),
+            "recipe_sidecar": str(recipe_path),
+        }
+    }
+
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+    plugin.export(processed, qc_rows, recipe)
+
+    assert workbook_path.exists(), "Workbook should be created"
+    assert recipe_path.exists(), "Recipe sidecar should be written"
+
+    first_meta = processed[0].meta
+    assert isinstance(first_meta.get("pathlength_cm"), float)
+    assert isinstance(first_meta.get("dilution_factor"), int)
+
+
 def test_uvvis_generate_figures_trend_uses_sanitised_name():
     plugin = UvVisPlugin()
     qc_rows = [
