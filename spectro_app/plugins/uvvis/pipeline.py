@@ -1773,21 +1773,62 @@ def despike_spectrum(
 
         if np.any(newly_flagged) and noise_scale_multiplier > 0:
             local_scale = np.asarray(spread[newly_flagged], dtype=float)
-            background_residual = residual[~candidate_mask]
-            background_scale = _global_spread(background_residual, method=spread_method)
-            if not np.isfinite(background_scale) or background_scale <= spread_epsilon:
-                background_scale = spread_epsilon
+
+            def _background_scale() -> float:
+                """Resolve a representative noise scale for fallback jitter."""
+
+                candidate_sets: list[np.ndarray] = [residual[~candidate_mask]]
+                # Values untouched in previous passes still reflect the ambient
+                # noise, so consider them before falling back to the full residual.
+                candidate_sets.append(residual[~working_mask])
+                candidate_sets.append(residual)
+
+                for sample in candidate_sets:
+                    if sample.size == 0:
+                        continue
+                    scale = _global_spread(sample, method=spread_method)
+                    if np.isfinite(scale) and scale > spread_epsilon:
+                        return float(scale)
+
+                # Fall back to the spread estimates from the unflagged region if
+                # they contain usable information.
+                spread_masks = [~candidate_mask, np.ones_like(spread, dtype=bool)]
+                for mask in spread_masks:
+                    sample = spread[mask & np.isfinite(spread)]
+                    if sample.size == 0:
+                        continue
+                    scale = float(np.nanmedian(sample))
+                    if np.isfinite(scale) and scale > spread_epsilon:
+                        return scale
+
+                return float(spread_epsilon)
+
+            background_scale = _background_scale()
+
             if local_scale.size:
                 invalid = ~np.isfinite(local_scale) | (local_scale <= spread_epsilon)
                 if np.any(invalid):
                     local_scale = local_scale.copy()
-                    local_scale[invalid] = background_scale
+                    if np.any(~invalid):
+                        # Borrow the typical magnitude from the valid members of
+                        # this cluster; fall back to the global background if
+                        # every entry collapsed.
+                        fill_value = float(np.nanmedian(local_scale[~invalid]))
+                        if not np.isfinite(fill_value) or fill_value <= spread_epsilon:
+                            fill_value = background_scale
+                    else:
+                        fill_value = background_scale
+                    local_scale[invalid] = fill_value
             else:
                 local_scale = np.array([], dtype=float)
-            local_scale = np.maximum(local_scale, spread_epsilon)
-            if np.isfinite(background_scale) and background_scale > 0:
-                cap = max(background_scale, spread_epsilon) * 3.0
-                local_scale = np.minimum(local_scale, cap)
+
+            min_scale = background_scale if np.isfinite(background_scale) and background_scale > spread_epsilon else spread_epsilon
+            if local_scale.size:
+                local_scale = np.maximum(local_scale, min_scale)
+                if np.isfinite(background_scale) and background_scale > 0:
+                    cap = max(background_scale, spread_epsilon) * 3.0
+                    local_scale = np.minimum(local_scale, cap)
+
             noise = noise_rng.normal(
                 loc=0.0,
                 scale=np.asarray(local_scale, dtype=float) * float(noise_scale_multiplier),
