@@ -399,6 +399,29 @@ def test_uvvis_export_emits_svg_when_requested(tmp_path):
     svg_stems = {Path(name).stem for name in result.figures if name.endswith(".svg")}
     png_stems = {Path(name).stem for name in result.figures if name.endswith(".png")}
     assert svg_stems <= png_stems
+
+
+def test_uvvis_export_recipe_sidecar_sanitises_nested_arrays(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    nested = np.array(
+        [np.array([1.0, 2.0]), np.array([3.0, 4.0])], dtype=object
+    )
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_nested.xlsx"),
+            "recipe_path": str(tmp_path / "uvvis_nested.recipe.json"),
+        },
+        "params": {"nested": nested},
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    plugin.export(processed, qc_rows, recipe)
+
+    sidecar_path = Path(recipe["export"]["recipe_path"])
+    assert sidecar_path.exists(), "Recipe sidecar should be written"
+    data = json.loads(sidecar_path.read_text())
+    assert data["params"]["nested"] == [[1.0, 2.0], [3.0, 4.0]]
 def test_uvvis_export_audit_includes_runtime_and_input_hash(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()

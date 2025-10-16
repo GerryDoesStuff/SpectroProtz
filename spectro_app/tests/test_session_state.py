@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -219,3 +220,15 @@ def test_queue_remove_multiple_entries(qapp, tmp_path):
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_main_window_json_sanitise_handles_numpy():
+    payload = {
+        "array": np.array([np.array([1, 2]), np.array([3, 4])], dtype=object),
+        "flag": np.bool_(True),
+    }
+
+    sanitised = MainWindow._json_sanitise(payload)
+
+    assert sanitised["array"] == [[1, 2], [3, 4]]
+    assert sanitised["flag"] is True

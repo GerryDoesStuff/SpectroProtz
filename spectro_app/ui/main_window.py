@@ -4,6 +4,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtGui import QDesktopServices
 
@@ -909,6 +911,27 @@ class MainWindow(QtWidgets.QMainWindow):
         except TypeError:
             encoded = json.dumps({})
         s.setValue("session/state", encoded)
+
+    @staticmethod
+    def _json_sanitise(value: object) -> object:
+        if isinstance(value, dict):
+            return {str(k): MainWindow._json_sanitise(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [MainWindow._json_sanitise(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return MainWindow._json_sanitise(value.tolist())
+        if isinstance(value, (np.floating, np.integer, np.bool_)):
+            return value.item()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()  # type: ignore[return-value]
+            except Exception:
+                return str(value)
+        return value
 
     def restore_state(self):
         s = self.appctx.settings
@@ -1866,8 +1889,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _write_recipe(self, path: Path):
         recipe_payload = self._build_recipe_payload()
         path.parent.mkdir(parents=True, exist_ok=True)
+        serialisable = self._json_sanitise(recipe_payload)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(recipe_payload, handle, indent=2, sort_keys=True)
+            json.dump(serialisable, handle, indent=2, sort_keys=True)
         self.status.showMessage(f"Recipe saved to {path}", 5000)
         self.appctx.set_dirty(False)
 

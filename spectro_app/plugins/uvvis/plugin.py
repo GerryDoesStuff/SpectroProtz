@@ -3910,8 +3910,8 @@ class UvVisPlugin(SpectroscopyPlugin):
         if isinstance(value, (list, tuple, set)):
             return [UvVisPlugin._json_sanitise(v) for v in value]
         if isinstance(value, np.ndarray):
-            return value.tolist()
-        if isinstance(value, (np.floating, np.integer)):
+            return UvVisPlugin._json_sanitise(value.tolist())
+        if isinstance(value, (np.floating, np.integer, np.bool_)):
             return value.item()
         if isinstance(value, Path):
             return str(value)
