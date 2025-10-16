@@ -780,6 +780,17 @@ class PreviewDock(QDockWidget):
         self.tabs.clear()
         self._add_message_tab("Preview", "Waiting for results…")
 
+    def prepare_for_job(self) -> None:
+        """Ensure the dock is ready for a new job without clearing previews.
+
+        When new results are being generated we keep the previous preview
+        visible so the user is not presented with placeholder text.  Only when
+        no tabs are currently shown do we fall back to the empty-state message.
+        """
+
+        if self.tabs.count() == 0:
+            self.clear()
+
     def show_error(self, message: str):
         self.tabs.clear()
         self._add_message_tab("Error", message)

@@ -1786,7 +1786,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx.set_job_running(True)
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
-        self.previewDock.clear()
+        self.previewDock.prepare_for_job()
         self.qcDock.clear()
         self.loggerDock.clear()
         self._update_action_states()
