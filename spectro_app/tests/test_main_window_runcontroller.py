@@ -12,6 +12,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from spectro_app.app_context import AppContext
 from spectro_app.engine.plugin_api import BatchResult, Spectrum, SpectroscopyPlugin
+from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
 from spectro_app.ui.main_window import MainWindow
 
 
@@ -77,16 +78,25 @@ class _FileExportPlugin(SpectroscopyPlugin):
 
     def export(self, specs, qc, recipe):
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
+        preview_disabled = bool(export_cfg.get(PREVIEW_EXPORT_DISABLED_FLAG))
         target = export_cfg.get("path")
-        audit = []
+        pdf_target = None
         if target:
+            pdf_target = str(Path(target).with_suffix(".pdf"))
+        audit = []
+        if preview_disabled:
+            audit.append("Preview export disabled; workbook not written.")
+        elif target:
             path = Path(target)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("workbook", encoding="utf-8")
             sidecar = path.with_suffix(".recipe.json")
             sidecar.write_text("recipe", encoding="utf-8")
+            pdf_path = path.with_suffix(".pdf")
+            pdf_path.write_text("pdf", encoding="utf-8")
             audit.append(f"Workbook written to {path}")
             audit.append(f"Recipe sidecar written to {sidecar}")
+            audit.append(f"PDF report written to {pdf_path}")
         else:
             audit.append("No workbook path provided; workbook not written.")
         self.export_calls.append((target, dict(export_cfg)))
@@ -163,6 +173,26 @@ def test_auto_preview_does_not_export_files(qt_app, tmp_path, monkeypatch):
         assert isinstance(finished[-1], BatchResult)
         return finished[-1]
 
+    def run_manual_preview() -> BatchResult:
+        finished = []
+        loop = QtCore.QEventLoop()
+
+        def _stop(result):
+            finished.append(result)
+            loop.quit()
+
+        window.runctl.job_finished.connect(_stop)
+        try:
+            window.on_run()
+            QtCore.QTimer.singleShot(5000, loop.quit)
+            loop.exec()
+        finally:
+            window.runctl.job_finished.disconnect(_stop)
+        qt_app.processEvents()
+        assert finished, "Processing job did not complete"
+        assert isinstance(finished[-1], BatchResult)
+        return finished[-1]
+
     try:
         plugin = _FileExportPlugin()
         window._plugin_registry = {plugin.id: plugin}
@@ -172,11 +202,25 @@ def test_auto_preview_does_not_export_files(qt_app, tmp_path, monkeypatch):
         window._active_plugin = plugin
         window._active_plugin_id = plugin.id
 
-        run_job(auto_triggered=False)
-        assert isinstance(window._last_result, BatchResult)
-
         export_target = tmp_path / "manual_export.xlsx"
         sidecar_target = export_target.with_suffix(".recipe.json")
+        pdf_target = export_target.with_suffix(".pdf")
+
+        export_cfg = window._recipe_data.setdefault("export", {})
+        export_cfg["path"] = str(export_target)
+
+        run_manual_preview()
+        assert isinstance(window._last_result, BatchResult)
+
+        assert not export_target.exists()
+        assert not sidecar_target.exists()
+        assert not pdf_target.exists()
+
+        assert plugin.export_calls, "Plugin export was not invoked"
+        manual_call_target, manual_call_export = plugin.export_calls[-1]
+        assert manual_call_target is None
+        assert manual_call_export.get("path") is None
+        assert manual_call_export.get(PREVIEW_EXPORT_DISABLED_FLAG)
 
         monkeypatch.setattr(
             QtWidgets.QFileDialog,
@@ -188,18 +232,26 @@ def test_auto_preview_does_not_export_files(qt_app, tmp_path, monkeypatch):
 
         assert export_target.exists()
         assert sidecar_target.exists()
+        assert pdf_target.exists()
 
         export_target.unlink()
         sidecar_target.unlink()
+        pdf_target.unlink()
 
         export_cfg = window._recipe_data.get("export", {})
         assert export_cfg.get("path") == str(export_target)
+
+        export_call_target, export_call_config = plugin.export_calls[-1]
+        assert export_call_target == str(export_target)
+        assert export_call_config.get("path") == str(export_target)
+        assert not export_call_config.get(PREVIEW_EXPORT_DISABLED_FLAG)
 
         run_job(auto_triggered=True)
         assert isinstance(window._last_result, BatchResult)
 
         assert not export_target.exists()
         assert not sidecar_target.exists()
+        assert not pdf_target.exists()
 
         assert plugin.export_calls, "Plugin export was not invoked"
         auto_call_target, auto_call_export = plugin.export_calls[-1]

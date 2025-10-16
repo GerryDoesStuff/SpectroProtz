@@ -36,6 +36,7 @@ from scipy.signal import find_peaks, peak_widths, savgol_filter
 
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
+from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
 from spectro_app.engine.excel_writer import write_workbook
 from .conversions import convert_intensity_to_absorbance, normalise_mode
 from .io_helios import is_helios_file, parse_metadata_lines, read_helios
@@ -4495,8 +4496,18 @@ class UvVisPlugin(SpectroscopyPlugin):
                 pdf.savefig(figure)
 
     def export(self, specs, qc, recipe):
-        export_cfg = dict(recipe.get("export", {})) if recipe else {}
-        workbook_target = self._coerce_export_path(export_cfg.get("path") or export_cfg.get("workbook"))
+        export_cfg_raw = dict(recipe.get("export", {})) if recipe else {}
+        preview_disabled = bool(export_cfg_raw.get(PREVIEW_EXPORT_DISABLED_FLAG))
+        export_cfg = {
+            key: value
+            for key, value in export_cfg_raw.items()
+            if key != PREVIEW_EXPORT_DISABLED_FLAG
+        }
+        workbook_target: Optional[Path] = None
+        if not preview_disabled:
+            workbook_target = self._coerce_export_path(
+                export_cfg.get("path") or export_cfg.get("workbook")
+            )
         processed_layout = export_cfg.get("processed_layout", "tidy")
         if isinstance(processed_layout, str):
             processed_layout = processed_layout.lower()
@@ -4509,17 +4520,22 @@ class UvVisPlugin(SpectroscopyPlugin):
         workbook_audit = list(audit_entries)
         calibration_results = getattr(self, "_last_calibration_results", None)
         workbook_default = workbook_target if workbook_target else None
-        recipe_target = self._coerce_export_path(
-            export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar") or export_cfg.get("recipe"),
-            workbook_default.with_suffix(".recipe.json") if workbook_default else None,
-        )
-        pdf_target = self._coerce_export_path(
-            export_cfg.get("pdf_path")
-            or export_cfg.get("pdf_report")
-            or export_cfg.get("pdf")
-            or export_cfg.get("report"),
-            workbook_default.with_suffix(".pdf") if workbook_default else None,
-        )
+        recipe_target: Optional[Path] = None
+        pdf_target: Optional[Path] = None
+        if not preview_disabled:
+            recipe_target = self._coerce_export_path(
+                export_cfg.get("recipe_path")
+                or export_cfg.get("recipe_sidecar")
+                or export_cfg.get("recipe"),
+                workbook_default.with_suffix(".recipe.json") if workbook_default else None,
+            )
+            pdf_target = self._coerce_export_path(
+                export_cfg.get("pdf_path")
+                or export_cfg.get("pdf_report")
+                or export_cfg.get("pdf")
+                or export_cfg.get("report"),
+                workbook_default.with_suffix(".pdf") if workbook_default else None,
+            )
         results_ctx = self._report_context.setdefault("results", {})
         results_ctx["figure_count"] = len(figures)
         results_ctx["export_targets"] = {
@@ -4529,7 +4545,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         }
 
         try:
-            if workbook_target:
+            if preview_disabled:
+                workbook_audit.append("Preview export disabled; workbook not written.")
+            elif workbook_target:
                 resolved_path = str(workbook_target)
                 workbook_audit.append(f"Workbook written to {resolved_path}")
                 write_workbook(
@@ -4544,29 +4562,30 @@ class UvVisPlugin(SpectroscopyPlugin):
             else:
                 workbook_audit.append("No workbook path provided; workbook not written.")
 
-            if recipe_target and recipe:
-                self._write_recipe_sidecar(recipe_target, recipe)
-                workbook_audit.append(f"Recipe sidecar written to {recipe_target}")
-            elif export_cfg.get("recipe") or export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar"):
-                workbook_audit.append("Recipe sidecar requested but no path resolved.")
+            if not preview_disabled:
+                if recipe_target and recipe:
+                    self._write_recipe_sidecar(recipe_target, recipe)
+                    workbook_audit.append(f"Recipe sidecar written to {recipe_target}")
+                elif export_cfg.get("recipe") or export_cfg.get("recipe_path") or export_cfg.get("recipe_sidecar"):
+                    workbook_audit.append("Recipe sidecar requested but no path resolved.")
 
-            if pdf_target:
-                audit_for_pdf = list(workbook_audit)
-                report_for_pdf = self._build_text_report(audit_for_pdf)
-                self._write_pdf_report(
-                    pdf_target,
-                    figure_objs,
-                    audit_for_pdf,
-                    specs,
-                    qc,
-                    report_for_pdf,
-                )
-                workbook_audit.append(f"PDF report written to {pdf_target}")
+                if pdf_target:
+                    audit_for_pdf = list(workbook_audit)
+                    report_for_pdf = self._build_text_report(audit_for_pdf)
+                    self._write_pdf_report(
+                        pdf_target,
+                        figure_objs,
+                        audit_for_pdf,
+                        specs,
+                        qc,
+                        report_for_pdf,
+                    )
+                    workbook_audit.append(f"PDF report written to {pdf_target}")
         finally:
             for _, fig in figure_objs:
                 plt.close(fig)
 
-        if export_cfg.get("clone_sources") and specs:
+        if not preview_disabled and export_cfg.get("clone_sources") and specs:
             try:
                 clone_paths = self._clone_sources_with_processed_data(specs)
             except Exception as exc:
