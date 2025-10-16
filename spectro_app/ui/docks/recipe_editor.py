@@ -335,6 +335,17 @@ class RecipeEditorDock(QDockWidget):
             " flattening peaks."
         )
 
+        self.despike_tail_decay_ratio = QDoubleSpinBox()
+        self.despike_tail_decay_ratio.setDecimals(3)
+        self.despike_tail_decay_ratio.setRange(0.1, 1.0)
+        self.despike_tail_decay_ratio.setSingleStep(0.01)
+        self.despike_tail_decay_ratio.setValue(0.85)
+        self.despike_tail_decay_ratio.setToolTip(
+            "Controls how quickly spike tails must decay before they are"
+            " absorbed into the correction window. Increase toward 1.0 to"
+            " follow broader shoulders; decrease to demand steeper drop-offs."
+        )
+
         self.despike_isolation_ratio = QDoubleSpinBox()
         self.despike_isolation_ratio.setDecimals(2)
         self.despike_isolation_ratio.setRange(1.0, 1e3)
@@ -416,6 +427,7 @@ class RecipeEditorDock(QDockWidget):
         baseline_layout.addRow("Spread method", self.despike_spread_method)
         baseline_layout.addRow("Spread epsilon", self.despike_spread_epsilon)
         baseline_layout.addRow("Residual floor", self.despike_residual_floor)
+        baseline_layout.addRow("Tail decay ratio", self.despike_tail_decay_ratio)
         baseline_group.setLayout(baseline_layout)
 
         isolation_group = QGroupBox("Isolation & passes")
@@ -810,6 +822,7 @@ class RecipeEditorDock(QDockWidget):
             self.despike_spread_method.currentIndexChanged,
             self.despike_spread_epsilon.valueChanged,
             self.despike_residual_floor.valueChanged,
+            self.despike_tail_decay_ratio.valueChanged,
             self.despike_isolation_ratio.valueChanged,
             self.despike_max_passes.valueChanged,
             self.despike_leading_padding.valueChanged,
@@ -1011,6 +1024,12 @@ class RecipeEditorDock(QDockWidget):
                 self._safe_float(
                     despike_cfg.get("residual_floor"),
                     self.despike_residual_floor.value(),
+                )
+            )
+            self.despike_tail_decay_ratio.setValue(
+                self._safe_float(
+                    despike_cfg.get("tail_decay_ratio"),
+                    self.despike_tail_decay_ratio.value(),
                 )
             )
             self.despike_isolation_ratio.setValue(
@@ -1299,6 +1318,7 @@ class RecipeEditorDock(QDockWidget):
         self.despike_spread_method.setEnabled(despike_enabled)
         self.despike_spread_epsilon.setEnabled(despike_enabled)
         self.despike_residual_floor.setEnabled(despike_enabled)
+        self.despike_tail_decay_ratio.setEnabled(despike_enabled)
         self.despike_isolation_ratio.setEnabled(despike_enabled)
         self.despike_max_passes.setEnabled(despike_enabled)
         self.despike_leading_padding.setEnabled(despike_enabled)
@@ -1910,6 +1930,9 @@ class RecipeEditorDock(QDockWidget):
             despike_cfg["residual_floor"] = float(
                 self.despike_residual_floor.value()
             )
+            despike_cfg["tail_decay_ratio"] = float(
+                self.despike_tail_decay_ratio.value()
+            )
             despike_cfg["isolation_ratio"] = float(
                 self.despike_isolation_ratio.value()
             )
@@ -1946,6 +1969,7 @@ class RecipeEditorDock(QDockWidget):
                 "spread_method",
                 "spread_epsilon",
                 "residual_floor",
+                "tail_decay_ratio",
                 "isolation_ratio",
                 "max_passes",
                 "leading_padding",
