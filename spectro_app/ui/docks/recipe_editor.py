@@ -78,6 +78,7 @@ class CollapsibleSection(QWidget):
 
 
 class RecipeEditorDock(QDockWidget):
+    config_changed = QtCore.pyqtSignal()
     _CUSTOM_SENTINEL = "__custom__"
     _JOIN_WINDOWS_GLOBAL_KEY = "__global__"
 
@@ -150,7 +151,21 @@ class RecipeEditorDock(QDockWidget):
         self.validation_label = QLabel()
         self.validation_label.setWordWrap(True)
         self.validation_label.setStyleSheet("color: #0a0;")
-        layout.addWidget(self.validation_label)
+
+        validation_row = QHBoxLayout()
+        validation_row.setContentsMargins(0, 0, 0, 0)
+        validation_row.setSpacing(6)
+        validation_row.addWidget(self.validation_label, 1)
+
+        self.auto_update_preview_checkbox = QCheckBox("Auto-update preview")
+        self.auto_update_preview_checkbox.setToolTip(
+            "When enabled, processing restarts automatically a short moment after "
+            "recipe edits are made."
+        )
+        self.auto_update_preview_checkbox.setChecked(True)
+        validation_row.addWidget(self.auto_update_preview_checkbox)
+
+        layout.addLayout(validation_row)
 
         # --- Join correction ---
         join_section = CollapsibleSection("Join correction")
@@ -2048,6 +2063,18 @@ class RecipeEditorDock(QDockWidget):
         self._mark_custom_preset()
         if run_validation:
             self._run_validation()
+        if not self._updating:
+            self.config_changed.emit()
+
+    def set_auto_update_preview_enabled(self, enabled: bool) -> None:
+        previous = self.auto_update_preview_checkbox.blockSignals(True)
+        try:
+            self.auto_update_preview_checkbox.setChecked(bool(enabled))
+        finally:
+            self.auto_update_preview_checkbox.blockSignals(previous)
+
+    def auto_update_preview_enabled(self) -> bool:
+        return self.auto_update_preview_checkbox.isChecked()
 
     def _parse_optional_float(self, text: str):
         value = text.strip()
