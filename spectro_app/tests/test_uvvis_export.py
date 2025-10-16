@@ -232,6 +232,48 @@ def test_uvvis_export_handles_numeric_manifest(tmp_path):
     assert isinstance(first_meta.get("dilution_factor"), int)
 
 
+def test_write_workbook_handles_replicate_channel_arrays(tmp_path):
+    wavelengths = np.linspace(220.0, 230.0, 6)
+    intensity = np.linspace(0.1, 0.2, wavelengths.size)
+    channel_arrays = {
+        "raw": np.asarray(intensity + 0.01),
+        "first_derivative": np.gradient(intensity),
+    }
+    replicate_entry = {
+        "wavelength": np.asarray(wavelengths),
+        "intensity": np.asarray(intensity),
+        "meta": {
+            "sample_id": "Sample-Rep",
+            "channels": channel_arrays,
+        },
+        "excluded": False,
+        "score": np.float64(0.0),
+        "leverage": np.float64(0.5),
+    }
+    spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=intensity,
+        meta={
+            "sample_id": "Sample-Rep",
+            "role": "sample",
+            "mode": "absorbance",
+            "replicates": [replicate_entry],
+        },
+    )
+
+    out_path = tmp_path / "replicates.xlsx"
+    result_path = excel_writer.write_workbook(
+        str(out_path),
+        [spec],
+        qc_table=[],
+        audit=[],
+        figures={},
+    )
+
+    workbook_path = Path(result_path)
+    assert workbook_path.exists()
+
+
 def test_uvvis_generate_figures_trend_uses_sanitised_name():
     plugin = UvVisPlugin()
     qc_rows = [

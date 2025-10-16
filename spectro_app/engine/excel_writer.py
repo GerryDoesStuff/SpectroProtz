@@ -18,6 +18,10 @@ def _ensure_parent(path: Path) -> None:
 
 
 def _clean_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    elif isinstance(value, np.generic):
+        value = value.item()
     if isinstance(value, (np.floating, np.integer)):
         value = float(value)
     if isinstance(value, float):
@@ -48,7 +52,7 @@ def _flatten_dict(data: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
         if isinstance(value, dict):
             flat.update(_flatten_dict(value, new_key))
         elif isinstance(value, np.ndarray):
-            flat[new_key] = json.dumps(_clean_value(value.tolist()))
+            flat[new_key] = _clean_value(value)
         elif isinstance(value, (list, tuple)):
             if value and all(isinstance(item, dict) for item in value):
                 flat[new_key] = json.dumps([_clean_value(item) for item in value])
