@@ -1,14 +1,16 @@
 import hashlib
+import io
 import json
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import numpy as np
 
 from importlib import metadata
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from scipy.signal import savgol_filter
 
@@ -857,6 +859,95 @@ def test_uvvis_export_writes_sidecar_and_pdf(tmp_path):
     assert "features" in exported_recipe
     assert any("Recipe sidecar written" in entry for entry in result.audit)
     assert any("PDF report written" in entry for entry in result.audit)
+
+
+def test_uvvis_export_clone_sources_preserves_headers(tmp_path):
+    plugin = UvVisPlugin()
+
+    csv_path = tmp_path / "clone_source.csv"
+    csv_lines = [
+        "#Instrument: DemoCSV",
+        "#Operator: QA",
+        "Wavelength,SampleA,SampleB",
+        "200,0.1,0.2",
+        "201,0.2,0.3",
+        "202,0.3,0.4",
+    ]
+    csv_path.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    excel_path = tmp_path / "clone_source.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Instrument", "DemoXLS"])
+    ws.append(["Operator", "QA"])
+    ws.append(["Wavelength", "SampleC", "SampleD"])
+    ws.append([200.0, 0.5, 0.7])
+    ws.append([201.0, 0.6, 0.8])
+    wb.save(excel_path)
+
+    spectra = plugin.load([str(csv_path), str(excel_path)])
+
+    processed: list[Spectrum] = []
+    headers_by_source: dict[Path, tuple[str, ...]] = {}
+    processed_map: dict[Path, dict[str, np.ndarray]] = {}
+    for spec in spectra:
+        meta = dict(spec.meta)
+        source = Path(meta["source_file"])
+        raw_header = tuple(str(line) for line in meta.get("_raw_header_lines", ()))
+        headers_by_source.setdefault(source, raw_header)
+        column = str(meta.get("channel") or meta.get("sample_id"))
+        processed_spec = Spectrum(
+            wavelength=spec.wavelength.copy(),
+            intensity=spec.intensity + 1.0,
+            meta=meta,
+        )
+        processed.append(processed_spec)
+        processed_map.setdefault(source, {})[column] = processed_spec.intensity
+
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "clone_batch.xlsx"),
+            "clone_sources": True,
+        }
+    }
+
+    result = plugin.export(processed, [], recipe)
+
+    csv_clone = csv_path.with_name(f"{csv_path.stem}_edited{csv_path.suffix}")
+    excel_clone = excel_path.with_name(f"{excel_path.stem}_edited{excel_path.suffix}")
+
+    assert csv_clone.exists()
+    assert excel_clone.exists()
+
+    csv_header = list(headers_by_source.get(csv_path, ()))
+    csv_output_lines = csv_clone.read_text(encoding="utf-8").splitlines()
+    if csv_header:
+        assert csv_output_lines[: len(csv_header)] == csv_header
+    csv_data = "\n".join(csv_output_lines[len(csv_header) :])
+    csv_df = pd.read_csv(io.StringIO(csv_data))
+    for column, expected in processed_map[csv_path].items():
+        np.testing.assert_allclose(csv_df[column].to_numpy(dtype=float), expected)
+
+    wb_clone = load_workbook(excel_clone, data_only=True)
+    ws_clone = wb_clone.active
+    rows = list(ws_clone.values)
+    excel_header = list(headers_by_source.get(excel_path, ()))
+    if excel_header:
+        observed = [row[0] for row in rows[: len(excel_header)]]
+        assert observed == excel_header
+    data_rows = rows[len(excel_header) :]
+    header_row = data_rows[0]
+    excel_df = pd.DataFrame(data_rows[1:], columns=header_row)
+    for column, expected in processed_map[excel_path].items():
+        np.testing.assert_allclose(
+            np.asarray(excel_df[column], dtype=float), expected
+        )
+
+    csv_message = f"Edited source copy written to {csv_clone}"
+    excel_message = f"Edited source copy written to {excel_clone}"
+    assert csv_message in result.audit
+    assert excel_message in result.audit
 
 
 def test_clean_value_sanitises_formula_strings(tmp_path):

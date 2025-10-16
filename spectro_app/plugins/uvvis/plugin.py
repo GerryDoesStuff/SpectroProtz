@@ -956,6 +956,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         header_idx, has_header, meta_lines = self._locate_table(
             lines, locale["delimiter"], locale["decimal"]
         )
+        meta_lines = list(meta_lines)
         data_str = "\n".join(lines[header_idx:])
         df = pd.read_csv(
             io.StringIO(data_str),
@@ -967,10 +968,17 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not has_header:
             df.columns = [f"col_{idx}" for idx in range(df.shape[1])]
 
-        return self._dataframe_to_records(df, meta_lines, {
-            "source_type": "generic_csv",
-            "instrument": "Generic UV-Vis",
-        })
+        return self._dataframe_to_records(
+            df,
+            meta_lines,
+            {
+                "source_type": "generic_csv",
+                "instrument": "Generic UV-Vis",
+                "_source_format": "text",
+                "_source_delimiter": locale.get("delimiter"),
+                "_source_decimal": locale.get("decimal"),
+            },
+        )
 
     def _read_generic_excel(self, path: Path) -> List[Dict[str, object]]:
         raw = pd.read_excel(path, header=None)
@@ -979,6 +987,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             for row in raw.itertuples(index=False, name=None)
         ]
         header_idx, has_header, meta_lines = self._locate_table(rows_as_text, "\t", ".")
+        meta_lines = list(meta_lines)
         if has_header:
             df = pd.read_excel(path, header=header_idx)
         else:
@@ -986,10 +995,15 @@ class UvVisPlugin(SpectroscopyPlugin):
             df.columns = [f"col_{idx}" for idx in range(df.shape[1])]
 
         df = df.dropna(axis=1, how="all")
-        return self._dataframe_to_records(df, meta_lines, {
-            "source_type": "generic_excel",
-            "instrument": "Generic UV-Vis",
-        })
+        return self._dataframe_to_records(
+            df,
+            meta_lines,
+            {
+                "source_type": "generic_excel",
+                "instrument": "Generic UV-Vis",
+                "_source_format": "excel",
+            },
+        )
 
     def _dataframe_to_records(
         self,
@@ -1002,9 +1016,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         if df.shape[1] < 2:
             raise ValueError("Tabular UV-Vis file must contain wavelength and one intensity column")
 
+        meta_lines = [str(line) for line in meta_lines]
         parsed_meta = parse_metadata_lines(meta_lines)
         meta: Dict[str, object] = {**base_meta, **parsed_meta}
         meta.setdefault("technique", "uvvis")
+        if meta_lines and "_raw_header_lines" not in meta:
+            meta["_raw_header_lines"] = tuple(meta_lines)
+        if "_source_delimiter" in meta and meta["_source_delimiter"] is None:
+            meta.pop("_source_delimiter")
+        if "_source_decimal" in meta and meta["_source_decimal"] is None:
+            meta.pop("_source_decimal")
         mode = normalise_mode(meta.get("mode"))
         if mode:
             meta["mode"] = mode
@@ -1046,12 +1067,166 @@ class UvVisPlugin(SpectroscopyPlugin):
                     column_meta.setdefault("original_mode", original_mode)
             if updated_mode:
                 column_meta["mode"] = updated_mode
+            if meta.get("_raw_header_lines") and "_raw_header_lines" not in column_meta:
+                column_meta["_raw_header_lines"] = meta["_raw_header_lines"]
             records.append({
                 "wavelength": wl,
                 "intensity": inten,
                 "meta": column_meta,
             })
         return records
+
+    def _clone_sources_with_processed_data(self, spectra: Sequence[Spectrum]) -> List[Path]:
+        grouped: Dict[Path, List[Spectrum]] = {}
+        for spec in spectra:
+            meta = getattr(spec, "meta", {}) or {}
+            source_file = meta.get("source_file")
+            if not source_file:
+                continue
+            try:
+                source_path = Path(os.fspath(source_file))
+            except TypeError:
+                source_path = Path(str(source_file))
+            grouped.setdefault(source_path, []).append(spec)
+
+        emitted: List[Path] = []
+        for path in sorted(grouped):
+            clone = self._write_edited_source(path, grouped[path])
+            if clone is not None:
+                emitted.append(clone)
+        return emitted
+
+    def _write_edited_source(self, source_path: Path, spectra: Sequence[Spectrum]) -> Path | None:
+        if not spectra:
+            return None
+        first_meta = getattr(spectra[0], "meta", {}) or {}
+        stored_header = list(first_meta.get("_raw_header_lines") or [])
+        source_format = str(first_meta.get("_source_format") or "").lower()
+        suffix = source_path.suffix
+
+        if source_format not in {"excel", "generic_excel"} and suffix.lower() not in {".xls", ".xlsx"}:
+            df, detected_header, delimiter, decimal = self._load_text_source_for_clone(source_path, first_meta)
+            header_lines = stored_header or detected_header
+            updated = self._apply_processed_columns_to_frame(df, spectra)
+            clone_path = source_path.with_name(f"{source_path.stem}_edited{suffix}")
+            self._write_text_clone(updated, header_lines, delimiter, decimal, clone_path)
+            return clone_path
+
+        df, detected_header = self._load_excel_source_for_clone(source_path, first_meta)
+        header_lines = stored_header or detected_header
+        updated = self._apply_processed_columns_to_frame(df, spectra)
+        clone_path = source_path.with_name(f"{source_path.stem}_edited{suffix}")
+        self._write_excel_clone(updated, header_lines, clone_path)
+        return clone_path
+
+    def _load_text_source_for_clone(
+        self, source_path: Path, meta: Mapping[str, Any]
+    ) -> Tuple[pd.DataFrame, List[str], str, str]:
+        text = source_path.read_text(encoding="utf-8", errors="ignore")
+        locale = sniff_locale(text)
+        delimiter = meta.get("_source_delimiter") or locale.get("delimiter") or ","
+        decimal = meta.get("_source_decimal") or locale.get("decimal") or "."
+        lines = text.splitlines()
+        header_idx, has_header, meta_lines = self._locate_table(lines, delimiter, decimal)
+        data_str = "\n".join(lines[header_idx:])
+        df = pd.read_csv(
+            io.StringIO(data_str),
+            sep=delimiter if delimiter else None,
+            decimal=decimal,
+            engine="python",
+            header=0 if has_header else None,
+        )
+        if not has_header:
+            df.columns = [f"col_{idx}" for idx in range(df.shape[1])]
+        df = df.dropna(how="all")
+        return df, [str(line) for line in meta_lines], str(delimiter), str(decimal)
+
+    def _load_excel_source_for_clone(
+        self, source_path: Path, meta: Mapping[str, Any]
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        raw = pd.read_excel(source_path, header=None)
+        rows_as_text = [
+            "\t".join(str(v) for v in row if not pd.isna(v))
+            for row in raw.itertuples(index=False, name=None)
+        ]
+        header_idx, has_header, meta_lines = self._locate_table(rows_as_text, "\t", ".")
+        if has_header:
+            df = pd.read_excel(source_path, header=header_idx)
+        else:
+            df = pd.read_excel(source_path, header=None, skiprows=header_idx)
+            df.columns = [f"col_{idx}" for idx in range(df.shape[1])]
+        df = df.dropna(axis=1, how="all")
+        return df, [str(line) for line in meta_lines]
+
+    def _apply_processed_columns_to_frame(
+        self, df: pd.DataFrame, spectra: Sequence[Spectrum]
+    ) -> pd.DataFrame:
+        if df.empty or df.shape[1] < 2:
+            return df
+        source_wavelengths = pd.to_numeric(df.iloc[:, 0], errors="coerce")
+        source_keys = np.round(source_wavelengths.to_numpy(dtype=float), 6)
+        for spec in spectra:
+            meta = getattr(spec, "meta", {}) or {}
+            column_name = meta.get("channel") or meta.get("sample_id")
+            if not column_name or column_name not in df.columns:
+                continue
+            wl = np.asarray(spec.wavelength, dtype=float)
+            intensity = np.asarray(spec.intensity, dtype=float)
+            if wl.size == 0 or intensity.size != wl.size:
+                continue
+            spec_keys = np.round(wl.astype(float), 6)
+            mapping = {
+                key: value
+                for key, value in zip(spec_keys, intensity)
+                if math.isfinite(key) and math.isfinite(value)
+            }
+            if not mapping:
+                continue
+            existing = list(df[column_name].to_numpy(copy=True))
+            for idx, key in enumerate(source_keys):
+                if key in mapping:
+                    existing[idx] = mapping[key]
+            df[column_name] = existing
+        return df
+
+    def _write_text_clone(
+        self,
+        df: pd.DataFrame,
+        header_lines: Sequence[str],
+        delimiter: str,
+        decimal: str,
+        output_path: Path,
+    ) -> None:
+        header_lines = [str(line) for line in header_lines if str(line)]
+        buffer = io.StringIO()
+        df.to_csv(buffer, index=False, sep=delimiter or ",", decimal=decimal or ".")
+        payload = buffer.getvalue()
+        header_block = ""
+        if header_lines:
+            header_block = "\n".join(header_lines)
+            if not header_block.endswith("\n"):
+                header_block += "\n"
+        output_path.write_text(header_block + payload, encoding="utf-8")
+
+    def _write_excel_clone(
+        self,
+        df: pd.DataFrame,
+        header_lines: Sequence[str],
+        output_path: Path,
+    ) -> None:
+        from openpyxl import Workbook
+        from openpyxl.utils.dataframe import dataframe_to_rows
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        for line in header_lines:
+            if not line:
+                continue
+            ws.append([str(line)])
+        for row in dataframe_to_rows(df, index=False, header=True):
+            ws.append(list(row))
+        wb.save(output_path)
 
     def _locate_table(self, lines: Iterable[str], delimiter: str | None, decimal: str):
         lines = list(lines)
@@ -4302,6 +4477,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         finally:
             for _, fig in figure_objs:
                 plt.close(fig)
+
+        if export_cfg.get("clone_sources") and specs:
+            try:
+                clone_paths = self._clone_sources_with_processed_data(specs)
+            except Exception as exc:
+                workbook_audit.append(f"Source cloning failed: {exc}")
+            else:
+                for clone_path in clone_paths:
+                    workbook_audit.append(f"Edited source copy written to {clone_path}")
 
         results_ctx["audit_messages"] = list(workbook_audit)
         report_text = self._build_text_report(workbook_audit)
