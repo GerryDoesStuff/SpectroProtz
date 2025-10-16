@@ -459,14 +459,19 @@ def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
 
         monkeypatch.setattr(
             window,
-            "_prompt_export_layout",
-            lambda current_layout: "wide",
+            "_prompt_export_options",
+            lambda **kwargs: {
+                "processed_layout": "wide",
+                "per_spectrum_enabled": False,
+                "per_spectrum_format": "original",
+            },
         )
 
         window.on_export()
 
         export_cfg = window._recipe_data.get("export", {})
         assert export_cfg.get("processed_layout") == "wide"
+        assert not export_cfg.get("per_spectrum_enabled")
 
         assert export_target.exists(), "Workbook should be written via UI export"
 
@@ -1150,3 +1155,84 @@ def test_clean_value_sanitises_formula_strings(tmp_path):
     assert sample_cell.value.startswith("'")
     assert sample_cell.value[1:] == "=2+2"
     assert sample_cell.data_type == "s"  # Written as literal string rather than formula
+
+
+def test_uvvis_export_per_spectrum_original_header(tmp_path):
+    plugin = UvVisPlugin()
+    source_path = tmp_path / "input.csv"
+    source_path.write_text("# header\nwavelength,SampleA\n200,0.1\n201,0.2\n")
+    spectrum = Spectrum(
+        wavelength=np.array([200.0, 201.0], dtype=float),
+        intensity=np.array([0.3, 0.4], dtype=float),
+        meta={
+            "sample_id": "SampleA",
+            "channel": "SampleA",
+            "role": "sample",
+            "mode": "absorbance",
+            "source_file": str(source_path),
+            "_source_delimiter": ",",
+            "_source_decimal": ".",
+            "_raw_header_lines": ["# header"],
+        },
+    )
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "batch.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "original",
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spectrum], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    clone_path = source_path.with_name("input_edited.csv")
+    assert clone_path.exists()
+    report_results = plugin._report_context.get("results", {})
+    per_spec_paths = report_results.get("per_spectrum_exports") or []
+    assert str(clone_path) in per_spec_paths
+    assert any(str(clone_path) in entry for entry in result.audit)
+
+
+def test_uvvis_export_per_spectrum_xlsx(tmp_path):
+    plugin = UvVisPlugin()
+    spectrum = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_batch.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "xlsx",
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spectrum], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    emitted_path = tmp_path / "Sample-1_1.xlsx"
+    assert emitted_path.exists()
+    report_results = plugin._report_context.get("results", {})
+    per_spec_paths = report_results.get("per_spectrum_exports") or []
+    assert str(emitted_path) in per_spec_paths
+    assert any(str(emitted_path) in entry for entry in result.audit)
+
+
+def test_uvvis_export_per_spectrum_csv(tmp_path):
+    plugin = UvVisPlugin()
+    spectrum = _mock_spectrum()
+    recipe = {
+        "export": {
+            "path": str(tmp_path / "uvvis_batch.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "csv",
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spectrum], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    emitted_path = tmp_path / "Sample-1_1.csv"
+    assert emitted_path.exists()
+    report_results = plugin._report_context.get("results", {})
+    per_spec_paths = report_results.get("per_spectrum_exports") or []
+    assert str(emitted_path) in per_spec_paths
+    assert any(str(emitted_path) in entry for entry in result.audit)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -370,3 +371,63 @@ def write_workbook(
 
     wb.save(workbook_path)
     return str(workbook_path)
+
+
+def write_single_spectrum_workbook(out_path: str | Path, spectrum: Spectrum) -> Path:
+    """Write ``spectrum`` to a single-sheet workbook and return the path."""
+
+    workbook_path = Path(out_path)
+    _ensure_parent(workbook_path)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Spectrum"
+
+    wavelengths = np.asarray(spectrum.wavelength, dtype=float)
+    channels = _iter_channels(spectrum, wavelengths)
+    header = ["wavelength"] + [label for label, _ in channels]
+    ws.append(header)
+    for idx, wavelength in enumerate(wavelengths):
+        row = [_clean_value(wavelength)]
+        for _, channel_data in channels:
+            if idx < channel_data.shape[0]:
+                row.append(_clean_value(channel_data[idx]))
+            else:
+                row.append(None)
+        ws.append(row)
+
+    metadata = wb.create_sheet("Metadata")
+    metadata.append(["key", "value"])
+    for key, value in sorted(_flatten_dict(dict(spectrum.meta or {})).items()):
+        metadata.append([key, _clean_value(value)])
+
+    wb.save(workbook_path)
+    return workbook_path
+
+
+def write_single_spectrum_csv(out_path: str | Path, spectrum: Spectrum) -> Path:
+    """Write ``spectrum`` to a CSV file and return the emitted path."""
+
+    csv_path = Path(out_path)
+    _ensure_parent(csv_path)
+
+    wavelengths = np.asarray(spectrum.wavelength, dtype=float)
+    channels = _iter_channels(spectrum, wavelengths)
+    header = ["wavelength"] + [label for label, _ in channels]
+
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        flattened_meta = _flatten_dict(dict(spectrum.meta or {}))
+        for key, value in sorted(flattened_meta.items()):
+            handle.write(f"# {key}: {_clean_value(value)}\n")
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for idx, wavelength in enumerate(wavelengths):
+            row = [_clean_value(wavelength)]
+            for _, channel_data in channels:
+                if idx < channel_data.shape[0]:
+                    row.append(_clean_value(channel_data[idx]))
+                else:
+                    row.append(None)
+            writer.writerow(row)
+
+    return csv_path

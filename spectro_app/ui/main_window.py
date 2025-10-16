@@ -32,7 +32,14 @@ from spectro_app.ui.menus import build_menus
 
 
 class _ExportLayoutDialog(QtWidgets.QDialog):
-    def __init__(self, parent: Optional[QtWidgets.QWidget], current_layout: str):
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget],
+        *,
+        current_layout: str,
+        per_spectrum_enabled: bool,
+        per_spectrum_format: str,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Export Layout")
         self.setModal(True)
@@ -55,6 +62,36 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         layout.addWidget(self._tidy_radio)
         layout.addWidget(self._wide_radio)
 
+        per_spectrum_group = QtWidgets.QGroupBox("Per-spectrum exports", self)
+        per_spectrum_layout = QtWidgets.QVBoxLayout(per_spectrum_group)
+        self._per_spectrum_checkbox = QtWidgets.QCheckBox(
+            "Write individual spectrum files"
+        )
+        per_spectrum_layout.addWidget(self._per_spectrum_checkbox)
+
+        format_layout = QtWidgets.QHBoxLayout()
+        format_label = QtWidgets.QLabel("Format:")
+        self._format_combo = QtWidgets.QComboBox()
+        self._format_combo.addItem("Original header", "original")
+        self._format_combo.addItem("Excel (.xlsx)", "xlsx")
+        self._format_combo.addItem("CSV (.csv)", "csv")
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self._format_combo)
+        per_spectrum_layout.addLayout(format_layout)
+        layout.addWidget(per_spectrum_group)
+
+        self._per_spectrum_checkbox.toggled.connect(self._format_combo.setEnabled)
+        self._format_combo.setEnabled(per_spectrum_enabled)
+
+        if per_spectrum_enabled:
+            self._per_spectrum_checkbox.setChecked(True)
+        normalised_format = (per_spectrum_format or "original").strip().lower()
+        if normalised_format not in {"original", "xlsx", "csv"}:
+            normalised_format = "original"
+        index = self._format_combo.findData(normalised_format)
+        if index >= 0:
+            self._format_combo.setCurrentIndex(index)
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
@@ -74,6 +111,15 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         if self._wide_radio.isChecked():
             return "wide"
         return "tidy"
+
+    def per_spectrum_enabled(self) -> bool:
+        return self._per_spectrum_checkbox.isChecked()
+
+    def per_spectrum_format(self) -> str:
+        data = self._format_combo.currentData()
+        if isinstance(data, str):
+            return data
+        return "original"
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -663,12 +709,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         export_config = dict(export_cfg)
         export_config["path"] = target
-        selected_layout = self._prompt_export_layout(
-            export_config.get("processed_layout", "tidy")
+        options = self._prompt_export_options(
+            processed_layout=export_config.get("processed_layout", "tidy"),
+            per_spectrum_enabled=bool(export_config.get("per_spectrum_enabled")),
+            per_spectrum_format=export_config.get("per_spectrum_format", "original"),
         )
-        if selected_layout is None:
+        if options is None:
             return
-        export_config["processed_layout"] = selected_layout
+        export_config.update(options)
         self._recipe_data["export"] = export_config
         recipe_payload = self._build_recipe_payload()
 
@@ -691,11 +739,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx.set_dirty(True)
         self._update_action_states()
 
-    def _prompt_export_layout(self, current_layout: str) -> Optional[str]:
-        dialog = _ExportLayoutDialog(self, current_layout=current_layout)
+    def _prompt_export_options(
+        self,
+        *,
+        processed_layout: str,
+        per_spectrum_enabled: bool,
+        per_spectrum_format: str,
+    ) -> Optional[Dict[str, object]]:
+        dialog = _ExportLayoutDialog(
+            self,
+            current_layout=processed_layout,
+            per_spectrum_enabled=per_spectrum_enabled,
+            per_spectrum_format=per_spectrum_format,
+        )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return None
-        return dialog.selected_layout()
+        return {
+            "processed_layout": dialog.selected_layout(),
+            "per_spectrum_enabled": dialog.per_spectrum_enabled(),
+            "per_spectrum_format": dialog.per_spectrum_format(),
+        }
 
     def on_reset_layout(self):
         default_geometry = getattr(self, "_default_geometry", None)
