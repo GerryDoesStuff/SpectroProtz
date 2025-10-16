@@ -199,8 +199,41 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     # Public API
-    def set_spectra(self, spectra: Sequence[Spectrum]) -> bool:
+    def set_spectra(self, spectra: Sequence[Spectrum], preserve_view: bool = False) -> bool:
         """Populate the plot with spectra and return ``True`` if data was shown."""
+
+        preserved_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
+        preserved_auto_range: Optional[tuple[object, object]] = None
+        preserved_visible_stages: Optional[Set[str]] = None
+        preserved_single_mode: Optional[bool] = None
+        preserved_window_start: Optional[int] = None
+        preserved_window_size: Optional[int] = None
+        if preserve_view:
+            view_box = self.plot.plotItem.getViewBox()
+            if view_box is not None:
+                try:
+                    x_range, y_range = view_box.viewRange()
+                except Exception:
+                    preserved_view_range = None
+                else:
+                    preserved_view_range = (tuple(x_range), tuple(y_range))
+                try:
+                    auto_range_state = view_box.state.get("autoRange", (True, True))
+                except Exception:
+                    preserved_auto_range = None
+                else:
+                    preserved_auto_range = (
+                        auto_range_state[0] if len(auto_range_state) > 0 else True,
+                        auto_range_state[1] if len(auto_range_state) > 1 else True,
+                    )
+            preserved_visible_stages = {
+                stage
+                for stage, checkbox in self._stage_controls.items()
+                if checkbox.isChecked()
+            }
+            preserved_single_mode = self._single_mode if self._total_spectra > 0 else False
+            preserved_window_start = self._single_window_start
+            preserved_window_size = self._single_window_size
 
         stage_datasets: Dict[str, List[_StageDataset]] = {key: [] for key in self.STAGE_LABELS}
         self._stage_datasets = {key: [] for key in self.STAGE_LABELS}
@@ -310,13 +343,56 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._single_window_size = 1
             self._single_mode = False
         else:
-            self._single_window_start %= self._total_spectra
-            self._single_window_size = min(max(1, self._single_window_size), self._total_spectra)
-            self._single_mode = self.view_mode_button.isChecked()
+            if preserve_view and preserved_window_start is not None and preserved_window_size is not None:
+                if preserved_single_mode:
+                    self._single_window_start = preserved_window_start % self._total_spectra
+                    self._single_window_size = min(
+                        max(1, preserved_window_size), self._total_spectra
+                    )
+                    self._single_mode = True
+                else:
+                    self._single_window_start %= self._total_spectra
+                    self._single_window_size = min(
+                        max(1, self._single_window_size), self._total_spectra
+                    )
+                    self._single_mode = False
+            else:
+                self._single_window_start %= self._total_spectra
+                self._single_window_size = min(
+                    max(1, self._single_window_size), self._total_spectra
+                )
+                self._single_mode = self.view_mode_button.isChecked()
+
+        if preserve_view and preserved_visible_stages is not None:
+            self._visible_stages = set(preserved_visible_stages)
 
         self.plot.setTitle("")
-        self._apply_view_mode(initial=True)
+        self._apply_view_mode(initial=not preserve_view)
         self.cursor_label.setText("λ: ––– | I: –––")
+
+        if preserve_view and preserved_view_range is not None:
+            view_box = self.plot.plotItem.getViewBox()
+            if view_box is not None:
+                auto_range_state = preserved_auto_range or (False, False)
+                axis_map = (pg.ViewBox.XAxis, pg.ViewBox.YAxis)
+                for index, axis in enumerate(axis_map):
+                    state = auto_range_state[index] if index < len(auto_range_state) else True
+                    enable = state is not False
+                    try:
+                        view_box.enableAutoRange(axis=axis, enable=enable)
+                    except Exception:
+                        continue
+                x_range, y_range = preserved_view_range
+                if len(auto_range_state) > 0 and auto_range_state[0] is False:
+                    view_box.setXRange(*x_range, padding=0)
+                if len(auto_range_state) > 1 and auto_range_state[1] is False:
+                    view_box.setYRange(*y_range, padding=0)
+                if (
+                    (len(auto_range_state) == 0 or auto_range_state[0] is False)
+                    and (len(auto_range_state) <= 1 or auto_range_state[1] is False)
+                ):
+                    view_box.setRange(xRange=x_range, yRange=y_range, padding=0)
+
         return True
 
     # ------------------------------------------------------------------
@@ -694,6 +770,7 @@ class PreviewDock(QDockWidget):
         self.tabs.setTabsClosable(False)
         self.tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.setWidget(self.tabs)
+        self._spectra_widget: Optional[SpectraPlotWidget] = None
         self.clear()
 
     # ------------------------------------------------------------------
@@ -713,18 +790,26 @@ class PreviewDock(QDockWidget):
         spectra_widget: Optional[SpectraPlotWidget] = None
         shown = False
         if pg is not None and result.processed:
-            spectra_widget = SpectraPlotWidget()
-            try:
-                shown = spectra_widget.set_spectra(result.processed)
-            except RuntimeError:
-                spectra_widget.deleteLater()
-                spectra_widget = None
-                shown = False
+            preserve_view = self._spectra_widget is not None
+            if self._spectra_widget is None:
+                try:
+                    self._spectra_widget = SpectraPlotWidget()
+                except RuntimeError:
+                    self._spectra_widget = None
+            spectra_widget = self._spectra_widget
+            if spectra_widget is not None:
+                try:
+                    shown = spectra_widget.set_spectra(
+                        result.processed, preserve_view=preserve_view
+                    )
+                except RuntimeError:
+                    spectra_widget.deleteLater()
+                    spectra_widget = None
+                    self._spectra_widget = None
+                    shown = False
         if shown and spectra_widget is not None:
             self.tabs.addTab(spectra_widget, "Spectra")
         else:
-            if spectra_widget is not None:
-                spectra_widget.deleteLater()
             message = "Interactive plotting is unavailable for these results."
             if result.figures:
                 message += " Showing generated figures instead."

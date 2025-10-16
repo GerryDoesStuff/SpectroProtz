@@ -4,6 +4,7 @@ import pytest
 pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 pytest.importorskip("pyqtgraph", exc_type=ImportError)
 
+import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -73,6 +74,59 @@ def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app
         assert smoothed_checkbox.isEnabled()
         assert not smoothed_checkbox.isChecked()
         assert widget._smoothed_fallback_active
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
+def test_preserve_view_keeps_ranges_and_selection(qt_app):
+    widget = SpectraPlotWidget()
+    try:
+        base_wavelength = np.linspace(400.0, 800.0, 50, dtype=float)
+        spectra = [
+            Spectrum(
+                wavelength=base_wavelength,
+                intensity=np.sin(base_wavelength / 50.0 + idx).astype(float),
+                meta={"sample_id": f"Sample {idx + 1}"},
+            )
+            for idx in range(3)
+        ]
+
+        assert widget.set_spectra(spectra)
+        qt_app.processEvents()
+
+        widget.view_mode_button.click()
+        qt_app.processEvents()
+        widget._on_add_clicked()
+        qt_app.processEvents()
+        widget._on_previous_clicked()
+        qt_app.processEvents()
+
+        view_box = widget.plot.plotItem.getViewBox()
+        view_box.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=False)
+        view_box.setRange(xRange=(500.0, 600.0), yRange=(-0.75, 0.75), padding=0)
+
+        selected_before = widget._current_single_labels()
+        view_before = tuple(tuple(axis) for axis in view_box.viewRange())
+
+        assert widget.set_spectra(spectra, preserve_view=True)
+        qt_app.processEvents()
+
+        selected_after = widget._current_single_labels()
+        view_after = tuple(tuple(axis) for axis in view_box.viewRange())
+
+        assert selected_after == selected_before
+        for before_axis, after_axis in zip(view_before, view_after):
+            np.testing.assert_allclose(after_axis, before_axis)
+
+        assert widget.set_spectra(spectra, preserve_view=False)
+        qt_app.processEvents()
+        view_reset = tuple(tuple(axis) for axis in view_box.viewRange())
+
+        assert not all(
+            np.allclose(reset_axis, after_axis)
+            for reset_axis, after_axis in zip(view_reset, view_after)
+        )
     finally:
         widget.deleteLater()
         qt_app.processEvents()
