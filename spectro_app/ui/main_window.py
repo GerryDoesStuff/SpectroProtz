@@ -31,6 +31,51 @@ from spectro_app.ui.docks.recipe_editor import RecipeEditorDock
 from spectro_app.ui.menus import build_menus
 
 
+class _ExportLayoutDialog(QtWidgets.QDialog):
+    def __init__(self, parent: Optional[QtWidgets.QWidget], current_layout: str):
+        super().__init__(parent)
+        self.setWindowTitle("Export Layout")
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        description = QtWidgets.QLabel(
+            "Choose how processed spectra should be written to the workbook."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._tidy_radio = QtWidgets.QRadioButton(
+            "Tidy (one row per wavelength/channel)"
+        )
+        self._wide_radio = QtWidgets.QRadioButton(
+            "Wide (one column per wavelength/channel)"
+        )
+
+        layout.addWidget(self._tidy_radio)
+        layout.addWidget(self._wide_radio)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        normalised_layout = (current_layout or "tidy").strip().lower()
+        if normalised_layout == "wide":
+            self._wide_radio.setChecked(True)
+        else:
+            self._tidy_radio.setChecked(True)
+
+    def selected_layout(self) -> str:
+        if self._wide_radio.isChecked():
+            return "wide"
+        return "tidy"
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, appctx):
         super().__init__()
@@ -618,6 +663,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         export_config = dict(export_cfg)
         export_config["path"] = target
+        selected_layout = self._prompt_export_layout(
+            export_config.get("processed_layout", "tidy")
+        )
+        if selected_layout is None:
+            return
+        export_config["processed_layout"] = selected_layout
         self._recipe_data["export"] = export_config
         recipe_payload = self._build_recipe_payload()
 
@@ -639,6 +690,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"Exported workbook to {target}", 5000)
         self.appctx.set_dirty(True)
         self._update_action_states()
+
+    def _prompt_export_layout(self, current_layout: str) -> Optional[str]:
+        dialog = _ExportLayoutDialog(self, current_layout=current_layout)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return None
+        return dialog.selected_layout()
 
     def on_reset_layout(self):
         default_geometry = getattr(self, "_default_geometry", None)
