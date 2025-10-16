@@ -84,6 +84,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._updating_ui: bool = False
         self._job_running = False
         self._raw_preview_window: Optional[RawDataPreviewWindow] = None
+        self._auto_update_preview_enabled: bool = True
+        self._auto_run_pending: bool = False
+        self._config_update_timer = QtCore.QTimer(self)
+        self._config_update_timer.setSingleShot(True)
+        self._config_update_timer.setInterval(400)
+        self._config_update_timer.timeout.connect(
+            self._on_debounced_recipe_config_changed
+        )
         self._load_app_settings()
 
         self._populate_plugin_selectors()
@@ -263,6 +271,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.recipeDock.set_recipe(self._recipe_data)
             finally:
                 self._updating_ui = previous_state
+
+            stored_auto_update = payload.get("auto_update_preview")
+            if isinstance(stored_auto_update, bool):
+                self._auto_update_preview_enabled = stored_auto_update
+            self._apply_auto_update_checkbox_state()
 
             queue_items: List[str] = []
             stored_queue = payload.get("queue")
@@ -476,10 +489,27 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("recentFiles", current[:20])
         self._refresh_recent_menu()
 
+    def _apply_auto_update_checkbox_state(self) -> None:
+        if not self.recipeDock:
+            return
+        checkbox = getattr(self.recipeDock, "auto_update_preview_checkbox", None)
+        if checkbox is None:
+            return
+        previous = checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(bool(self._auto_update_preview_enabled))
+        finally:
+            checkbox.blockSignals(previous)
+
     def _connect_recipe_editor(self):
         self.recipeDock.module.currentTextChanged.connect(self._on_module_changed)
         self.recipeDock.smooth_enable.toggled.connect(self._on_recipe_widget_changed)
         self.recipeDock.smooth_window.valueChanged.connect(self._on_recipe_widget_changed)
+        self.recipeDock.config_changed.connect(self._on_recipe_config_changed)
+        self.recipeDock.auto_update_preview_checkbox.toggled.connect(
+            self._on_auto_update_toggled
+        )
+        self._apply_auto_update_checkbox_state()
 
     def on_open(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -631,15 +661,17 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.restoreState(self.saveState())
 
-    def on_run(self):
+    def _start_processing_job(self, auto_triggered: bool) -> bool:
         if self._job_running:
-            return
+            return False
         if not self._queued_paths:
-            QtWidgets.QMessageBox.information(
-                self, "No Files", "Add spectra to the queue before running."
-            )
-            return
+            if not auto_triggered:
+                QtWidgets.QMessageBox.information(
+                    self, "No Files", "Add spectra to the queue before running."
+                )
+            return False
 
+        self._config_update_timer.stop()
         self._update_recipe_from_ui()
         recipe_payload = self._build_recipe_payload()
         recipe_model = Recipe(
@@ -649,28 +681,49 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         errors = recipe_model.validate()
         if errors:
-            QtWidgets.QMessageBox.critical(
-                self, "Invalid Recipe", "\n".join(errors)
-            )
-            return
+            if auto_triggered:
+                first_error = str(errors[0]) if errors else "Recipe invalid."
+                self.status.showMessage(
+                    f"Auto-update skipped: {first_error}", 5000
+                )
+            else:
+                QtWidgets.QMessageBox.critical(
+                    self, "Invalid Recipe", "\n".join(errors)
+                )
+            return False
 
-        plugin = self._resolve_plugin(self._queued_paths, recipe_payload.get("module"))
+        plugin = self._resolve_plugin(
+            self._queued_paths, recipe_payload.get("module")
+        )
         if not plugin:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "No Plugin",
-                "Unable to determine a processing plugin for the selected files.",
-            )
-            return
+            if auto_triggered:
+                self.status.showMessage(
+                    "Auto-update skipped: unable to determine a processing plugin.",
+                    5000,
+                )
+            else:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "No Plugin",
+                    "Unable to determine a processing plugin for the selected files.",
+                )
+            return False
 
         self._active_plugin = plugin
         self._active_plugin_id = plugin.id
         self._select_module(plugin.id)
         self._last_result = None
         self._update_action_states()
-        self.status.showMessage(f"Running {plugin.label} pipeline...")
+        label = getattr(plugin, "label", plugin.id)
+        if auto_triggered:
+            status_text = f"Auto-updating {label} preview..."
+        else:
+            status_text = f"Running {label} pipeline..."
+        self.status.showMessage(status_text)
         if hasattr(plugin, "set_queue_overrides"):
-            overrides = self._queue_overrides if isinstance(self._queue_overrides, dict) else {}
+            overrides = (
+                self._queue_overrides if isinstance(self._queue_overrides, dict) else {}
+            )
             try:
                 plugin.set_queue_overrides(overrides)
             except Exception:
@@ -678,7 +731,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     plugin.set_queue_overrides({})
                 except Exception:
                     pass
+        self._auto_run_pending = False
         self.runctl.start(plugin, self._queued_paths, recipe_payload)
+        return True
+
+    def on_run(self):
+        self._start_processing_job(auto_triggered=False)
 
     def on_cancel(self):
         if not self._job_running:
@@ -838,6 +896,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(self._current_recipe_path) if self._current_recipe_path else None
             ),
             "last_data_dir": str(self._last_browsed_dir) if self._last_browsed_dir else None,
+            "auto_update_preview": bool(self._auto_update_preview_enabled),
         }
 
         def _json_default(value: object) -> object:
@@ -1094,6 +1153,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.set_entries(entries)
         if not self._queued_paths:
             self.previewDock.clear()
+            self._config_update_timer.stop()
+            self._auto_run_pending = False
         self._last_result = None
         self._update_action_states()
         if plugin:
@@ -1599,6 +1660,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_from_ui()
         self.appctx.set_dirty(True)
 
+    def _on_recipe_config_changed(self):
+        if not self._auto_update_preview_enabled:
+            return
+        if not self._queued_paths:
+            return
+        if self._job_running:
+            self._auto_run_pending = True
+            return
+        self._auto_run_pending = False
+        self._config_update_timer.start(self._config_update_timer.interval())
+
+    def _on_auto_update_toggled(self, checked: bool):
+        self._auto_update_preview_enabled = bool(checked)
+        if not checked:
+            self._config_update_timer.stop()
+            self._auto_run_pending = False
+        else:
+            self._on_recipe_config_changed()
+
+    def _on_debounced_recipe_config_changed(self):
+        if not self._auto_update_preview_enabled:
+            return
+        if self._job_running:
+            self._auto_run_pending = True
+            return
+        if not self._queued_paths:
+            return
+        self._start_processing_job(auto_triggered=True)
+
     def _sync_recipe_state(self) -> None:
         recipe_obj = self.recipeDock.get_recipe()
         if not isinstance(recipe_obj, Recipe):
@@ -1714,6 +1804,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx.set_job_running(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        pending_auto = self._auto_run_pending
+        self._auto_run_pending = False
 
         if isinstance(result, Exception):
             self._last_result = None
@@ -1729,6 +1821,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.previewDock.show_error(message)
                 self.loggerDock.append_line(f"Error: {message}")
             self._update_action_states()
+            if (
+                pending_auto
+                and self._auto_update_preview_enabled
+                and self._queued_paths
+            ):
+                self._config_update_timer.start(self._config_update_timer.interval())
             return
 
         if isinstance(result, BatchResult):
@@ -1758,6 +1856,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         self._update_action_states()
+        if (
+            pending_auto
+            and self._auto_update_preview_enabled
+            and self._queued_paths
+        ):
+            self._config_update_timer.start(self._config_update_timer.interval())
 
     def _write_recipe(self, path: Path):
         recipe_payload = self._build_recipe_payload()
