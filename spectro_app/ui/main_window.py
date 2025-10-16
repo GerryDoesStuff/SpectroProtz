@@ -740,7 +740,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
         self._auto_run_pending = False
-        self.runctl.start(plugin, self._queued_paths, effective_recipe_payload)
+        self.runctl.start(
+            plugin,
+            self._queued_paths,
+            effective_recipe_payload,
+            user_initiated=not auto_triggered,
+        )
         return True
 
     def on_run(self):
