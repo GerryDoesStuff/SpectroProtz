@@ -194,6 +194,7 @@ def _read_helios_text(path: Path) -> List[Dict[str, Any]]:
     header_idx, has_header, meta_lines = _locate_table(
         lines, locale["delimiter"], locale["decimal"]
     )
+    meta_lines = list(meta_lines)
     data_str = "\n".join(lines[header_idx:])
     df = pd.read_csv(
         io.StringIO(data_str),
@@ -206,7 +207,13 @@ def _read_helios_text(path: Path) -> List[Dict[str, Any]]:
         df_columns = [f"col_{idx}" for idx in range(df.shape[1])]
         df.columns = df_columns
 
+    df = df.dropna(axis=1, how="all")
     meta = parse_metadata_lines(meta_lines)
+    if meta_lines and "_raw_header_lines" not in meta:
+        meta["_raw_header_lines"] = tuple(meta_lines)
+    meta.setdefault("_source_format", "text")
+    meta.setdefault("_source_delimiter", locale.get("delimiter"))
+    meta.setdefault("_source_decimal", locale.get("decimal"))
     return _dataframe_to_records(df, meta)
 
 
@@ -367,6 +374,7 @@ def _read_helios_excel(path: Path) -> List[Dict[str, Any]]:
         for row in raw.itertuples(index=False, name=None)
     ]
     header_idx, has_header, meta_lines = _locate_table(rows_as_text, "\t", ".")
+    meta_lines = list(meta_lines)
     if has_header:
         df = pd.read_excel(path, header=header_idx)
     else:
@@ -375,6 +383,9 @@ def _read_helios_excel(path: Path) -> List[Dict[str, Any]]:
 
     df = df.dropna(axis=1, how="all")
     meta = parse_metadata_lines(meta_lines)
+    if meta_lines and "_raw_header_lines" not in meta:
+        meta["_raw_header_lines"] = tuple(meta_lines)
+    meta.setdefault("_source_format", "excel")
     return _dataframe_to_records(df, meta)
 
 
@@ -385,6 +396,9 @@ def _dataframe_to_records(df: pd.DataFrame, base_meta: Dict[str, Any]) -> List[D
         raise ValueError("Helios export must contain wavelength and at least one intensity column")
 
     base_meta = dict(base_meta)
+    header_lines = base_meta.get("_raw_header_lines")
+    if header_lines is not None and not isinstance(header_lines, tuple):
+        base_meta["_raw_header_lines"] = tuple(str(line) for line in header_lines)
     mode = normalise_mode(base_meta.get("mode"))
     if mode:
         base_meta["mode"] = mode
