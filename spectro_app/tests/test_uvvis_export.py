@@ -489,31 +489,35 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     ws_processed = wb["Processed_Spectra"]
 
     header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
-    base_columns = ["spectrum_index", "sample_id", "role", "mode"]
-    assert header[: len(base_columns)] == base_columns
+    expected_header, expected_rows = excel_writer._processed_table_wide(processed)
 
-    data_rows = list(ws_processed.iter_rows(min_row=2, values_only=True))
-    assert len(data_rows) == len(processed)
+    assert header == expected_header
+    assert header[0] == "wavelength"
+    assert all(isinstance(name, str) for name in header[1:])
 
-    header_dynamic = set(header[len(base_columns) :])
-    expected_columns = set()
-    for spec in processed:
-        wavelengths = np.asarray(spec.wavelength, dtype=float)
-        for channel_label, _ in excel_writer._iter_channels(spec, wavelengths):
-            for wl_val in wavelengths:
-                expected_columns.add(excel_writer._format_channel_column(channel_label, float(wl_val)))
+    sample_meta = processed[0].meta or {}
+    sample_label_value = excel_writer._clean_value(
+        sample_meta.get("sample_id")
+        or sample_meta.get("channel")
+        or sample_meta.get("blank_id")
+        or "spec_0"
+    )
+    if sample_label_value in (None, ""):
+        sample_label_value = "spec_0"
+    sample_label = str(sample_label_value)
+    assert all(name.startswith(f"{sample_label}:") for name in header[1:])
 
-    assert expected_columns == header_dynamic
+    data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
+    assert len(data_rows) == len(expected_rows)
 
-    column_index = {name: idx for idx, name in enumerate(header)}
-    for row, spec in zip(data_rows, processed):
-        wavelengths = np.asarray(spec.wavelength, dtype=float)
-        for channel_label, data in excel_writer._iter_channels(spec, wavelengths):
-            for wl_val, inten_val in zip(wavelengths, data):
-                col_name = excel_writer._format_channel_column(channel_label, float(wl_val))
-                cell_value = row[column_index[col_name]]
-                assert cell_value is not None
-                assert cell_value == pytest.approx(float(inten_val))
+    for got, expected in zip(data_rows, expected_rows):
+        assert len(got) == len(expected)
+        assert got[0] == pytest.approx(expected[0])
+        for idx, value in enumerate(expected[1:], start=1):
+            if value is None:
+                assert got[idx] is None
+            else:
+                assert got[idx] == pytest.approx(value)
 
 
 def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(

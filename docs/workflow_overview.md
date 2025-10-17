@@ -118,14 +118,18 @@ The calibration status and aggregates are cached for exporters.【F:spectro_app/
 ### Export
 
 Export honours the recipe’s `export` block, resolving workbook/PDF/sidecar
-destinations and choosing tidy or wide processed-data layouts. It generates
-figures (processed traces, join overlays, calibration plots, QC summaries),
-composes a textual audit trail, and writes an Excel workbook when a path is
-provided. Optional sidecar JSON recipes and PDF reports (embedding figures plus
-the audit narrative) are emitted when requested. The plugin closes Matplotlib
-handles, records export destinations and audit messages in the results context,
-and returns a `BatchResult` bundling processed spectra, QC tables, rendered
-figures, audit logs, and human-readable report text.【F:spectro_app/plugins/uvvis/plugin.py†L3059-L3503】
+destinations and choosing tidy or wide processed-data layouts. Wide exports now
+emit a matrix whose first column is the shared wavelength grid and whose
+remaining columns are organised by `(sample_id, channel)` pairs—ideal for quick
+plotting or joins without reshaping data. Tidy exports continue to include
+per-spectrum metadata alongside wavelength/intensity pairs. The exporter
+generates figures (processed traces, join overlays, calibration plots, QC
+summaries), composes a textual audit trail, and writes an Excel workbook when a
+path is provided. Optional sidecar JSON recipes and PDF reports (embedding
+figures plus the audit narrative) are emitted when requested. The plugin closes
+Matplotlib handles, records export destinations and audit messages in the
+results context, and returns a `BatchResult` bundling processed spectra, QC
+tables, rendered figures, audit logs, and human-readable report text.【F:spectro_app/plugins/uvvis/plugin.py†L3059-L3503】
 
 ## Global processing toggles
 
