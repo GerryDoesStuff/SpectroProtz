@@ -256,6 +256,98 @@ def test_uvvis_export_handles_numeric_manifest(tmp_path):
     assert isinstance(first_meta.get("dilution_factor"), int)
 
 
+def test_uvvis_export_clones_visionlite_sources(tmp_path):
+    dsp_text = """sinacsa
+Scan
+1
+Sample01.dsp
+nm
+400
+402
+1
+3
+A
+-0.1
+0.5
+0
+Operator Name
+
+2024.05.01. 10:00:00
+2024.05.01. 10:05:00
+2024.05.01. 09:55:00
+0
+version 1, 2024.05.01. 10:05:00, Operator Name: |Created; Method: ||
+
+1
+0
+0
+sec
+0
+0
+
+GAMMA
+v7.03 v4.80
+143309
+2
+0
+0
+0
+0
+0
+0
+
+7
+0
+0
+VISIONlite Scan Version 2.1
+
+#SPECIFIC1
+0
+0
+0.01
+
+#SPECIFIC2
+
+#SPECIFIC3
+
+#DATA
+0.1
+0.2
+0.3
+"""
+    source_path = tmp_path / "sample01.dsp"
+    source_path.write_text(dsp_text, encoding="utf-8")
+    original_header = dsp_text.split("#DATA", 1)[0]
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(source_path)])
+    processed, qc_rows = plugin.analyze(spectra, {})
+
+    assert processed, "Processed spectra should not be empty"
+    processed[0].intensity = processed[0].intensity + 0.05
+
+    export_recipe = {
+        "export": {
+            "path": str(tmp_path / "visionlite.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "original",
+        }
+    }
+
+    plugin.export(processed, qc_rows, export_recipe)
+
+    clone_path = source_path.with_name(f"{source_path.stem}_edited{source_path.suffix}")
+    assert clone_path.exists(), "Edited Visionlite clone should be written"
+
+    clone_text = clone_path.read_text(encoding="utf-8")
+    clone_header, clone_data = clone_text.split("#DATA", 1)
+    assert clone_header == original_header
+
+    data_lines = [line.strip() for line in clone_data.splitlines() if line.strip() and not line.startswith("#")]
+    emitted_values = np.array([float(value) for value in data_lines], dtype=float)
+    assert np.allclose(emitted_values, processed[0].intensity)
+
+
 def test_write_workbook_handles_replicate_channel_arrays(tmp_path):
     wavelengths = np.linspace(220.0, 230.0, 6)
     intensity = np.linspace(0.1, 0.2, wavelengths.size)
