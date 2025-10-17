@@ -144,44 +144,61 @@ def _processed_table_tidy(processed: Sequence[Spectrum]) -> Tuple[List[str], Lis
 
 
 def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], List[List[Any]]]:
-    base_columns = ["spectrum_index", "sample_id", "role", "mode"]
-    dynamic_columns: List[str] = []
-    seen_columns: set[str] = set()
-    rows_dicts: List[Dict[str, Any]] = []
+    if not processed:
+        return ["wavelength"], []
+
+    wavelength_grid: np.ndarray | None = None
+    column_order: List[str] = []
+    column_data: Dict[str, Dict[float, Any]] = {}
 
     for idx, spec in enumerate(processed):
-        wavelengths = np.asarray(spec.wavelength, dtype=float)
+        wavelengths = np.asarray(spec.wavelength, dtype=float).reshape(-1)
+        if wavelength_grid is None:
+            wavelength_grid = wavelengths
+        else:
+            if (
+                wavelengths.shape != wavelength_grid.shape
+                or not np.allclose(wavelengths, wavelength_grid, equal_nan=True)
+            ):
+                combined = np.concatenate((wavelength_grid, wavelengths))
+                unique, indices = np.unique(combined, return_index=True)
+                order = np.argsort(indices)
+                wavelength_grid = unique[order]
+
         meta = spec.meta or {}
-        sample_id = _clean_value(
+        sample_id_value = _clean_value(
             meta.get("sample_id")
             or meta.get("channel")
             or meta.get("blank_id")
             or f"spec_{idx}"
         )
-        role = _clean_value(meta.get("role", "sample"))
-        mode = _clean_value(meta.get("mode"))
-
-        row: Dict[str, Any] = {
-            "spectrum_index": idx,
-            "sample_id": sample_id,
-            "role": role,
-            "mode": mode,
-        }
+        if sample_id_value in (None, ""):
+            sample_id_value = f"spec_{idx}"
+        sample_label = str(sample_id_value)
 
         for channel_label, data in _iter_channels(spec, wavelengths):
-            for wl_val, inten_val in zip(wavelengths, data):
-                column_name = _format_channel_column(channel_label, float(wl_val))
-                if column_name not in seen_columns:
-                    seen_columns.add(column_name)
-                    dynamic_columns.append(column_name)
-                row[column_name] = _clean_value(inten_val)
+            channel_name = channel_label or "processed"
+            column_name = f"{sample_label}:{channel_name}" if channel_name else sample_label
+            if column_name in column_data:
+                raise ValueError(
+                    f"Duplicate column for sample '{sample_label}' and channel '{channel_name}'"
+                )
+            column_order.append(column_name)
+            column_data[column_name] = {
+                float(wl): _clean_value(inten_val)
+                for wl, inten_val in zip(wavelengths, data)
+            }
 
-        rows_dicts.append(row)
-
-    header = base_columns + dynamic_columns
+    assert wavelength_grid is not None  # for mypy
+    header = ["wavelength"] + column_order
     rows: List[List[Any]] = []
-    for row_dict in rows_dicts:
-        rows.append([row_dict.get(column) for column in header])
+    for wl in wavelength_grid:
+        wl_value = float(wl)
+        row = [_clean_value(wl_value)]
+        for column_name in column_order:
+            row.append(column_data[column_name].get(wl_value))
+        rows.append(row)
+
     return header, rows
 
 
