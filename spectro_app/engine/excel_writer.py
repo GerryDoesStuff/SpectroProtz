@@ -416,10 +416,14 @@ def write_single_spectrum_csv(out_path: str | Path, spectrum: Spectrum) -> Path:
     header = ["wavelength"] + [label for label, _ in channels]
 
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        flattened_meta = _flatten_dict(dict(spectrum.meta or {}))
-        for key, value in sorted(flattened_meta.items()):
-            handle.write(f"# {key}: {_clean_value(value)}\n")
         writer = csv.writer(handle)
+
+        flattened_meta = _flatten_dict(dict(spectrum.meta or {}))
+        writer.writerow(["metadata_key", "metadata_value"])
+        for key, value in sorted(flattened_meta.items()):
+            writer.writerow([key, _clean_value(value)])
+
+        writer.writerow([])
         writer.writerow(header)
         for idx, wavelength in enumerate(wavelengths):
             row = [_clean_value(wavelength)]
