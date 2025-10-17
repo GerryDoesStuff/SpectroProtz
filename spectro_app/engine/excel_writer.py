@@ -105,44 +105,6 @@ def _iter_channels(spec: Spectrum, wavelengths: np.ndarray) -> List[Tuple[str, n
     return channels
 
 
-def _processed_table_tidy(processed: Sequence[Spectrum]) -> Tuple[List[str], List[List[Any]]]:
-    header = [
-        "spectrum_index",
-        "sample_id",
-        "role",
-        "mode",
-        "channel",
-        "wavelength",
-        "value",
-    ]
-    rows: List[List[Any]] = []
-    for idx, spec in enumerate(processed):
-        wavelengths = np.asarray(spec.wavelength, dtype=float)
-        meta = spec.meta or {}
-        sample_id = _clean_value(
-            meta.get("sample_id")
-            or meta.get("channel")
-            or meta.get("blank_id")
-            or f"spec_{idx}"
-        )
-        role = _clean_value(meta.get("role", "sample"))
-        mode = _clean_value(meta.get("mode"))
-        for channel_label, data in _iter_channels(spec, wavelengths):
-            for wl_val, inten_val in zip(wavelengths, data):
-                rows.append(
-                    [
-                        idx,
-                        sample_id,
-                        role,
-                        mode,
-                        channel_label,
-                        _clean_value(wl_val),
-                        _clean_value(inten_val),
-                    ]
-                )
-    return header, rows
-
-
 def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], List[List[Any]]]:
     if not processed:
         return ["wavelength"], []
@@ -200,12 +162,6 @@ def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], Lis
         rows.append(row)
 
     return header, rows
-
-
-def _processed_table(processed: Sequence[Spectrum], layout: str) -> Tuple[List[str], List[List[Any]]]:
-    if layout == "wide":
-        return _processed_table_wide(processed)
-    return _processed_table_tidy(processed)
 
 
 def _metadata_rows(processed: Sequence[Spectrum]) -> List[Dict[str, Any]]:
@@ -358,8 +314,6 @@ def write_workbook(
     audit,
     figures,
     calibration=None,
-    *,
-    processed_layout: str = "tidy",
 ):
     workbook_path = Path(out_path)
     _ensure_parent(workbook_path)
@@ -367,7 +321,7 @@ def write_workbook(
     wb = Workbook()
     ws_processed = wb.active
     ws_processed.title = "Processed_Spectra"
-    header, rows = _processed_table(processed, processed_layout)
+    header, rows = _processed_table_wide(processed)
     ws_processed.append(header)
     for row in rows:
         ws_processed.append(row)

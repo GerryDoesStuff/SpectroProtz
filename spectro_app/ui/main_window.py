@@ -36,7 +36,6 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         self,
         parent: Optional[QtWidgets.QWidget],
         *,
-        current_layout: str,
         per_spectrum_enabled: bool,
         per_spectrum_format: str,
     ):
@@ -47,20 +46,10 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         description = QtWidgets.QLabel(
-            "Choose how processed spectra should be written to the workbook."
+            "Processed spectra are exported in a wide, column-based table."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
-
-        self._tidy_radio = QtWidgets.QRadioButton(
-            "Tidy (one row per wavelength/channel)"
-        )
-        self._wide_radio = QtWidgets.QRadioButton(
-            "Wide (one column per wavelength/channel)"
-        )
-
-        layout.addWidget(self._tidy_radio)
-        layout.addWidget(self._wide_radio)
 
         per_spectrum_group = QtWidgets.QGroupBox("Per-spectrum exports", self)
         per_spectrum_layout = QtWidgets.QVBoxLayout(per_spectrum_group)
@@ -101,16 +90,11 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        normalised_layout = (current_layout or "tidy").strip().lower()
-        if normalised_layout == "wide":
-            self._wide_radio.setChecked(True)
-        else:
-            self._tidy_radio.setChecked(True)
-
-    def selected_layout(self) -> str:
-        if self._wide_radio.isChecked():
-            return "wide"
-        return "tidy"
+        info_label = QtWidgets.QLabel(
+            "Use per-spectrum exports when individual files are needed alongside the workbook."
+        )
+        info_label.setWordWrap(True)
+        layout.insertWidget(1, info_label)
 
     def per_spectrum_enabled(self) -> bool:
         return self._per_spectrum_checkbox.isChecked()
@@ -708,9 +692,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         export_config = dict(export_cfg)
+        export_config.pop("processed_layout", None)
         export_config["path"] = target
         options = self._prompt_export_options(
-            processed_layout=export_config.get("processed_layout", "tidy"),
             per_spectrum_enabled=bool(export_config.get("per_spectrum_enabled")),
             per_spectrum_format=export_config.get("per_spectrum_format", "original"),
         )
@@ -742,20 +726,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _prompt_export_options(
         self,
         *,
-        processed_layout: str,
         per_spectrum_enabled: bool,
         per_spectrum_format: str,
     ) -> Optional[Dict[str, object]]:
         dialog = _ExportLayoutDialog(
             self,
-            current_layout=processed_layout,
             per_spectrum_enabled=per_spectrum_enabled,
             per_spectrum_format=per_spectrum_format,
         )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return None
         return {
-            "processed_layout": dialog.selected_layout(),
             "per_spectrum_enabled": dialog.per_spectrum_enabled(),
             "per_spectrum_format": dialog.per_spectrum_format(),
         }
