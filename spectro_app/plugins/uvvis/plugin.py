@@ -1196,6 +1196,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         stored_header = list(first_meta.get("_raw_header_lines") or [])
         source_format = str(first_meta.get("_source_format") or "").lower()
         suffix = source_path.suffix
+        is_visionlite = (
+            suffix.lower() == ".dsp"
+            or str(first_meta.get("source_type")).lower() == "visionlite_dsp"
+        )
+
+        if is_visionlite:
+            clone_suffix = suffix or ".dsp"
+            clone_path = source_path.with_name(f"{source_path.stem}_edited{clone_suffix}")
+            self._write_visionlite_clone(source_path, spectra, stored_header, clone_path)
+            return clone_path
 
         if source_format not in {"excel", "generic_excel"} and suffix.lower() not in {".xls", ".xlsx"}:
             df, detected_header, delimiter, decimal = self._load_text_source_for_clone(source_path, first_meta)
@@ -1300,6 +1310,104 @@ class UvVisPlugin(SpectroscopyPlugin):
             if not header_block.endswith("\n"):
                 header_block += "\n"
         output_path.write_text(header_block + payload, encoding="utf-8")
+
+    def _write_visionlite_clone(
+        self,
+        source_path: Path,
+        spectra: Sequence[Spectrum],
+        stored_header: Sequence[str],
+        output_path: Path,
+    ) -> None:
+        if not spectra:
+            return
+
+        spec = spectra[0]
+        meta = getattr(spec, "meta", {}) or {}
+
+        def _coerce_float(value: object) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                candidate = float(value)
+                return candidate if math.isfinite(candidate) else None
+            try:
+                parsed = float(str(value))
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        def _coerce_int(value: object) -> int | None:
+            as_float = _coerce_float(value)
+            if as_float is None:
+                return None
+            rounded = int(round(as_float))
+            return rounded if rounded >= 0 else None
+
+        intensity = np.asarray(spec.intensity, dtype=float)
+        wavelength = np.asarray(spec.wavelength, dtype=float)
+
+        start_nm = _coerce_float(meta.get("wavelength_start_nm"))
+        step_nm = _coerce_float(meta.get("wavelength_step_nm"))
+        end_nm = _coerce_float(meta.get("wavelength_end_nm"))
+        point_count = _coerce_int(meta.get("points"))
+
+        if start_nm is None and wavelength.size:
+            start_nm = float(wavelength[0])
+        if step_nm is None and wavelength.size > 1:
+            diffs = np.diff(wavelength)
+            finite_diffs = diffs[np.isfinite(diffs)]
+            if finite_diffs.size:
+                step_nm = float(np.nanmedian(finite_diffs))
+        if point_count is None or point_count <= 0:
+            point_count = int(intensity.size)
+
+        if step_nm is None or step_nm == 0:
+            if point_count > 1 and start_nm is not None and end_nm is not None:
+                step_nm = (end_nm - start_nm) / float(point_count - 1)
+            elif wavelength.size > 1:
+                diffs = np.diff(wavelength)
+                finite_diffs = diffs[np.isfinite(diffs)]
+                if finite_diffs.size:
+                    step_nm = float(np.nanmedian(finite_diffs))
+        if step_nm is None or step_nm == 0:
+            step_nm = 1.0
+
+        if start_nm is None:
+            start_nm = 0.0
+
+        if end_nm is None and point_count:
+            end_nm = start_nm + step_nm * float(max(point_count - 1, 0))
+
+        if point_count != intensity.size:
+            point_count = int(intensity.size)
+            end_nm = start_nm + step_nm * float(max(point_count - 1, 0))
+
+        _ = start_nm + np.arange(point_count, dtype=float) * step_nm
+
+        try:
+            original_text = source_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            original_text = ""
+
+        header_block = ""
+        if "#DATA" in original_text:
+            header_block = original_text.split("#DATA", 1)[0]
+        elif stored_header:
+            header_block = "\n".join(str(line) for line in stored_header)
+        if header_block and not header_block.endswith("\n"):
+            header_block += "\n"
+
+        formatted_values: List[str] = []
+        for value in intensity:
+            if math.isfinite(float(value)):
+                formatted_values.append(f"{float(value):.10g}")
+            else:
+                formatted_values.append("nan")
+        data_block = "#DATA\n" + "\n".join(formatted_values)
+        if formatted_values:
+            data_block += "\n"
+
+        output_path.write_text(header_block + data_block, encoding="utf-8")
 
     def _write_excel_clone(
         self,
