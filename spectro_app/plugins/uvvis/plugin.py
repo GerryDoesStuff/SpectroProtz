@@ -1169,7 +1169,11 @@ class UvVisPlugin(SpectroscopyPlugin):
             })
         return records
 
-    def _clone_sources_with_processed_data(self, spectra: Sequence[Spectrum]) -> List[Path]:
+    def _clone_sources_with_processed_data(
+        self,
+        spectra: Sequence[Spectrum],
+        output_dir: Path | None = None,
+    ) -> List[Path]:
         grouped: Dict[Path, List[Spectrum]] = {}
         for spec in spectra:
             meta = getattr(spec, "meta", {}) or {}
@@ -1183,19 +1187,28 @@ class UvVisPlugin(SpectroscopyPlugin):
             grouped.setdefault(source_path, []).append(spec)
 
         emitted: List[Path] = []
+        base_dir = Path(output_dir) if output_dir else None
         for path in sorted(grouped):
-            clone = self._write_edited_source(path, grouped[path])
+            clone = self._write_edited_source(path, grouped[path], output_dir=base_dir)
             if clone is not None:
                 emitted.append(clone)
         return emitted
 
-    def _write_edited_source(self, source_path: Path, spectra: Sequence[Spectrum]) -> Path | None:
+    def _write_edited_source(
+        self,
+        source_path: Path,
+        spectra: Sequence[Spectrum],
+        *,
+        output_dir: Path | None = None,
+    ) -> Path | None:
         if not spectra:
             return None
         first_meta = getattr(spectra[0], "meta", {}) or {}
         stored_header = list(first_meta.get("_raw_header_lines") or [])
         source_format = str(first_meta.get("_source_format") or "").lower()
         suffix = source_path.suffix
+        base_dir = Path(output_dir) if output_dir else source_path.parent
+        base_dir.mkdir(parents=True, exist_ok=True)
         is_visionlite = (
             suffix.lower() == ".dsp"
             or str(first_meta.get("source_type")).lower() == "visionlite_dsp"
@@ -1203,7 +1216,7 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         if is_visionlite:
             clone_suffix = suffix or ".dsp"
-            clone_path = source_path.with_name(f"{source_path.stem}_edited{clone_suffix}")
+            clone_path = base_dir / f"{source_path.stem}_edited{clone_suffix}"
             self._write_visionlite_clone(source_path, spectra, stored_header, clone_path)
             return clone_path
 
@@ -1211,14 +1224,14 @@ class UvVisPlugin(SpectroscopyPlugin):
             df, detected_header, delimiter, decimal = self._load_text_source_for_clone(source_path, first_meta)
             header_lines = stored_header or detected_header
             updated = self._apply_processed_columns_to_frame(df, spectra)
-            clone_path = source_path.with_name(f"{source_path.stem}_edited{suffix}")
+            clone_path = base_dir / f"{source_path.stem}_edited{suffix}"
             self._write_text_clone(updated, header_lines, delimiter, decimal, clone_path)
             return clone_path
 
         df, detected_header = self._load_excel_source_for_clone(source_path, first_meta)
         header_lines = stored_header or detected_header
         updated = self._apply_processed_columns_to_frame(df, spectra)
-        clone_path = source_path.with_name(f"{source_path.stem}_edited{suffix}")
+        clone_path = base_dir / f"{source_path.stem}_edited{suffix}"
         self._write_excel_clone(updated, header_lines, clone_path)
         return clone_path
 
@@ -1309,6 +1322,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             header_block = "\n".join(header_lines)
             if not header_block.endswith("\n"):
                 header_block += "\n"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(header_block + payload, encoding="utf-8")
 
     def _write_visionlite_clone(
@@ -1407,6 +1421,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         if formatted_values:
             data_block += "\n"
 
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(header_block + data_block, encoding="utf-8")
 
     def _write_excel_clone(
@@ -1427,6 +1442,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             ws.append([str(line)])
         for row in dataframe_to_rows(df, index=False, header=True):
             ws.append(list(row))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(output_path)
 
     def _locate_table(self, lines: Iterable[str], delimiter: str | None, decimal: str):
@@ -4711,7 +4727,16 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not preview_disabled and per_spectrum_requested and specs:
             try:
                 if per_spectrum_format == "original":
-                    per_spectrum_paths = self._clone_sources_with_processed_data(specs)
+                    per_spectrum_dir: Path | None = None
+                    if export_cfg.get("per_spectrum_directory") or export_cfg.get(
+                        "per_spectrum_dir"
+                    ):
+                        per_spectrum_dir = self._resolve_per_spectrum_directory(
+                            export_cfg, workbook_target
+                        )
+                    per_spectrum_paths = self._clone_sources_with_processed_data(
+                        specs, output_dir=per_spectrum_dir
+                    )
                 elif per_spectrum_format == "xlsx":
                     target_dir = self._resolve_per_spectrum_directory(
                         export_cfg, workbook_target

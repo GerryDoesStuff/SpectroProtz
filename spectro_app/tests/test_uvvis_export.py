@@ -327,18 +327,25 @@ VISIONlite Scan Version 2.1
     assert processed, "Processed spectra should not be empty"
     processed[0].intensity = processed[0].intensity + 0.05
 
+    per_spec_dir = tmp_path / "per_spectrum"
     export_recipe = {
         "export": {
             "path": str(tmp_path / "visionlite.xlsx"),
             "per_spectrum_enabled": True,
             "per_spectrum_format": "original",
+            "per_spectrum_directory": str(per_spec_dir),
         }
     }
 
     plugin.export(processed, qc_rows, export_recipe)
 
-    clone_path = source_path.with_name(f"{source_path.stem}_edited{source_path.suffix}")
+    clone_path = per_spec_dir / f"{source_path.stem}_edited{source_path.suffix}"
     assert clone_path.exists(), "Edited Visionlite clone should be written"
+
+    original_location = source_path.with_name(
+        f"{source_path.stem}_edited{source_path.suffix}"
+    )
+    assert not original_location.exists(), "Clone should be emitted into the override directory"
 
     clone_text = clone_path.read_text(encoding="utf-8")
     clone_header, clone_data = clone_text.split("#DATA", 1)
