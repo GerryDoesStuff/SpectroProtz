@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import io
 import json
@@ -1324,6 +1325,26 @@ def test_uvvis_export_per_spectrum_csv(tmp_path):
 
     emitted_path = tmp_path / "Sample-1_1.csv"
     assert emitted_path.exists()
+
+    with emitted_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+
+    flattened_meta = excel_writer._flatten_dict(dict(processed[0].meta or {}))
+    meta_items = sorted(flattened_meta.items())
+
+    assert rows[0] == ["metadata_key", "metadata_value"]
+    blank_row_index = rows.index([], 1)
+    metadata_rows = rows[1:blank_row_index]
+    metadata_map = {key: value for key, value in metadata_rows}
+    expected_map = {
+        key: "" if cleaned is None else str(cleaned)
+        for key, cleaned in (
+            (key, excel_writer._clean_value(value)) for key, value in meta_items
+        )
+    }
+    assert metadata_map == expected_map
+    assert rows[blank_row_index + 1][0] == "wavelength"
+
     report_results = plugin._report_context.get("results", {})
     per_spec_paths = report_results.get("per_spectrum_exports") or []
     assert str(emitted_path) in per_spec_paths
