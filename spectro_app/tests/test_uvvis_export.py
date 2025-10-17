@@ -158,11 +158,24 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
 
     ws_processed = wb["Processed_Spectra"]
     header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
-    assert "channel" in header
-    channel_idx = header.index("channel")
-    channels = {row[channel_idx] for row in ws_processed.iter_rows(min_row=2, values_only=True)}
-    assert "first_derivative" in channels
-    assert "second_derivative" in channels
+    expected_header, expected_rows = excel_writer._processed_table_wide(processed)
+
+    assert header == expected_header
+    assert header[0] == "wavelength"
+    columns = header[1:]
+    assert any(str(name).endswith(":processed") for name in columns)
+    assert any(str(name).endswith(":first_derivative") for name in columns)
+    assert any(str(name).endswith(":second_derivative") for name in columns)
+
+    data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
+    assert len(data_rows) == len(expected_rows)
+    for got, expected in zip(data_rows, expected_rows):
+        assert len(got) == len(expected)
+        for idx, value in enumerate(expected):
+            if value is None:
+                assert got[idx] is None
+            else:
+                assert got[idx] == pytest.approx(value)
 
     ws_metadata = wb["Metadata"]
     metadata_header = [cell.value for cell in next(ws_metadata.iter_rows(min_row=1, max_row=1))]
@@ -527,9 +540,7 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
                 assert got[idx] == pytest.approx(value)
 
 
-def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
-    tmp_path, qt_app, monkeypatch
-):
+def test_uvvis_export_ui_writes_requested_format(tmp_path, qt_app, monkeypatch):
     if QtWidgets is None or MainWindow is None:
         pytest.skip("PyQt6 not available")
     ctx = AppContext()
@@ -565,7 +576,6 @@ def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
             window,
             "_prompt_export_options",
             lambda **kwargs: {
-                "processed_layout": "wide",
                 "per_spectrum_enabled": False,
                 "per_spectrum_format": "original",
             },
@@ -574,7 +584,7 @@ def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
         window.on_export()
 
         export_cfg = window._recipe_data.get("export", {})
-        assert export_cfg.get("processed_layout") == "wide"
+        assert "processed_layout" not in export_cfg
         assert not export_cfg.get("per_spectrum_enabled")
 
         assert export_target.exists(), "Workbook should be written via UI export"
@@ -583,23 +593,11 @@ def test_uvvis_export_ui_sets_processed_layout_and_writes_requested_format(
         ws_processed = wb["Processed_Spectra"]
 
         header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
-        base_columns = ["spectrum_index", "sample_id", "role", "mode"]
-        assert header[: len(base_columns)] == base_columns
+        expected_header, expected_rows = excel_writer._processed_table_wide(processed)
+        assert header == expected_header
 
-        data_rows = list(ws_processed.iter_rows(min_row=2, values_only=True))
-        assert len(data_rows) == len(processed)
-
-        header_dynamic = set(header[len(base_columns) :])
-        expected_columns = set()
-        for spec in processed:
-            wavelengths = np.asarray(spec.wavelength, dtype=float)
-            for channel_label, _ in excel_writer._iter_channels(spec, wavelengths):
-                for wl_val in wavelengths:
-                    expected_columns.add(
-                        excel_writer._format_channel_column(channel_label, float(wl_val))
-                    )
-
-        assert expected_columns == header_dynamic
+        data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
+        assert data_rows == expected_rows
     finally:
         window.close()
 
@@ -645,14 +643,26 @@ def test_uvvis_export_includes_pipeline_stage_channels(tmp_path):
     wb = load_workbook(workbook_path)
     ws_processed = wb["Processed_Spectra"]
     header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
-    channel_idx = header.index("channel")
-    channels = {
-        row[channel_idx]
-        for row in ws_processed.iter_rows(min_row=2, values_only=True)
-        if row and row[1] == "StageSample"
-    }
-    expected = {"raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"}
-    assert expected.issubset(channels)
+    expected_header, expected_rows = excel_writer._processed_table_wide(processed)
+    assert header == expected_header
+
+    data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
+    assert len(data_rows) == len(expected_rows)
+    for got, expected in zip(data_rows, expected_rows):
+        assert len(got) == len(expected)
+        for idx, value in enumerate(expected):
+            if value is None:
+                assert got[idx] is None
+            else:
+                assert got[idx] == pytest.approx(value)
+
+    column_labels = header[1:]
+    assert any(str(name).endswith(":raw") for name in column_labels)
+    assert any(str(name).endswith(":blanked") for name in column_labels)
+    assert any(str(name).endswith(":baseline_corrected") for name in column_labels)
+    assert any(str(name).endswith(":joined") for name in column_labels)
+    assert any(str(name).endswith(":despiked") for name in column_labels)
+    assert any(str(name).endswith(":smoothed") for name in column_labels)
     assert any(name.endswith("join_1.png") for name in result.figures)
     ws_qc = wb["QC_Flags"]
     qc_header = [cell.value for cell in next(ws_qc.iter_rows(min_row=1, max_row=1))]
@@ -1254,11 +1264,19 @@ def test_clean_value_sanitises_formula_strings(tmp_path):
     wb = load_workbook(recipe["export"]["path"])
     ws_processed = wb["Processed_Spectra"]
     header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
-    sample_idx = header.index("sample_id") + 1
-    sample_cell = ws_processed.cell(row=2, column=sample_idx)
-    assert sample_cell.value.startswith("'")
-    assert sample_cell.value[1:] == "=2+2"
-    assert sample_cell.data_type == "s"  # Written as literal string rather than formula
+    expected_header, expected_rows = excel_writer._processed_table_wide(processed)
+    assert header == expected_header
+    assert any(str(name).startswith("'=2+2:") for name in header[1:])
+
+    data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
+    assert len(data_rows) == len(expected_rows)
+    for got, expected in zip(data_rows, expected_rows):
+        assert len(got) == len(expected)
+        for idx, value in enumerate(expected):
+            if value is None:
+                assert got[idx] is None
+            else:
+                assert got[idx] == pytest.approx(value)
 
 
 def test_uvvis_export_per_spectrum_original_header(tmp_path):

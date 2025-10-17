@@ -4636,16 +4636,22 @@ class UvVisPlugin(SpectroscopyPlugin):
             workbook_target = self._coerce_export_path(
                 export_cfg.get("path") or export_cfg.get("workbook")
             )
-        processed_layout = export_cfg.get("processed_layout", "tidy")
-        if isinstance(processed_layout, str):
-            processed_layout = processed_layout.lower()
+        layout_request = export_cfg.pop("processed_layout", None)
+        layout_request_normalised: Optional[str]
+        if isinstance(layout_request, str):
+            layout_request_normalised = layout_request.strip().lower() or None
         else:
-            processed_layout = "tidy"
-        if processed_layout not in {"tidy", "wide"}:
-            processed_layout = "tidy"
+            layout_request_normalised = None
+        layout_warning: Optional[str] = None
+        if layout_request_normalised and layout_request_normalised != "wide":
+            layout_warning = (
+                "Processed layout option no longer configurable; wrote columnar export."
+            )
         figures, figure_objs = self._generate_figures(specs, qc, formats=export_cfg.get("formats"))
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
+        if layout_warning:
+            workbook_audit.append(layout_warning)
         calibration_results = getattr(self, "_last_calibration_results", None)
         workbook_default = workbook_target if workbook_target else None
         recipe_target: Optional[Path] = None
@@ -4696,7 +4702,6 @@ class UvVisPlugin(SpectroscopyPlugin):
                     workbook_audit,
                     figures,
                     calibration_results,
-                    processed_layout=processed_layout,
                 )
             else:
                 workbook_audit.append("No workbook path provided; workbook not written.")

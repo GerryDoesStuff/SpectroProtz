@@ -129,7 +129,7 @@ Export & provenance
 
 Single workbook per batch (Excel):
 
-Processed_Spectra (wide or tidy; common grid + per-step channels).
+Processed_Spectra (wide column layout; common grid + per-step channels).
 
 Metadata (typed fields per spectrum).
 
