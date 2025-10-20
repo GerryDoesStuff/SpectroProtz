@@ -222,6 +222,32 @@ def test_queue_remove_multiple_entries(qapp, tmp_path):
         window.deleteLater()
 
 
+def test_queue_normalises_forward_slash_paths(qapp, tmp_path):
+    settings = _make_settings(tmp_path)
+    ctx = DummyAppContext(settings)
+    window = MainWindow(ctx)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    file_path = data_dir / "nested" / "sample.spc"
+    file_path.parent.mkdir()
+    file_path.write_text("content")
+
+    try:
+        raw_value = file_path.as_posix()
+        expected = str(Path(raw_value))
+
+        window._set_queue([raw_value])
+
+        assert window._queued_paths == [expected]
+
+        window._on_queue_remove_requested([expected])
+
+        assert window._queued_paths == []
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_main_window_json_sanitise_handles_numpy():
     payload = {
         "array": np.array([np.array([1, 2]), np.array([3, 4])], dtype=object),

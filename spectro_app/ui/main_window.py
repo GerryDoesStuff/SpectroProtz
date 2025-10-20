@@ -1267,9 +1267,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if not raw:
                 continue
             try:
-                normalized = str(raw)
+                candidate = Path(str(raw))
             except Exception:
                 continue
+            normalized = str(candidate)
             if skip_duplicates:
                 if normalized in seen:
                     continue
