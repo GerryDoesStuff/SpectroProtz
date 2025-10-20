@@ -369,6 +369,108 @@ VISIONlite Scan Version 2.1
     assert np.allclose(emitted_values, processed[0].intensity)
 
 
+def test_uvvis_visionlite_clone_preserves_header_grid_after_cropping(tmp_path):
+    dsp_text = """sinacsa
+Scan
+1
+Sample02.dsp
+nm
+400
+408
+2
+5
+A
+-0.1
+0.5
+0
+Operator Name
+
+2024.05.01. 10:00:00
+2024.05.01. 10:05:00
+2024.05.01. 09:55:00
+0
+version 1, 2024.05.01. 10:05:00, Operator Name: |Created; Method: ||
+
+1
+0
+0
+sec
+0
+0
+
+GAMMA
+v7.03 v4.80
+143309
+2
+0
+0
+0
+0
+0
+0
+
+7
+0
+0
+VISIONlite Scan Version 2.1
+
+#SPECIFIC1
+0
+0
+0.01
+
+#SPECIFIC2
+
+#SPECIFIC3
+
+#DATA
+0.1
+0.2
+0.3
+0.4
+0.5
+"""
+
+    source_path = tmp_path / "sample02.dsp"
+    source_path.write_text(dsp_text, encoding="utf-8")
+    original_header = dsp_text.split("#DATA", 1)[0]
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(source_path)])
+    recipe = {"domain": {"min": 402.0, "max": 406.0}}
+    processed, qc_rows = plugin.analyze(spectra, recipe)
+
+    assert processed, "Processed spectra should not be empty"
+    processed_spec = processed[0]
+    processed_spec.wavelength = np.array([402.0, 404.0, 406.0], dtype=float)
+    processed_spec.intensity = np.array([0.7, 0.8, 0.9], dtype=float)
+
+    per_spec_dir = tmp_path / "per_spectrum"
+    export_recipe = {
+        "export": {
+            "path": str(tmp_path / "visionlite_cropped.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "original",
+            "per_spectrum_directory": str(per_spec_dir),
+        }
+    }
+
+    plugin.export(processed, qc_rows, export_recipe)
+
+    clone_path = per_spec_dir / f"{source_path.stem}_edited{source_path.suffix}"
+    assert clone_path.exists(), "Edited Visionlite clone should be written"
+
+    clone_text = clone_path.read_text(encoding="utf-8")
+    clone_header, clone_data = clone_text.split("#DATA", 1)
+    assert clone_header == original_header
+
+    data_lines = [line.strip() for line in clone_data.splitlines() if line.strip() and not line.startswith("#")]
+    assert len(data_lines) == 5, "Clone should retain header-defined row count"
+    emitted_values = np.array([float(value) for value in data_lines], dtype=float)
+    expected = np.array([0.1, 0.7, 0.8, 0.9, 0.5], dtype=float)
+    assert np.allclose(emitted_values, expected)
+
+
 def test_write_workbook_handles_replicate_channel_arrays(tmp_path):
     wavelengths = np.linspace(220.0, 230.0, 6)
     intensity = np.linspace(0.1, 0.2, wavelengths.size)
