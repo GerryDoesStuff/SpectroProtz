@@ -362,7 +362,13 @@ VISIONlite Scan Version 2.1
 
     clone_text = clone_path.read_text(encoding="utf-8")
     clone_header, clone_data = clone_text.split("#DATA", 1)
-    assert clone_header == original_header
+    original_lines = original_header.splitlines()
+    clone_lines = clone_header.splitlines()
+    assert len(clone_lines) == len(original_lines)
+    assert len(clone_lines) > 3
+    assert clone_lines[3] == clone_path.name
+    assert clone_lines[:3] == original_lines[:3]
+    assert clone_lines[4:] == original_lines[4:]
 
     data_lines = [line.strip() for line in clone_data.splitlines() if line.strip() and not line.startswith("#")]
     emitted_values = np.array([float(value) for value in data_lines], dtype=float)
@@ -462,13 +468,115 @@ VISIONlite Scan Version 2.1
 
     clone_text = clone_path.read_text(encoding="utf-8")
     clone_header, clone_data = clone_text.split("#DATA", 1)
-    assert clone_header == original_header
+    original_lines = original_header.splitlines()
+    clone_lines = clone_header.splitlines()
+    assert len(clone_lines) == len(original_lines)
+    assert len(clone_lines) > 3
+    assert clone_lines[3] == clone_path.name
+    assert clone_lines[:3] == original_lines[:3]
+    assert clone_lines[4:] == original_lines[4:]
 
     data_lines = [line.strip() for line in clone_data.splitlines() if line.strip() and not line.startswith("#")]
     assert len(data_lines) == 5, "Clone should retain header-defined row count"
     emitted_values = np.array([float(value) for value in data_lines], dtype=float)
     expected = np.array([0.1, 0.7, 0.8, 0.9, 0.5], dtype=float)
     assert np.allclose(emitted_values, expected)
+
+
+def test_uvvis_visionlite_clone_uses_unique_replicate_keys(tmp_path):
+    dsp_text = """sinacsa
+Scan
+1
+Sample03.dsp
+nm
+400
+402
+1
+3
+A
+-0.1
+0.5
+0
+Operator Name
+
+2024.05.01. 10:00:00
+2024.05.01. 10:05:00
+2024.05.01. 09:55:00
+0
+version 1, 2024.05.01. 10:05:00, Operator Name: |Created; Method: ||
+
+1
+0
+0
+sec
+0
+0
+
+GAMMA
+v7.03 v4.80
+143309
+2
+0
+0
+0
+0
+0
+0
+
+7
+0
+0
+VISIONlite Scan Version 2.1
+
+#SPECIFIC1
+0
+0
+0.01
+
+#SPECIFIC2
+
+#SPECIFIC3
+
+#DATA
+0.1
+0.2
+0.3
+"""
+
+    source_path = tmp_path / "sample03.dsp"
+    source_path.write_text(dsp_text, encoding="utf-8")
+
+    plugin = UvVisPlugin()
+    spectra = plugin.load([str(source_path)])
+    processed, qc_rows = plugin.analyze(spectra, {})
+
+    assert processed, "Processed spectra should not be empty"
+    processed[0].intensity = processed[0].intensity + 0.02
+
+    export_recipe = {
+        "export": {
+            "path": str(tmp_path / "visionlite_unique.xlsx"),
+            "per_spectrum_enabled": True,
+            "per_spectrum_format": "original",
+            "per_spectrum_directory": str(tmp_path),
+        }
+    }
+
+    plugin.export(processed, qc_rows, export_recipe)
+
+    clone_path = tmp_path / f"{source_path.stem}_edited{source_path.suffix}"
+    assert clone_path.exists(), "Edited Visionlite clone should be written beside the source"
+
+    reload_plugin = UvVisPlugin()
+    reloaded = reload_plugin.load([str(source_path), str(clone_path)])
+    assert len(reloaded) == 2, "Both original and clone should reload"
+
+    recipe = {"blank": {"subtract": False, "require": False}}
+    preprocessed = reload_plugin.preprocess(reloaded, recipe)
+    assert len(preprocessed) == 2
+
+    replicate_keys = {pipeline.replicate_key(spec) for spec in preprocessed}
+    assert len(replicate_keys) == 2, "Clone should receive a distinct replicate key"
 
 
 def test_write_workbook_handles_replicate_channel_arrays(tmp_path):

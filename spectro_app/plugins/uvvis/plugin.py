@@ -1343,6 +1343,45 @@ class UvVisPlugin(SpectroscopyPlugin):
         spec = spectra[0]
         meta = getattr(spec, "meta", {}) or {}
 
+        clone_label_token = output_path.name
+
+        def _split_line_ending(value: str) -> tuple[str, str]:
+            idx = len(value)
+            while idx > 0 and value[idx - 1] in ("\n", "\r"):
+                idx -= 1
+            return value[:idx], value[idx:]
+
+        def _rewrite_primary_sample_line(lines: Sequence[str]) -> list[str]:
+            updated = ["" if line is None else str(line) for line in lines]
+            primary_indices: list[int] = []
+            for idx, raw_line in enumerate(updated):
+                stripped = raw_line.strip()
+                if stripped.startswith("#SPECIFIC"):
+                    break
+                if not stripped:
+                    if primary_indices:
+                        break
+                    continue
+                primary_indices.append(idx)
+            if not primary_indices:
+                return updated
+            target_idx = primary_indices[3] if len(primary_indices) > 3 else primary_indices[-1]
+            raw_line = updated[target_idx]
+            base, line_ending = _split_line_ending(raw_line)
+            leading = base[: len(base) - len(base.lstrip())]
+            trailing = base[len(base.rstrip()):]
+            updated[target_idx] = f"{leading}{clone_label_token}{trailing}{line_ending}"
+            return updated
+
+        def _rewrite_header_block(block: str) -> str:
+            if not block:
+                return block
+            lines = block.splitlines(True)
+            updated_lines = _rewrite_primary_sample_line(lines)
+            return "".join(updated_lines)
+
+        stored_header_lines = _rewrite_primary_sample_line(list(stored_header) if stored_header else [])
+
         def _coerce_float(value: object) -> float | None:
             if value is None:
                 return None
@@ -1421,8 +1460,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                 except ValueError:
                     continue
                 original_values.append(parsed_value)
-        elif stored_header:
-            header_block = "\n".join(str(line) for line in stored_header)
+        elif stored_header_lines:
+            header_block = "\n".join(stored_header_lines)
 
         if original_text:
             try:
@@ -1448,6 +1487,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                                 header_step_nm = float(np.nanmedian(finite_diffs))
                         header_end_nm = float(parsed_wavelengths[-1])
 
+        header_block = _rewrite_header_block(header_block)
         if header_block and not header_block.endswith("\n"):
             header_block += "\n"
 
