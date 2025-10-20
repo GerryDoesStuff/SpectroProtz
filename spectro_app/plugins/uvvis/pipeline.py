@@ -131,7 +131,8 @@ def _average_replicate_channels(
                 except AttributeError:
                     averaged_channels[name] = fallback_value
 
-    averaged_channels["raw"] = np.asarray(averaged_intensity, dtype=float).copy()
+    if "raw" not in averaged_channels:
+        averaged_channels["raw"] = np.asarray(averaged_intensity, dtype=float).copy()
     return averaged_channels
 
 
