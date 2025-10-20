@@ -1269,6 +1269,38 @@ def test_average_replicates():
     assert all(entry.get("leverage") is None for entry in stored)
 
 
+def test_average_replicates_channel_metadata_is_averaged():
+    wl = np.linspace(450.0, 455.0, 6)
+    intensity_a = np.linspace(0.0, 1.0, wl.size)
+    intensity_b = np.linspace(0.5, 1.5, wl.size)
+    channels_a = {
+        "raw": intensity_a.copy(),
+        "smoothed": intensity_a + 0.2,
+        "reference_labels": ["a", "b", "c", "d", "e", "f"],
+    }
+    channels_b = {
+        "raw": intensity_b.copy(),
+        "smoothed": intensity_b + 0.4,
+        "reference_labels": ["x", "y", "z", "u", "v", "w"],
+    }
+    spec_a1 = Spectrum(wavelength=wl, intensity=intensity_a, meta={"sample_id": "A", "channels": channels_a})
+    spec_a2 = Spectrum(wavelength=wl, intensity=intensity_b, meta={"sample_id": "A", "channels": channels_b})
+
+    averaged, mapping = pipeline.average_replicates([spec_a1, spec_a2], return_mapping=True)
+
+    assert len(averaged) == 1
+    averaged_spec = mapping[pipeline.replicate_key(spec_a1)]
+    channels = averaged_spec.meta.get("channels") or {}
+
+    expected_intensity = np.mean([intensity_a, intensity_b], axis=0)
+    expected_smoothed = np.mean([channels_a["smoothed"], channels_b["smoothed"]], axis=0)
+
+    assert np.allclose(averaged_spec.intensity, expected_intensity)
+    assert np.allclose(channels.get("raw"), averaged_spec.intensity)
+    assert np.allclose(channels.get("smoothed"), expected_smoothed)
+    assert channels.get("reference_labels") == channels_a["reference_labels"]
+
+
 def test_average_replicates_outlier_rejection():
     wl = np.linspace(400, 500, 11)
     baseline = np.sin(wl / 60.0)
