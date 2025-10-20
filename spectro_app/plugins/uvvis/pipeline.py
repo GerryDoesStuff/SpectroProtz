@@ -59,6 +59,82 @@ def _update_channel(meta: Dict[str, object], name: str, values: np.ndarray, *, o
     meta["channels"] = channels
 
 
+def _average_replicate_channels(
+    included_members: Sequence[Spectrum], averaged_intensity: np.ndarray
+) -> Dict[str, Any]:
+    """Combine per-stage channels for averaged replicates.
+
+    Parameters
+    ----------
+    included_members:
+        Replicate spectra that contributed to the averaged result.
+    averaged_intensity:
+        Intensity trace representing the averaged spectrum.
+    """
+
+    averaged_channels: Dict[str, Any] = {}
+
+    # Gather all channel names present on the contributing replicates.
+    channel_names = set()
+    for member in included_members:
+        meta = member.meta if isinstance(member.meta, Mapping) else {}
+        channels = meta.get("channels") if isinstance(meta, Mapping) else None
+        if isinstance(channels, Mapping):
+            channel_names.update(channels.keys())
+
+    for name in sorted(channel_names):
+        collected: List[np.ndarray] = []
+        convertible = True
+        shape = None
+
+        for member in included_members:
+            meta = member.meta if isinstance(member.meta, Mapping) else {}
+            channels = meta.get("channels") if isinstance(meta, Mapping) else None
+            if not isinstance(channels, Mapping) or name not in channels:
+                continue
+
+            value = channels[name]
+            try:
+                arr = np.asarray(value, dtype=float)
+            except (TypeError, ValueError):
+                convertible = False
+                break
+
+            if shape is None:
+                shape = arr.shape
+            elif arr.shape != shape:
+                convertible = False
+                break
+
+            collected.append(arr)
+
+        if convertible and collected:
+            stacked = np.stack(collected, axis=0)
+            averaged = np.nanmean(stacked, axis=0)
+            averaged_channels[name] = np.asarray(averaged, dtype=float).copy()
+            continue
+
+        fallback_value = None
+        for member in included_members:
+            meta = member.meta if isinstance(member.meta, Mapping) else {}
+            channels = meta.get("channels") if isinstance(meta, Mapping) else None
+            if isinstance(channels, Mapping) and name in channels:
+                fallback_value = channels[name]
+                break
+
+        if fallback_value is not None:
+            if isinstance(fallback_value, np.ndarray):
+                averaged_channels[name] = fallback_value.copy()
+            else:
+                try:
+                    averaged_channels[name] = fallback_value.copy()  # type: ignore[attr-defined]
+                except AttributeError:
+                    averaged_channels[name] = fallback_value
+
+    averaged_channels["raw"] = np.asarray(averaged_intensity, dtype=float).copy()
+    return averaged_channels
+
+
 def coerce_domain(spec: Spectrum, domain: Dict[str, float] | None) -> Spectrum:
     """Ensure wavelength axis is sorted, clipped, and optionally interpolated."""
 
@@ -2188,9 +2264,11 @@ def average_replicates(
                     "score": None,
                 }
             ]
+            intensity = np.asarray(member.intensity, dtype=float).copy()
+            meta["channels"] = _average_replicate_channels([member], intensity)
             averaged = Spectrum(
                 wavelength=np.asarray(member.wavelength, dtype=float).copy(),
-                intensity=np.asarray(member.intensity, dtype=float).copy(),
+                intensity=intensity,
                 meta=meta,
             )
         else:
@@ -2267,6 +2345,8 @@ def average_replicates(
                 }
                 for idx, member in enumerate(members)
             ]
+            included_members = [member for flag, member in zip(included_mask, members) if flag]
+            meta["channels"] = _average_replicate_channels(included_members, averaged_intensity)
             averaged = Spectrum(wavelength=ref_wl.copy(), intensity=averaged_intensity, meta=meta)
 
         mapping[key] = averaged
