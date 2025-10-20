@@ -1383,7 +1383,9 @@ def test_clean_value_sanitises_formula_strings(tmp_path):
 
 def test_uvvis_export_per_spectrum_original_header(tmp_path):
     plugin = UvVisPlugin()
-    source_path = tmp_path / "input.csv"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_path = source_dir / "input.csv"
     source_path.write_text("# header\nwavelength,SampleA\n200,0.1\n201,0.2\n")
     spectrum = Spectrum(
         wavelength=np.array([200.0, 201.0], dtype=float),
@@ -1410,8 +1412,10 @@ def test_uvvis_export_per_spectrum_original_header(tmp_path):
     processed, qc_rows = plugin.analyze([spectrum], recipe)
     result = plugin.export(processed, qc_rows, recipe)
 
-    clone_path = source_path.with_name("input_edited.csv")
+    workbook_dir = Path(recipe["export"]["path"]).parent
+    clone_path = workbook_dir / "input_edited.csv"
     assert clone_path.exists()
+    assert not (source_dir / "input_edited.csv").exists()
     report_results = plugin._report_context.get("results", {})
     per_spec_paths = report_results.get("per_spectrum_exports") or []
     assert str(clone_path) in per_spec_paths

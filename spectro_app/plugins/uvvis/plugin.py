@@ -4843,13 +4843,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         if not preview_disabled and per_spectrum_requested and specs:
             try:
                 if per_spectrum_format == "original":
-                    per_spectrum_dir: Path | None = None
-                    if export_cfg.get("per_spectrum_directory") or export_cfg.get(
-                        "per_spectrum_dir"
-                    ):
-                        per_spectrum_dir = self._resolve_per_spectrum_directory(
-                            export_cfg, workbook_target
-                        )
+                    per_spectrum_dir = self._resolve_per_spectrum_directory(
+                        export_cfg, workbook_target
+                    )
                     per_spectrum_paths = self._clone_sources_with_processed_data(
                         specs, output_dir=per_spectrum_dir
                     )
