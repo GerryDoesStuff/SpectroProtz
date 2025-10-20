@@ -43,7 +43,12 @@ from spectro_app.engine.excel_writer import (
     write_workbook,
 )
 from .conversions import convert_intensity_to_absorbance, normalise_mode
-from .io_helios import is_helios_file, parse_metadata_lines, read_helios
+from .io_helios import (
+    is_helios_file,
+    parse_metadata_lines,
+    read_helios,
+    _parse_visionlite_dsp,
+)
 from . import pipeline
 
 
@@ -1360,43 +1365,37 @@ class UvVisPlugin(SpectroscopyPlugin):
         intensity = np.asarray(spec.intensity, dtype=float)
         wavelength = np.asarray(spec.wavelength, dtype=float)
 
-        start_nm = _coerce_float(meta.get("wavelength_start_nm"))
-        step_nm = _coerce_float(meta.get("wavelength_step_nm"))
-        end_nm = _coerce_float(meta.get("wavelength_end_nm"))
-        point_count = _coerce_int(meta.get("points"))
+        meta_start_nm = _coerce_float(meta.get("wavelength_start_nm"))
+        meta_step_nm = _coerce_float(meta.get("wavelength_step_nm"))
+        meta_end_nm = _coerce_float(meta.get("wavelength_end_nm"))
+        meta_point_count = _coerce_int(meta.get("points"))
 
-        if start_nm is None and wavelength.size:
-            start_nm = float(wavelength[0])
-        if step_nm is None and wavelength.size > 1:
+        if meta_start_nm is None and wavelength.size:
+            meta_start_nm = float(wavelength[0])
+        if meta_step_nm is None and wavelength.size > 1:
             diffs = np.diff(wavelength)
             finite_diffs = diffs[np.isfinite(diffs)]
             if finite_diffs.size:
-                step_nm = float(np.nanmedian(finite_diffs))
-        if point_count is None or point_count <= 0:
-            point_count = int(intensity.size)
+                meta_step_nm = float(np.nanmedian(finite_diffs))
+        if meta_point_count is None or meta_point_count <= 0:
+            meta_point_count = int(intensity.size)
 
-        if step_nm is None or step_nm == 0:
-            if point_count > 1 and start_nm is not None and end_nm is not None:
-                step_nm = (end_nm - start_nm) / float(point_count - 1)
+        if meta_step_nm is None or meta_step_nm == 0:
+            if meta_point_count > 1 and meta_start_nm is not None and meta_end_nm is not None:
+                meta_step_nm = (meta_end_nm - meta_start_nm) / float(meta_point_count - 1)
             elif wavelength.size > 1:
                 diffs = np.diff(wavelength)
                 finite_diffs = diffs[np.isfinite(diffs)]
                 if finite_diffs.size:
-                    step_nm = float(np.nanmedian(finite_diffs))
-        if step_nm is None or step_nm == 0:
-            step_nm = 1.0
+                    meta_step_nm = float(np.nanmedian(finite_diffs))
+        if meta_step_nm is None or meta_step_nm == 0:
+            meta_step_nm = 1.0
 
-        if start_nm is None:
-            start_nm = 0.0
+        if meta_start_nm is None:
+            meta_start_nm = 0.0
 
-        if end_nm is None and point_count:
-            end_nm = start_nm + step_nm * float(max(point_count - 1, 0))
-
-        if point_count != intensity.size:
-            point_count = int(intensity.size)
-            end_nm = start_nm + step_nm * float(max(point_count - 1, 0))
-
-        _ = start_nm + np.arange(point_count, dtype=float) * step_nm
+        if meta_end_nm is None and meta_point_count:
+            meta_end_nm = meta_start_nm + meta_step_nm * float(max(meta_point_count - 1, 0))
 
         try:
             original_text = source_path.read_text(encoding="utf-8", errors="ignore")
@@ -1404,15 +1403,127 @@ class UvVisPlugin(SpectroscopyPlugin):
             original_text = ""
 
         header_block = ""
+        original_values: list[float] = []
+        header_start_nm = meta_start_nm
+        header_step_nm = meta_step_nm
+        header_end_nm = meta_end_nm
+        header_point_count = meta_point_count
+        header_wavelengths: np.ndarray | None = None
+
         if "#DATA" in original_text:
-            header_block = original_text.split("#DATA", 1)[0]
+            header_block, data_section = original_text.split("#DATA", 1)
+            for raw_line in data_section.splitlines():
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                try:
+                    parsed_value = float(stripped)
+                except ValueError:
+                    continue
+                original_values.append(parsed_value)
         elif stored_header:
             header_block = "\n".join(str(line) for line in stored_header)
+
+        if original_text:
+            try:
+                parsed_records = _parse_visionlite_dsp(source_path, original_text)
+            except Exception:
+                parsed_records = None
+            else:
+                if parsed_records:
+                    first_record = parsed_records[0]
+                    header_meta = dict(first_record.get("meta") or {})
+                    header_point_count = _coerce_int(header_meta.get("points")) or header_point_count
+                    header_start_nm = _coerce_float(header_meta.get("wavelength_start_nm")) or header_start_nm
+                    header_end_nm = _coerce_float(header_meta.get("wavelength_end_nm")) or header_end_nm
+                    header_step_nm = _coerce_float(header_meta.get("wavelength_step_nm")) or header_step_nm
+                    parsed_wavelengths = np.asarray(first_record.get("wavelength"), dtype=float)
+                    if parsed_wavelengths.size:
+                        header_wavelengths = parsed_wavelengths
+                        header_start_nm = float(parsed_wavelengths[0])
+                        if parsed_wavelengths.size > 1:
+                            diffs = np.diff(parsed_wavelengths)
+                            finite_diffs = diffs[np.isfinite(diffs)]
+                            if finite_diffs.size:
+                                header_step_nm = float(np.nanmedian(finite_diffs))
+                        header_end_nm = float(parsed_wavelengths[-1])
+
         if header_block and not header_block.endswith("\n"):
             header_block += "\n"
 
+        if header_point_count is None or header_point_count <= 0:
+            header_point_count = len(original_values) or int(intensity.size)
+        header_point_count = int(header_point_count)
+        if header_point_count <= 0:
+            header_point_count = int(intensity.size)
+
+        if header_start_nm is None and header_wavelengths is not None and header_wavelengths.size:
+            header_start_nm = float(header_wavelengths[0])
+        if header_start_nm is None and wavelength.size:
+            header_start_nm = float(wavelength[0])
+
+        if (header_step_nm is None or header_step_nm == 0) and header_wavelengths is not None and header_wavelengths.size > 1:
+            diffs = np.diff(header_wavelengths)
+            finite_diffs = diffs[np.isfinite(diffs)]
+            if finite_diffs.size:
+                header_step_nm = float(np.nanmedian(finite_diffs))
+        if header_step_nm is None or header_step_nm == 0:
+            if header_point_count > 1 and header_start_nm is not None and header_end_nm is not None:
+                header_step_nm = (header_end_nm - header_start_nm) / float(header_point_count - 1)
+            elif wavelength.size > 1:
+                diffs = np.diff(wavelength)
+                finite_diffs = diffs[np.isfinite(diffs)]
+                if finite_diffs.size:
+                    header_step_nm = float(np.nanmedian(finite_diffs))
+        if header_step_nm is None or header_step_nm == 0:
+            header_step_nm = meta_step_nm if meta_step_nm not in (None, 0) else 1.0
+
+        if header_end_nm is None and header_start_nm is not None and header_step_nm is not None:
+            header_end_nm = header_start_nm + header_step_nm * float(max(header_point_count - 1, 0))
+
+        if original_values:
+            base_values = [float(value) for value in original_values[:header_point_count]]
+        else:
+            base_values = [float(value) for value in intensity[:header_point_count]]
+
+        if len(base_values) < header_point_count:
+            base_values.extend([float("nan")] * (header_point_count - len(base_values)))
+        elif len(base_values) > header_point_count:
+            base_values = base_values[:header_point_count]
+
+        replacements: dict[int, tuple[float, float]] = {}
+        if (
+            header_point_count > 0
+            and header_start_nm is not None
+            and header_step_nm not in (None, 0)
+            and math.isfinite(header_step_nm)
+        ):
+            step_abs = abs(float(header_step_nm))
+            tolerance = max(step_abs * 0.55, 1e-9)
+            for wl_value, inten_value in zip(wavelength, intensity):
+                wl_float = float(wl_value)
+                inten_float = float(inten_value)
+                if not (math.isfinite(wl_float) and math.isfinite(inten_float)):
+                    continue
+                idx_float = (wl_float - float(header_start_nm)) / float(header_step_nm)
+                if not math.isfinite(idx_float):
+                    continue
+                idx = int(round(idx_float))
+                if idx < 0 or idx >= header_point_count:
+                    continue
+                target_wl = float(header_start_nm) + idx * float(header_step_nm)
+                diff = abs(target_wl - wl_float)
+                if diff > tolerance:
+                    continue
+                best = replacements.get(idx)
+                if best is None or diff < best[0] - 1e-12:
+                    replacements[idx] = (diff, inten_float)
+
+        for idx, (_, value) in replacements.items():
+            base_values[idx] = value
+
         formatted_values: List[str] = []
-        for value in intensity:
+        for value in base_values:
             if math.isfinite(float(value)):
                 formatted_values.append(f"{float(value):.10g}")
             else:
