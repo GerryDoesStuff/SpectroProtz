@@ -286,6 +286,9 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 continue
 
             meta = getattr(spec, "meta", {}) or {}
+            role = str(meta.get("role") or "").strip().lower()
+            if role == "blank":
+                continue
             channels = dict(meta.get("channels") or {})
 
             label = str(

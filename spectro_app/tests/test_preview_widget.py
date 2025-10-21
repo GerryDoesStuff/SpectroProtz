@@ -84,6 +84,36 @@ def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app
         qt_app.processEvents()
 
 
+def test_blank_role_spectra_are_excluded(qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        wavelength = np.array([400.0, 500.0, 600.0], dtype=float)
+        blank = Spectrum(
+            wavelength=wavelength,
+            intensity=np.array([0.1, 0.2, 0.3], dtype=float),
+            meta={"role": "Blank", "sample_id": "Blank sample"},
+        )
+        sample = Spectrum(
+            wavelength=wavelength,
+            intensity=np.array([0.3, 0.4, 0.2], dtype=float),
+            meta={"sample_id": "Real sample"},
+        )
+
+        assert widget.set_spectra([blank, sample])
+        qt_app.processEvents()
+
+        assert widget._total_spectra == 1
+        assert widget._sample_labels == ["Real sample"]
+        assert all(ds.label != "Blank sample" for ds in widget._all_stage_datasets["smoothed"])
+
+        summary_text = widget.selection_label.text()
+        assert "Blank sample" not in summary_text
+        assert "Real sample" in summary_text or "Showing the only spectrum" in summary_text
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
 def test_preserve_view_keeps_ranges_and_selection(qt_app):
     widget = preview_widget.SpectraPlotWidget()
     try:
