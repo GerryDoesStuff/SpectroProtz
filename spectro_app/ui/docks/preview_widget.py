@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -81,6 +82,15 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
         self._total_spectra: int = 0
         self._smoothed_fallback_active: bool = False
+
+        self._curve_metadata: Dict[pg.PlotDataItem, Tuple[_StageDataset, QtGui.QPen, str]] = {}
+        self._legend_entries: Dict[
+            pg.PlotDataItem, Tuple["pg.graphicsItems.LegendItem.ItemSample", "pg.LabelItem"]
+        ] = {}
+        self._selected_curve: Optional[pg.PlotDataItem] = None
+        self._selected_label: Optional[str] = None
+        self._selection_color = QtGui.QColor("#d62728")
+        self._selection_pen = pg.mkPen(color=self._selection_color, width=4)
 
         self._build_ui()
 
@@ -194,6 +204,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved
         )
+        self.plot.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
         self._update_navigation_ui()
 
@@ -455,6 +466,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._update_navigation_ui()
 
     def _rebuild_plot(self, *, initial: bool) -> None:
+        self._clear_selection()
         for curves in self._curve_items.values():
             for curve in curves:
                 try:
@@ -462,6 +474,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 except Exception:
                     pass
         self._curve_items = {stage: [] for stage in self.STAGE_LABELS}
+        self._curve_metadata.clear()
+        self._legend_entries.clear()
 
         self._update_stage_controls(initial=initial)
         self._render_curves()
@@ -625,9 +639,16 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             for dataset in datasets:
                 color = self._color_map.get(dataset.label, pg.mkColor("#1f77b4"))
                 pen = pg.mkPen(color=color, width=2, style=pen_style)
-                curve = self.plot.plot(dataset.x, dataset.y, pen=pen, name=f"{dataset.label} · {stage_label}")
+                legend_text = f"{dataset.label} · {stage_label}"
+                curve = self.plot.plot(dataset.x, dataset.y, pen=pen)
+                if self._legend is not None:
+                    self._legend.addItem(curve, legend_text)
+                    if self._legend.items:
+                        sample_item, label_item = self._legend.items[-1]
+                        self._legend_entries[curve] = (sample_item, label_item)
                 curve.setVisible(self._stage_controls.get(stage, QtWidgets.QCheckBox()).isChecked())
                 self._curve_items[stage].append(curve)
+                self._curve_metadata[curve] = (dataset, pen, legend_text)
 
     def _reset_view(self) -> None:
         self.plot.plotItem.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
@@ -657,6 +678,69 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._vline.setPos(x)
         self._hline.setPos(y)
         self._update_cursor_label((x, y))
+
+    def _on_mouse_clicked(self, event: object) -> None:
+        if not hasattr(event, "button"):
+            return
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        if not hasattr(event, "scenePos"):
+            return
+        scene_pos = event.scenePos()
+        if scene_pos is None:
+            return
+        items = self.plot.scene().items(scene_pos)
+        for item in items:
+            if isinstance(item, pg.PlotDataItem) and item in self._curve_metadata:
+                self._select_curve(item)
+                if hasattr(event, "accept"):
+                    event.accept()
+                return
+        for item in items:
+            for curve, (sample_item, label_item) in self._legend_entries.items():
+                if item is sample_item or item is label_item:
+                    self._select_curve(curve)
+                    if hasattr(event, "accept"):
+                        event.accept()
+                    return
+        self._clear_selection()
+
+    def _select_curve(self, curve: pg.PlotDataItem) -> None:
+        if self._selected_curve is curve:
+            return
+        self._clear_selection()
+        metadata = self._curve_metadata.get(curve)
+        if metadata is None:
+            return
+        dataset, _, legend_text = metadata
+        curve.setPen(pg.mkPen(self._selection_pen))
+        entry = self._legend_entries.get(curve)
+        if entry:
+            sample_item, label_item = entry
+            sample_item.setPen(pg.mkPen(self._selection_pen))
+            escaped = html.escape(legend_text)
+            highlighted = (
+                f'<span style="font-weight:600; color:{self._selection_color.name()};">{escaped}</span>'
+            )
+            label_item.setText(highlighted)
+        self._selected_curve = curve
+        self._selected_label = dataset.label
+
+    def _clear_selection(self) -> None:
+        if self._selected_curve is None:
+            self._selected_label = None
+            return
+        metadata = self._curve_metadata.get(self._selected_curve)
+        if metadata is not None:
+            _dataset, original_pen, legend_text = metadata
+            self._selected_curve.setPen(original_pen)
+            entry = self._legend_entries.get(self._selected_curve)
+            if entry:
+                sample_item, label_item = entry
+                sample_item.setPen(pg.mkPen(original_pen))
+                label_item.setText(html.escape(legend_text))
+        self._selected_curve = None
+        self._selected_label = None
 
     def _update_cursor_label(self, coords: Optional[tuple[float, float]]) -> None:
         if coords is None or not self._visible_stages:
