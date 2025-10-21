@@ -193,6 +193,64 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
         assert heading in result.report_text
 
 
+def test_write_workbook_includes_blank_sheet(tmp_path):
+    wavelengths = np.linspace(200.0, 210.0, 6)
+    sample_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.linspace(0.1, 0.6, wavelengths.size),
+        meta={"sample_id": "Sample-1", "role": "sample", "mode": "absorbance"},
+    )
+    blank_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.zeros_like(wavelengths),
+        meta={"sample_id": "Blank-1", "role": "blank", "mode": "absorbance"},
+    )
+
+    workbook_path = tmp_path / "with_blanks.xlsx"
+    excel_writer.write_workbook(
+        str(workbook_path),
+        [sample_spec, blank_spec],
+        qc_table=[],
+        audit=[],
+        figures=[],
+        calibration=None,
+    )
+
+    wb = load_workbook(workbook_path)
+    assert "Blanks" in wb.sheetnames
+
+    ws_processed = wb["Processed_Spectra"]
+    processed_header = [
+        cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))
+    ]
+    assert all("Blank-1" not in str(column) for column in processed_header[1:])
+
+    ws_metadata = wb["Metadata"]
+    metadata_rows = [list(row) for row in ws_metadata.iter_rows(values_only=True)]
+    if len(metadata_rows) > 1:
+        sample_rows = metadata_rows[1:]
+        assert all(
+            "Blank-1" not in {
+                str(value) if value is not None else "" for value in row
+            }
+            for row in sample_rows
+        )
+
+    ws_blanks = wb["Blanks"]
+    blanks_rows = [list(row) for row in ws_blanks.iter_rows(values_only=True)]
+    blank_header = blanks_rows[0]
+    assert any("Blank-1" in str(value) for value in blank_header[1:])
+
+    blank_metadata = excel_writer._metadata_rows([blank_spec])
+    if blank_metadata:
+        metadata_header = sorted({key for row in blank_metadata for key in row.keys()})
+        written_header = blanks_rows[-(len(blank_metadata) + 1)]
+        assert list(written_header) == metadata_header
+        for row in blanks_rows[-len(blank_metadata):]:
+            mapped = dict(zip(metadata_header, row))
+            assert mapped.get("role") == "blank"
+            assert mapped.get("sample_id") == "Blank-1"
+
 def test_uvvis_export_writes_text_summary(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()
