@@ -193,6 +193,31 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
         assert heading in result.report_text
 
 
+def test_uvvis_export_writes_text_summary(tmp_path):
+    plugin = UvVisPlugin()
+    spec = _mock_spectrum()
+    workbook_path = tmp_path / "uvvis_batch.xlsx"
+    recipe = {
+        "export": {
+            "path": str(workbook_path),
+            "text_summary_enabled": True,
+        }
+    }
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    text_path = workbook_path.with_suffix(".txt")
+    assert text_path.exists(), "Text summary should be written alongside the workbook"
+    contents = text_path.read_text(encoding="utf-8")
+    assert result.report_text, "Export should provide narrative text"
+    assert contents.strip(), "Text summary file should not be empty"
+    assert contents == result.report_text
+    for heading in ("Ingestion", "Pre-processing", "Analysis", "Results"):
+        assert heading in contents
+    assert any("Text summary written" in entry for entry in result.audit)
+
+
 def test_uvvis_export_generates_noise_histogram_and_trend(tmp_path):
     plugin = UvVisPlugin()
     base = _mock_spectrum()

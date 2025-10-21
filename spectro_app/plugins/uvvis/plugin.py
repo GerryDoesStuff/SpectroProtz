@@ -4713,6 +4713,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         recipe_path = outputs.get("recipe")
         if recipe_path:
             results_lines.append(f"Recipe sidecar: {recipe_path}.")
+        text_path = outputs.get("text")
+        if text_path:
+            results_lines.append(f"Text summary: {text_path}.")
         if audit_entries:
             highlights = "; ".join(audit_entries[:3])
             results_lines.append(f"Audit highlights: {highlights}.")
@@ -4807,6 +4810,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         workbook_default = workbook_target if workbook_target else None
         recipe_target: Optional[Path] = None
         pdf_target: Optional[Path] = None
+        text_summary_target: Optional[Path] = None
         if not preview_disabled:
             recipe_target = self._coerce_export_path(
                 export_cfg.get("recipe_path")
@@ -4827,6 +4831,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             "workbook": str(workbook_target) if workbook_target else None,
             "pdf": str(pdf_target) if pdf_target else None,
             "recipe": str(recipe_target) if recipe_target else None,
+            "text": None,
         }
         results_ctx["per_spectrum_exports"] = []
 
@@ -4834,6 +4839,24 @@ class UvVisPlugin(SpectroscopyPlugin):
         per_spectrum_format = self._normalise_per_spectrum_format(
             export_cfg.get("per_spectrum_format")
         )
+        text_summary_requested = bool(export_cfg.get("text_summary_enabled"))
+        if not preview_disabled and text_summary_requested:
+            summary_value = (
+                export_cfg.get("text_summary_path")
+                or export_cfg.get("text_report_path")
+                or export_cfg.get("text_report")
+            )
+            default_text = (
+                workbook_default.with_suffix(".txt") if workbook_default else None
+            )
+            if summary_value in (None, "", False):
+                text_summary_target = default_text
+            else:
+                text_summary_target = self._coerce_export_path(
+                    summary_value, default_text
+                )
+            if text_summary_target:
+                results_ctx["export_targets"]["text"] = str(text_summary_target)
         legacy_clone_requested = bool(export_cfg.get("clone_sources"))
         if legacy_clone_requested and not per_spectrum_requested:
             per_spectrum_requested = True
@@ -4924,6 +4947,31 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         results_ctx["audit_messages"] = list(workbook_audit)
         report_text = self._build_text_report(workbook_audit)
+        if not preview_disabled and text_summary_requested:
+            if not report_text:
+                workbook_audit.append("Text summary requested but report text unavailable.")
+            elif not text_summary_target:
+                workbook_audit.append("Text summary requested but no path resolved.")
+            else:
+                try:
+                    text_summary_target.parent.mkdir(parents=True, exist_ok=True)
+                except Exception as exc:
+                    workbook_audit.append(f"Text summary export failed: {exc}")
+                else:
+                    success_entry = f"Text summary written to {text_summary_target}"
+                    candidate_audit = list(workbook_audit)
+                    candidate_audit.append(success_entry)
+                    final_text = self._build_text_report(candidate_audit) or report_text
+                    try:
+                        text_summary_target.write_text(final_text, encoding="utf-8")
+                    except Exception as exc:
+                        workbook_audit.append(f"Text summary export failed: {exc}")
+                    else:
+                        workbook_audit.append(success_entry)
+                        results_ctx["export_targets"]["text"] = str(text_summary_target)
+                        report_text = final_text
+            results_ctx["audit_messages"] = list(workbook_audit)
+            report_text = self._build_text_report(workbook_audit)
         return BatchResult(
             processed=specs,
             qc_table=qc,

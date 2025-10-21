@@ -38,6 +38,8 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         *,
         per_spectrum_enabled: bool,
         per_spectrum_format: str,
+        text_summary_enabled: bool,
+        text_summary_path: Optional[str],
     ):
         super().__init__(parent)
         self.setWindowTitle("Export Layout")
@@ -69,7 +71,27 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         per_spectrum_layout.addLayout(format_layout)
         layout.addWidget(per_spectrum_group)
 
+        summary_group = QtWidgets.QGroupBox("Text summary", self)
+        summary_layout = QtWidgets.QVBoxLayout(summary_group)
+        self._text_summary_checkbox = QtWidgets.QCheckBox(
+            "Write consolidated text summary alongside workbook"
+        )
+        summary_layout.addWidget(self._text_summary_checkbox)
+        summary_path_layout = QtWidgets.QHBoxLayout()
+        summary_path_label = QtWidgets.QLabel("Filename:")
+        self._text_summary_path = QtWidgets.QLineEdit()
+        self._text_summary_path.setPlaceholderText(
+            "Leave blank to derive the name from the workbook"
+        )
+        summary_path_layout.addWidget(summary_path_label)
+        summary_path_layout.addWidget(self._text_summary_path)
+        summary_layout.addLayout(summary_path_layout)
+        layout.addWidget(summary_group)
+        self._summary_path_label = summary_path_label
+
         self._per_spectrum_checkbox.toggled.connect(self._format_combo.setEnabled)
+        self._text_summary_checkbox.toggled.connect(self._text_summary_path.setEnabled)
+        self._text_summary_checkbox.toggled.connect(self._summary_path_label.setEnabled)
         self._format_combo.setEnabled(per_spectrum_enabled)
 
         if per_spectrum_enabled:
@@ -80,6 +102,13 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         index = self._format_combo.findData(normalised_format)
         if index >= 0:
             self._format_combo.setCurrentIndex(index)
+
+        if text_summary_enabled:
+            self._text_summary_checkbox.setChecked(True)
+        if text_summary_path:
+            self._text_summary_path.setText(str(text_summary_path))
+        self._text_summary_path.setEnabled(text_summary_enabled)
+        self._summary_path_label.setEnabled(text_summary_enabled)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -104,6 +133,12 @@ class _ExportLayoutDialog(QtWidgets.QDialog):
         if isinstance(data, str):
             return data
         return "original"
+
+    def text_summary_enabled(self) -> bool:
+        return self._text_summary_checkbox.isChecked()
+
+    def text_summary_path(self) -> str:
+        return self._text_summary_path.text().strip()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -693,10 +728,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         export_config = dict(export_cfg)
         export_config.pop("processed_layout", None)
+        export_config.pop("text_summary_path", None)
         export_config["path"] = target
         options = self._prompt_export_options(
             per_spectrum_enabled=bool(export_config.get("per_spectrum_enabled")),
             per_spectrum_format=export_config.get("per_spectrum_format", "original"),
+            text_summary_enabled=bool(export_config.get("text_summary_enabled")),
+            text_summary_path=export_config.get("text_summary_path"),
         )
         if options is None:
             return
@@ -728,18 +766,29 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         per_spectrum_enabled: bool,
         per_spectrum_format: str,
+        text_summary_enabled: bool,
+        text_summary_path: Optional[str],
     ) -> Optional[Dict[str, object]]:
         dialog = _ExportLayoutDialog(
             self,
             per_spectrum_enabled=per_spectrum_enabled,
             per_spectrum_format=per_spectrum_format,
+            text_summary_enabled=text_summary_enabled,
+            text_summary_path=text_summary_path,
         )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return None
-        return {
+        options: Dict[str, object] = {
             "per_spectrum_enabled": dialog.per_spectrum_enabled(),
             "per_spectrum_format": dialog.per_spectrum_format(),
+            "text_summary_enabled": dialog.text_summary_enabled(),
         }
+        summary_path = dialog.text_summary_path()
+        if summary_path:
+            options["text_summary_path"] = summary_path
+        else:
+            options.pop("text_summary_path", None)
+        return options
 
     def on_reset_layout(self):
         default_geometry = getattr(self, "_default_geometry", None)
@@ -1886,6 +1935,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     "recipe",
                     "recipe_path",
                     "recipe_sidecar",
+                    "text_summary_path",
+                    "text_report",
+                    "text_report_path",
                 }
             }
         sanitized_export[PREVIEW_EXPORT_DISABLED_FLAG] = True
