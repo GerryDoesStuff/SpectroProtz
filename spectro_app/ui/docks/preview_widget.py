@@ -762,8 +762,9 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             return
         items = self.plot.scene().items(scene_pos)
         for item in items:
-            if isinstance(item, pg.PlotDataItem) and item in self._curve_metadata:
-                self._select_curve(item)
+            curve_item = self._resolve_curve_item(item)
+            if curve_item is not None and curve_item in self._curve_metadata:
+                self._select_curve(curve_item)
                 if hasattr(event, "accept"):
                     event.accept()
                 return
@@ -775,6 +776,25 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                         event.accept()
                     return
         self._clear_selection()
+
+    def _resolve_curve_item(self, item: object) -> Optional[pg.PlotDataItem]:
+        """Resolve any graphics item to its owning PlotDataItem if available."""
+
+        if not hasattr(item, "parentItem"):
+            return item if isinstance(item, pg.PlotDataItem) else None
+
+        current = item
+        visited: Set[object] = set()
+        while current is not None and current not in visited:
+            visited.add(current)
+            if isinstance(current, pg.PlotDataItem):
+                return current
+            if isinstance(current, (pg.PlotCurveItem, pg.ScatterPlotItem)):
+                parent = current.parentItem()
+                if isinstance(parent, pg.PlotDataItem):
+                    return parent
+            current = current.parentItem()
+        return None
 
     def _select_curve(self, curve: pg.PlotDataItem) -> None:
         if self._selected_curve is curve:
