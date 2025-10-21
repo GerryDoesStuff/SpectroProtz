@@ -94,6 +94,9 @@ class RecipeEditorDock(QDockWidget):
         self._join_windows_active_key = self._JOIN_WINDOWS_GLOBAL_KEY
         self._join_windows_loading = False
         self._join_windows_errors: list[str] = []
+        self._stitch_windows_metadata: list[dict[str, object]] = []
+        self._stitch_windows_loading = False
+        self._stitch_windows_errors: list[str] = []
         self._baseline_anchor_errors: list[str] = []
         self._despike_exclusion_errors: list[str] = []
 
@@ -166,6 +169,100 @@ class RecipeEditorDock(QDockWidget):
         validation_row.addWidget(self.auto_update_preview_checkbox)
 
         layout.addLayout(validation_row)
+
+        # --- Stitching ---
+        stitch_section = CollapsibleSection("Stitching")
+        stitch_form = QFormLayout()
+        stitch_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        stitch_section.setContentLayout(stitch_form)
+
+        self.stitch_enable = QCheckBox("Enable detector stitching")
+        self.stitch_enable.setToolTip(
+            "Fill masked detector overlap windows using shoulder samples so"
+            " multi-detector spectra present a continuous trace before join"
+            " correction and despiking."
+        )
+
+        self.stitch_shoulder_points = QSpinBox()
+        self.stitch_shoulder_points.setRange(0, 999)
+        self.stitch_shoulder_points.setValue(5)
+        self.stitch_shoulder_points.setToolTip(
+            "Number of shoulder samples to draw from each side of a masked"
+            " window. Start near 5 when overlaps are dense; reduce only when"
+            " shoulder regions are short."
+        )
+
+        self.stitch_method = QComboBox()
+        self.stitch_method.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.stitch_method.addItem("Linear (degree 1)", "linear")
+        self.stitch_method.addItem("Quadratic (degree 2)", "quadratic")
+        self.stitch_method.addItem("Cubic (degree 3)", "cubic")
+        self.stitch_method.setToolTip(
+            "Interpolation method for filling the masked window. Higher degree"
+            " polynomials need longer shoulders and can overfit noise."
+        )
+
+        self.stitch_fallback_policy = QComboBox()
+        self.stitch_fallback_policy.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.stitch_fallback_policy.addItem(
+            "Preserve stitched correction", "preserve"
+        )
+        self.stitch_fallback_policy.addItem(
+            "Keep raw segment when stitching fails", "raw"
+        )
+        self.stitch_fallback_policy.setToolTip(
+            "Policy when insufficient shoulders or invalid fits prevent"
+            " stitching. 'Preserve' keeps stitched corrections where"
+            " possible; 'Raw' falls back to the original detector data."
+        )
+
+        stitch_windows_container = QWidget()
+        stitch_windows_layout = QVBoxLayout(stitch_windows_container)
+        stitch_windows_layout.setContentsMargins(0, 0, 0, 0)
+        stitch_windows_layout.setSpacing(6)
+
+        self.stitch_windows_table = QTableWidget(0, 2)
+        self.stitch_windows_table.setHorizontalHeaderLabels([
+            "Lower (nm)",
+            "Upper (nm)",
+        ])
+        stitch_header = self.stitch_windows_table.horizontalHeader()
+        stitch_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        stitch_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.stitch_windows_table.verticalHeader().setVisible(False)
+        self.stitch_windows_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.stitch_windows_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        stitch_windows_layout.addWidget(self.stitch_windows_table)
+
+        stitch_windows_buttons = QHBoxLayout()
+        stitch_windows_buttons.setContentsMargins(0, 0, 0, 0)
+        stitch_windows_buttons.setSpacing(6)
+        stitch_windows_buttons.addStretch(1)
+
+        self.stitch_windows_add_row = QPushButton("Add window")
+        stitch_windows_buttons.addWidget(self.stitch_windows_add_row)
+
+        self.stitch_windows_remove_row = QPushButton("Remove selected")
+        stitch_windows_buttons.addWidget(self.stitch_windows_remove_row)
+
+        stitch_windows_layout.addLayout(stitch_windows_buttons)
+
+        stitch_form.addRow(self.stitch_enable)
+        stitch_form.addRow("Shoulder points", self.stitch_shoulder_points)
+        stitch_form.addRow("Interpolation", self.stitch_method)
+        stitch_form.addRow("Fallback policy", self.stitch_fallback_policy)
+        stitch_form.addRow("Windows", stitch_windows_container)
+        layout.addWidget(stitch_section)
 
         # --- Join correction ---
         join_section = CollapsibleSection("Join correction")
@@ -823,6 +920,15 @@ class RecipeEditorDock(QDockWidget):
     def _connect_signals(self):
         self.load_preset_button.clicked.connect(self._load_selected_preset)
         self.save_preset_button.clicked.connect(self._save_preset)
+        self.stitch_windows_add_row.clicked.connect(
+            self._on_stitch_windows_add_row
+        )
+        self.stitch_windows_remove_row.clicked.connect(
+            self._on_stitch_windows_remove_row
+        )
+        self.stitch_windows_table.itemSelectionChanged.connect(
+            self._update_stitch_window_buttons
+        )
         self.join_windows_instrument_combo.currentIndexChanged.connect(
             self._on_join_windows_instrument_changed
         )
@@ -868,6 +974,7 @@ class RecipeEditorDock(QDockWidget):
             self._update_baseline_anchor_buttons
         )
         self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.stitch_enable.toggled.connect(self._update_feature_controls_enabled)
         self.peaks_enable.toggled.connect(self._update_feature_controls_enabled)
         self.despike_enable.toggled.connect(self._update_feature_controls_enabled)
         self.join_enable.toggled.connect(self._update_feature_controls_enabled)
@@ -878,6 +985,10 @@ class RecipeEditorDock(QDockWidget):
             self.smooth_enable.toggled,
             self.smooth_window.valueChanged,
             self.smooth_poly.valueChanged,
+            self.stitch_enable.toggled,
+            self.stitch_shoulder_points.valueChanged,
+            self.stitch_method.currentIndexChanged,
+            self.stitch_fallback_policy.currentIndexChanged,
             self.peaks_enable.toggled,
             self.peaks_prominence.valueChanged,
             self.peaks_min_distance.valueChanged,
@@ -1173,6 +1284,61 @@ class RecipeEditorDock(QDockWidget):
             self.despike_rng_seed.setText(
                 "" if rng_seed in (None, "") else str(rng_seed)
             )
+            stitch_cfg = (
+                params.get("stitch", {})
+                if isinstance(params.get("stitch"), dict)
+                else {}
+            )
+            self.stitch_enable.setChecked(bool(stitch_cfg.get("enabled", False)))
+            stitch_points = (
+                stitch_cfg.get("shoulder_points")
+                if stitch_cfg.get("shoulder_points") not in (None, "")
+                else stitch_cfg.get("points", stitch_cfg.get("shoulders"))
+            )
+            self.stitch_shoulder_points.setValue(
+                self._safe_int(
+                    stitch_points, self.stitch_shoulder_points.value()
+                )
+            )
+            method_value = (
+                stitch_cfg.get("method")
+                if stitch_cfg.get("method") not in (None, "")
+                else stitch_cfg.get("mode", stitch_cfg.get("interpolation"))
+            )
+            method_token = (
+                str(method_value).strip().lower()
+                if method_value not in (None, "")
+                else "linear"
+            )
+            method_index = self.stitch_method.findData(
+                method_token, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if method_index < 0:
+                self.stitch_method.addItem(method_token, method_token)
+                method_index = self.stitch_method.findData(
+                    method_token, QtCore.Qt.ItemDataRole.UserRole
+                )
+            if method_index >= 0:
+                self.stitch_method.setCurrentIndex(method_index)
+            fallback_value = stitch_cfg.get("fallback_policy")
+            if fallback_value in (None, ""):
+                fallback_value = stitch_cfg.get("fallback")
+            fallback_token = (
+                str(fallback_value).strip().lower() if fallback_value else "preserve"
+            )
+            fallback_index = self.stitch_fallback_policy.findData(
+                fallback_token, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if fallback_index < 0 and fallback_token:
+                self.stitch_fallback_policy.addItem(
+                    fallback_token, fallback_token
+                )
+                fallback_index = self.stitch_fallback_policy.findData(
+                    fallback_token, QtCore.Qt.ItemDataRole.UserRole
+                )
+            if fallback_index >= 0:
+                self.stitch_fallback_policy.setCurrentIndex(fallback_index)
+            self._load_stitch_windows(stitch_cfg.get("windows"))
             join_cfg = params.get("join", {}) if isinstance(params.get("join"), dict) else {}
             self.join_enable.setChecked(bool(join_cfg.get("enabled", False)))
             self.join_window.setValue(
@@ -1261,6 +1427,105 @@ class RecipeEditorDock(QDockWidget):
 
         self._despike_exclusion_errors = []
         self._update_despike_exclusion_buttons()
+
+    def _load_stitch_windows(self, config) -> None:
+        try:
+            from spectro_app.plugins.uvvis import pipeline as uvvis_pipeline
+        except Exception:
+            normalised: list[dict[str, object]] = []
+        else:
+            try:
+                normalised = uvvis_pipeline.normalise_stitch_windows(config)
+            except Exception:
+                normalised = []
+
+        self._stitch_windows_loading = True
+        try:
+            self.stitch_windows_table.setRowCount(0)
+            self._stitch_windows_metadata = []
+            for entry in normalised:
+                lower_val = self._format_optional(entry.get("lower_nm"))
+                upper_val = self._format_optional(entry.get("upper_nm"))
+                extras = {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in {"lower_nm", "upper_nm"}
+                }
+                self._insert_stitch_window_row(lower_val, upper_val, extras)
+        finally:
+            self._stitch_windows_loading = False
+        self._stitch_windows_errors = []
+        self._update_stitch_window_buttons()
+
+    def _insert_stitch_window_row(
+        self,
+        lower_text: str = "",
+        upper_text: str = "",
+        extras: Mapping[str, object] | None = None,
+    ) -> None:
+        row_index = self.stitch_windows_table.rowCount()
+        self.stitch_windows_table.insertRow(row_index)
+        lower_field = self._create_stitch_window_field("Lower (nm)", lower_text)
+        upper_field = self._create_stitch_window_field("Upper (nm)", upper_text)
+        self.stitch_windows_table.setCellWidget(row_index, 0, lower_field)
+        self.stitch_windows_table.setCellWidget(row_index, 1, upper_field)
+        extras_map = dict(extras) if isinstance(extras, Mapping) else {}
+        if row_index >= len(self._stitch_windows_metadata):
+            self._stitch_windows_metadata.append(extras_map)
+        else:
+            self._stitch_windows_metadata.insert(row_index, extras_map)
+
+    def _create_stitch_window_field(self, placeholder: str, text: str) -> QLineEdit:
+        field = QLineEdit()
+        field.setPlaceholderText(placeholder)
+        field.setClearButtonEnabled(True)
+        validator = QDoubleValidator(0.0, 10000.0, 3, field)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        field.setValidator(validator)
+        if text:
+            field.setText(text)
+        field.textChanged.connect(self._on_stitch_window_value_changed)
+        return field
+
+    def _on_stitch_window_value_changed(self, *_):
+        if self._stitch_windows_loading:
+            return
+        self._update_model_from_ui()
+
+    def _on_stitch_windows_add_row(self):
+        self._insert_stitch_window_row()
+        row = self.stitch_windows_table.rowCount() - 1
+        if row >= 0:
+            self.stitch_windows_table.selectRow(row)
+            widget = self.stitch_windows_table.cellWidget(row, 0)
+            if isinstance(widget, QLineEdit):
+                widget.setFocus()
+                widget.selectAll()
+        self._update_stitch_window_buttons()
+        self._update_model_from_ui()
+
+    def _on_stitch_windows_remove_row(self):
+        if self.stitch_windows_table.rowCount() <= 0:
+            return
+        selection = self.stitch_windows_table.selectionModel()
+        if selection and selection.hasSelection():
+            row = selection.selectedRows()[0].row()
+        else:
+            row = self.stitch_windows_table.rowCount() - 1
+        if row < 0:
+            return
+        self.stitch_windows_table.removeRow(row)
+        if row < len(self._stitch_windows_metadata):
+            self._stitch_windows_metadata.pop(row)
+        self._update_stitch_window_buttons()
+        self._update_model_from_ui()
+
+    def _update_stitch_window_buttons(self) -> None:
+        stitch_enabled = self.stitch_enable.isChecked()
+        row_count = self.stitch_windows_table.rowCount()
+        has_rows = row_count > 0
+        self.stitch_windows_add_row.setEnabled(stitch_enabled)
+        self.stitch_windows_remove_row.setEnabled(stitch_enabled and has_rows)
 
     def _load_join_windows(self, config) -> None:
         store: dict[str, list[dict[str, str]]] = {
@@ -1422,6 +1687,12 @@ class RecipeEditorDock(QDockWidget):
         self.peaks_max_peaks.setEnabled(peaks_enabled)
         self.peaks_height.setEnabled(peaks_enabled)
 
+        stitch_enabled = self.stitch_enable.isChecked()
+        self.stitch_shoulder_points.setEnabled(stitch_enabled)
+        self.stitch_method.setEnabled(stitch_enabled)
+        self.stitch_fallback_policy.setEnabled(stitch_enabled)
+        self.stitch_windows_table.setEnabled(stitch_enabled)
+
         despike_enabled = self.despike_enable.isChecked()
         self.despike_window.setEnabled(despike_enabled)
         self.despike_zscore.setEnabled(despike_enabled)
@@ -1462,6 +1733,7 @@ class RecipeEditorDock(QDockWidget):
         self.drift_max_residual.setEnabled(drift_enabled)
 
         self._update_join_window_buttons()
+        self._update_stitch_window_buttons()
 
     def _refresh_join_windows_combo(self) -> None:
         self._join_windows_loading = True
@@ -1747,6 +2019,70 @@ class RecipeEditorDock(QDockWidget):
         if not windows:
             return (None, errors)
         return ({"windows": windows}, errors)
+
+    def _build_stitch_windows_payload(self) -> tuple[object | None, list[str]]:
+        errors: list[str] = []
+        windows: list[dict[str, object]] = []
+        for row in range(self.stitch_windows_table.rowCount()):
+            lower_widget = self.stitch_windows_table.cellWidget(row, 0)
+            upper_widget = self.stitch_windows_table.cellWidget(row, 1)
+            lower_text = (
+                lower_widget.text().strip()
+                if isinstance(lower_widget, QLineEdit)
+                else ""
+            )
+            upper_text = (
+                upper_widget.text().strip()
+                if isinstance(upper_widget, QLineEdit)
+                else ""
+            )
+            if not lower_text and not upper_text:
+                continue
+
+            lower_value: float | None = None
+            upper_value: float | None = None
+            if lower_text:
+                try:
+                    lower_value = float(lower_text)
+                except ValueError:
+                    errors.append(
+                        f"Stitch window row {row + 1} lower bound must be numeric"
+                    )
+                    continue
+            if upper_text:
+                try:
+                    upper_value = float(upper_text)
+                except ValueError:
+                    errors.append(
+                        f"Stitch window row {row + 1} upper bound must be numeric"
+                    )
+                    continue
+
+            if lower_value is None and upper_value is None:
+                continue
+
+            if (
+                lower_value is not None
+                and upper_value is not None
+                and lower_value > upper_value
+            ):
+                lower_value, upper_value = upper_value, lower_value
+
+            extras = (
+                dict(self._stitch_windows_metadata[row])
+                if row < len(self._stitch_windows_metadata)
+                else {}
+            )
+            extras.pop("lower_nm", None)
+            extras.pop("upper_nm", None)
+            payload: dict[str, object] = dict(extras)
+            payload["lower_nm"] = lower_value
+            payload["upper_nm"] = upper_value
+            windows.append(payload)
+
+        if not windows:
+            return (None, errors)
+        return (windows, errors)
 
     def _build_join_windows_payload(self) -> tuple[object | None, list[str]]:
         errors: list[str] = []
@@ -2117,6 +2453,40 @@ class RecipeEditorDock(QDockWidget):
             despike_cfg.pop("exclusions", None)
             self._despike_exclusion_errors = []
 
+        stitch_cfg = self._ensure_dict(params, "stitch")
+        stitch_cfg["enabled"] = self.stitch_enable.isChecked()
+        stitch_cfg["shoulder_points"] = int(self.stitch_shoulder_points.value())
+        method_data = self.stitch_method.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        method_value = (
+            str(method_data).strip().lower()
+            if isinstance(method_data, str)
+            else ""
+        )
+        if method_value:
+            stitch_cfg["method"] = method_value
+        else:
+            stitch_cfg.pop("method", None)
+        fallback_data = self.stitch_fallback_policy.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        fallback_value = (
+            str(fallback_data).strip().lower()
+            if isinstance(fallback_data, str)
+            else ""
+        )
+        if fallback_value:
+            stitch_cfg["fallback_policy"] = fallback_value
+        else:
+            stitch_cfg.pop("fallback_policy", None)
+        windows_payload, stitch_window_errors = self._build_stitch_windows_payload()
+        self._stitch_windows_errors = stitch_window_errors
+        if windows_payload is None:
+            stitch_cfg.pop("windows", None)
+        else:
+            stitch_cfg["windows"] = windows_payload
+
         join_cfg = self._ensure_dict(params, "join")
         threshold_text = self.join_threshold.text().strip()
         if threshold_text:
@@ -2227,6 +2597,8 @@ class RecipeEditorDock(QDockWidget):
 
     def _run_validation(self):
         errors = list(self.recipe.validate())
+        if self._stitch_windows_errors:
+            errors.extend(self._stitch_windows_errors)
         if self._join_windows_errors:
             errors.extend(self._join_windows_errors)
         if self._baseline_anchor_errors:
