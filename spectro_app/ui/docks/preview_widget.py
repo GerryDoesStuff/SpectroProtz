@@ -767,14 +767,20 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         for item in items:
             curve_item = self._resolve_curve_item(item)
             if curve_item is not None and curve_item in self._curve_metadata:
-                self._select_curve(curve_item)
+                if curve_item is self._selected_curve:
+                    self._clear_selection()
+                else:
+                    self._select_curve(curve_item)
                 if hasattr(event, "accept"):
                     event.accept()
                 return
         for item in items:
             for curve, (sample_item, label_item) in self._legend_entries.items():
                 if item is sample_item or item is label_item:
-                    self._select_curve(curve)
+                    if curve is self._selected_curve:
+                        self._clear_selection()
+                    else:
+                        self._select_curve(curve)
                     if hasattr(event, "accept"):
                         event.accept()
                     return
