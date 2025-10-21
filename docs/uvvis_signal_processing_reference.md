@@ -50,6 +50,15 @@
 ### `correct_joins`
 - Measures pre/post window means, overlap errors, and robust median offsets around each detected join, clamps corrections to optional bounds, adjusts downstream samples, and logs raw/corrected segments plus rich diagnostics focused on stitching detectors that diverge by a step change.
 
+## Detector Stitching
+
+### `normalise_stitch_windows`
+- Canonicalises stitch window definitions from dict/sequence forms, fixes inverted bounds, preserves auxiliary per-window options (e.g. `method`, `shoulder_points`, custom labels), and drops empty windows so downstream fitting receives explicit `{lower_nm, upper_nm}` ranges.【F:spectro_app/plugins/uvvis/pipeline.py†L798-L876】
+
+### `stitch_regions`
+- Fits low-order polynomials across masked detector overlap windows using shoulder samples drawn from either side, replaces the masked segment, copies the corrected trace into the `stitched` channel, and records detailed diagnostics (`shoulder_counts`, `original_min/max`, `fallback_reason`, `applied`). Unsupported methods, insufficient shoulders, or degenerate fits leave the original samples untouched but still emit audit entries so recipes surface the failure context. The helper respects per-window overrides for `method`/`shoulder_points` and honours the plugin-level defaults (`stitch.method`, `stitch.shoulder_points`, `stitch.fallback_policy`, `stitch.windows`).【F:spectro_app/plugins/uvvis/pipeline.py†L1670-L1858】【F:spectro_app/plugins/uvvis/plugin.py†L298-L333】【F:spectro_app/plugins/uvvis/plugin.py†L1946-L2066】
+- Runs immediately after join correction/despiking and before blank subtraction, baseline correction, and segmented Savitzky–Golay smoothing, so stitched channels feed both averaging and smoothing without reintroducing inter-detector discontinuities.【F:spectro_app/plugins/uvvis/plugin.py†L1958-L2056】【F:spectro_app/plugins/uvvis/plugin.py†L2168-L2205】
+
 ## Spike Removal and Smoothing
 
 ### `despike_spectrum`

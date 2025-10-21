@@ -198,6 +198,83 @@ def test_correct_joins_records_channel():
     assert np.allclose(channels["joined"], corrected.intensity)
 
 
+def test_stitch_regions_interpolates_window_and_audits_shoulders():
+    wl = np.linspace(400.0, 410.0, 6)
+    intensity = np.array([0.2, 0.3, np.nan, np.nan, 0.8, 0.9])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"sample_id": "S1"})
+
+    with pytest.warns(RuntimeWarning):
+        stitched = pipeline.stitch_regions(
+            spec,
+            windows=[{"lower_nm": 404.0, "upper_nm": 406.0}],
+            shoulder_points=2,
+            method="linear",
+        )
+
+    window_mask = (wl >= 404.0) & (wl <= 406.0)
+    support_x = wl[[0, 1, 4, 5]]
+    support_y = intensity[[0, 1, 4, 5]]
+    coeff = np.polyfit(support_x, support_y, deg=1)
+    expected_segment = np.polyval(coeff, wl[window_mask])
+
+    assert np.allclose(stitched.intensity[window_mask], expected_segment, equal_nan=False)
+    assert stitched.meta.get("stitched") is True
+
+    channels = stitched.meta.get("channels") or {}
+    assert "stitched" in channels
+    assert np.allclose(channels["stitched"], stitched.intensity)
+
+    regions = stitched.meta.get("stitched_regions") or []
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.get("applied") is True
+    assert region.get("fallback_reason") is None
+    assert region.get("shoulder_counts") == {"left": 2, "right": 2}
+    assert region.get("method") == "linear"
+
+
+def test_stitch_regions_records_fallback_when_shoulders_missing():
+    wl = np.array([400.0, 402.0, 404.0, 406.0])
+    intensity = np.array([0.2, 0.25, 0.7, 0.75])
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"sample_id": "S1"})
+
+    stitched = pipeline.stitch_regions(
+        spec,
+        windows=[{"lower_nm": 402.0, "upper_nm": 404.0, "method": "cubic", "shoulder_points": 1}],
+        shoulder_points=0,
+        method="linear",
+    )
+
+    assert np.allclose(stitched.intensity, intensity)
+
+    channels = stitched.meta.get("channels") or {}
+    assert "stitched" in channels
+    assert np.allclose(channels["stitched"], intensity)
+
+    regions = stitched.meta.get("stitched_regions") or []
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.get("applied") is False
+    assert region.get("fallback_reason") == "insufficient shoulder samples for degree"
+    assert region.get("shoulder_counts") == {"left": 1, "right": 1}
+
+
+def test_smooth_spectrum_respects_join_segments():
+    wl = np.linspace(400.0, 450.0, 11)
+    step_intensity = np.concatenate([np.zeros(5), np.full(6, 5.0)])
+    spec = Spectrum(wavelength=wl, intensity=step_intensity, meta={})
+
+    blended = pipeline.smooth_spectrum(spec, window=5, polyorder=2)
+    segmented = pipeline.smooth_spectrum(spec, window=5, polyorder=2, join_indices=[5])
+
+    assert blended.intensity[4] > 0.0
+    assert blended.intensity[5] < 5.0
+
+    assert segmented.intensity[4] == pytest.approx(0.0)
+    assert segmented.intensity[5] == pytest.approx(5.0)
+    assert segmented.meta.get("smoothed_segmented") is True
+
+
 def test_despike_removes_spikes_straddling_join_window():
     wl = np.linspace(200.0, 400.0, 120)
     baseline = 0.35 + 0.02 * np.sin(wl / 30.0)
@@ -1303,6 +1380,60 @@ def test_average_replicates_channel_metadata_is_averaged():
     assert not np.allclose(expected_intensity, expected_raw)
     assert np.allclose(channels.get("smoothed"), expected_smoothed)
     assert channels.get("reference_labels") == channels_a["reference_labels"]
+
+
+def test_average_replicates_preserves_stitch_channels_and_audits():
+    wl = np.linspace(400.0, 420.0, 9)
+    base = np.linspace(0.2, 0.8, wl.size)
+
+    sample_meta = {"sample_id": "S1", "role": "sample"}
+    stitched_success = pipeline.stitch_regions(
+        Spectrum(wavelength=wl, intensity=base, meta=dict(sample_meta)),
+        windows=[{"lower_nm": 406.0, "upper_nm": 410.0}],
+        shoulder_points=2,
+        method="linear",
+    )
+
+    stitched_failure = pipeline.stitch_regions(
+        Spectrum(wavelength=wl, intensity=base, meta=dict(sample_meta)),
+        windows=[{"lower_nm": 406.0, "upper_nm": 410.0, "method": "poly4", "shoulder_points": 0}],
+        shoulder_points=0,
+        method="linear",
+    )
+
+    window_mask = (wl >= 406.0) & (wl <= 410.0)
+    assert np.allclose(stitched_failure.intensity[window_mask], base[window_mask])
+
+    averaged, mapping = pipeline.average_replicates(
+        [stitched_success, stitched_failure],
+        return_mapping=True,
+    )
+
+    assert len(averaged) == 1
+    key = pipeline.replicate_key(stitched_success)
+    averaged_spec = mapping[key]
+
+    channels = averaged_spec.meta.get("channels") or {}
+    assert "stitched" in channels
+    expected_stitched = np.nanmean(
+        [
+            stitched_success.meta["channels"]["stitched"],
+            stitched_failure.meta["channels"]["stitched"],
+        ],
+        axis=0,
+    )
+    assert np.allclose(channels["stitched"], expected_stitched)
+
+    regions = averaged_spec.meta.get("stitched_regions") or []
+    assert len(regions) == 2
+    assert any(entry.get("applied") for entry in regions)
+    fallback_entries = [entry for entry in regions if not entry.get("applied")]
+    assert fallback_entries
+    assert fallback_entries[0].get("fallback_reason") in {
+        "no shoulder samples",
+        "insufficient shoulder samples for degree",
+    }
+    assert averaged_spec.meta.get("stitched") is True
 
 
 def test_average_replicates_outlier_rejection():
