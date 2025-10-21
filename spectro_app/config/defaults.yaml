@@ -21,6 +21,12 @@ processing:
   join_correction:
     enabled: true
     overlap_nm: [340, 360]
+  stitch:
+    enabled: false
+    shoulder_points: 5
+    method: "linear"
+    fallback_policy: "preserve"
+    windows: []
   qc:
     saturation_abs: 3.0
     quiet_window_nm: [850, 900]

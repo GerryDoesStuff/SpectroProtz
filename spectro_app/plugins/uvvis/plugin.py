@@ -101,6 +101,10 @@ class UvVisPlugin(SpectroscopyPlugin):
         ),
     }
     DEFAULT_QC_QUIET_WINDOW_NM = (850.0, 900.0)
+    DEFAULT_STITCH_ENABLED = False
+    DEFAULT_STITCH_SHOULDER_POINTS = 5
+    DEFAULT_STITCH_METHOD = "linear"
+    DEFAULT_STITCH_FALLBACK_POLICY = "preserve"
 
     UI_CAPABILITY_MANIFEST = "manifest_enrichment"
 
@@ -291,6 +295,43 @@ class UvVisPlugin(SpectroscopyPlugin):
             join_defaults["windows"] = copy.deepcopy(self.DEFAULT_JOIN_WINDOWS_BY_INSTRUMENT)
         base["join"] = join_defaults
 
+        stitch_cfg_raw = base.get("stitch")
+        if stitch_cfg_raw is None:
+            stitch_cfg: Dict[str, object] = {}
+        elif isinstance(stitch_cfg_raw, Mapping):
+            stitch_cfg = dict(stitch_cfg_raw)
+        else:
+            raise TypeError("Stitch configuration must be a mapping")
+
+        if "points" in stitch_cfg and "shoulder_points" not in stitch_cfg:
+            stitch_cfg["shoulder_points"] = stitch_cfg["points"]
+        if "shoulders" in stitch_cfg and "shoulder_points" not in stitch_cfg:
+            stitch_cfg["shoulder_points"] = stitch_cfg["shoulders"]
+        if "mode" in stitch_cfg and "method" not in stitch_cfg:
+            stitch_cfg["method"] = stitch_cfg["mode"]
+        if "interpolation" in stitch_cfg and "method" not in stitch_cfg:
+            stitch_cfg["method"] = stitch_cfg["interpolation"]
+
+        stitch_defaults: Dict[str, object] = {
+            "enabled": self.DEFAULT_STITCH_ENABLED,
+            "shoulder_points": self.DEFAULT_STITCH_SHOULDER_POINTS,
+            "method": self.DEFAULT_STITCH_METHOD,
+            "fallback_policy": self.DEFAULT_STITCH_FALLBACK_POLICY,
+            "windows": [],
+        }
+        stitch_defaults.update(stitch_cfg)
+        stitch_defaults.pop("points", None)
+        stitch_defaults.pop("shoulders", None)
+        stitch_defaults.pop("mode", None)
+        stitch_defaults.pop("interpolation", None)
+        stitch_defaults["fallback_policy"] = self._normalise_stitch_fallback_policy(
+            stitch_defaults.get("fallback_policy")
+        )
+        stitch_defaults["windows"] = self._normalise_stitch_windows_config(
+            stitch_defaults.get("windows")
+        )
+        base["stitch"] = stitch_defaults
+
         qc_cfg_raw = base.get("qc")
         if qc_cfg_raw is None:
             qc_cfg: Dict[str, object] = {}
@@ -339,6 +380,86 @@ class UvVisPlugin(SpectroscopyPlugin):
             return copy.deepcopy(windows_cfg)  # type: ignore[return-value]
 
         raise TypeError("Join windows configuration must be a mapping or sequence")
+
+    @staticmethod
+    def _normalise_stitch_fallback_policy(value: object) -> str:
+        if value is None:
+            return UvVisPlugin.DEFAULT_STITCH_FALLBACK_POLICY
+        token = str(value).strip().lower()
+        if not token:
+            return UvVisPlugin.DEFAULT_STITCH_FALLBACK_POLICY
+        if token in {"raw", "raw_on_failure", "prefer_raw", "raw_if_failure"}:
+            return "raw"
+        if token in {"preserve", "keep", "prefer_stitched"}:
+            return "preserve"
+        return token
+
+    @staticmethod
+    def _normalise_stitch_windows_config(windows_cfg: object) -> object:
+        recognised = {
+            "min",
+            "max",
+            "lower",
+            "upper",
+            "min_nm",
+            "max_nm",
+            "lower_nm",
+            "upper_nm",
+        }
+        if isinstance(windows_cfg, Mapping):
+            if "windows" in windows_cfg and windows_cfg["windows"] is not None:
+                return pipeline.normalise_stitch_windows(windows_cfg["windows"])
+            if "regions" in windows_cfg and windows_cfg["regions"] is not None:
+                return pipeline.normalise_stitch_windows(windows_cfg["regions"])
+            if any(key in recognised for key in windows_cfg):
+                return pipeline.normalise_stitch_windows(windows_cfg)
+            normalised_map: Dict[str, List[Dict[str, Any]]] = {}
+            for key, value in windows_cfg.items():
+                if value is None:
+                    continue
+                normalised_map[str(key)] = pipeline.normalise_stitch_windows(value)
+            return normalised_map
+        return pipeline.normalise_stitch_windows(windows_cfg)
+
+    def _resolve_stitch_windows(
+        self, windows_cfg: object, spec: Spectrum
+    ) -> List[Dict[str, Any]]:
+        recognised = {
+            "min",
+            "max",
+            "lower",
+            "upper",
+            "min_nm",
+            "max_nm",
+            "lower_nm",
+            "upper_nm",
+        }
+        if windows_cfg is None:
+            return []
+        if isinstance(windows_cfg, Mapping):
+            if "windows" in windows_cfg and windows_cfg["windows"] is not None:
+                return pipeline.normalise_stitch_windows(windows_cfg["windows"])
+            if "regions" in windows_cfg and windows_cfg["regions"] is not None:
+                return pipeline.normalise_stitch_windows(windows_cfg["regions"])
+            if any(key in recognised for key in windows_cfg):
+                return pipeline.normalise_stitch_windows(windows_cfg)
+            instrument = str((spec.meta or {}).get("instrument") or "").lower()
+            default_windows: object | None = None
+            for key, value in windows_cfg.items():
+                if value is None:
+                    continue
+                key_lower = str(key).strip().lower()
+                if not key_lower:
+                    continue
+                if key_lower == "default":
+                    default_windows = value
+                    continue
+                if key_lower and key_lower in instrument:
+                    return pipeline.normalise_stitch_windows(value)
+            if default_windows is not None:
+                return pipeline.normalise_stitch_windows(default_windows)
+            return []
+        return pipeline.normalise_stitch_windows(windows_cfg)
 
     def _default_wavelength_limits(self, spec: Spectrum) -> tuple[float, float]:
         instrument = str(spec.meta.get("instrument") or "").lower()
@@ -1698,6 +1819,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         )
         baseline_cfg = recipe.get("baseline", {})
         join_cfg = dict(recipe.get("join", {}))
+        stitch_cfg = dict(recipe.get("stitch", {}))
         despike_cfg = recipe.get("despike", {})
         smoothing_cfg = recipe.get("smoothing", {})
         replicate_cfg = recipe.get("replicates", {})
@@ -1729,6 +1851,33 @@ class UvVisPlugin(SpectroscopyPlugin):
             "enabled": bool(join_cfg.get("enabled")),
             "window": int(join_cfg.get("window", 10)),
             "threshold": self._coerce_float(join_cfg.get("threshold")),
+        }
+        stitch_method_raw = stitch_cfg.get("method")
+        if stitch_method_raw is None:
+            stitch_method = self.DEFAULT_STITCH_METHOD
+        else:
+            method_text = str(stitch_method_raw).strip()
+            stitch_method = method_text if method_text else self.DEFAULT_STITCH_METHOD
+        stitch_policy = self._normalise_stitch_fallback_policy(
+            stitch_cfg.get("fallback_policy")
+        )
+        stitch_points_cfg = stitch_cfg.get("shoulder_points")
+        if stitch_points_cfg is None:
+            stitch_points_cfg = stitch_cfg.get("points")
+        if stitch_points_cfg is None:
+            stitch_points_cfg = stitch_cfg.get("shoulders")
+        stitch_points = self._coerce_int(stitch_points_cfg)
+        if stitch_points is None:
+            stitch_points = self.DEFAULT_STITCH_SHOULDER_POINTS
+        stitch_windows_summary = self._normalise_stitch_windows_config(
+            stitch_cfg.get("windows")
+        )
+        pre_ctx["stitch"] = {
+            "enabled": bool(stitch_cfg.get("enabled", False)),
+            "method": stitch_method,
+            "shoulder_points": stitch_points,
+            "fallback_policy": stitch_policy,
+            "windows": stitch_windows_summary,
         }
         pre_ctx["despike"] = {
             "enabled": bool(despike_cfg.get("enabled")),
@@ -1768,6 +1917,14 @@ class UvVisPlugin(SpectroscopyPlugin):
             if threshold is not None and float(threshold) <= 0:
                 raise ValueError("Join detection threshold must be positive")
 
+        if stitch_cfg.get("enabled"):
+            stitch_points_int = self._coerce_int(stitch_points_cfg)
+            if stitch_points_int is not None and stitch_points_int < 0:
+                raise ValueError("Stitch shoulder points must be non-negative")
+            stitch_method_token = str(stitch_method or "").strip()
+            if not stitch_method_token:
+                raise ValueError("Stitch method must be provided when stitching is enabled")
+
         if smoothing_cfg.get("enabled"):
             window = int(smoothing_cfg.get("window", 5))
             poly = int(smoothing_cfg.get("polyorder", 2))
@@ -1786,6 +1943,16 @@ class UvVisPlugin(SpectroscopyPlugin):
             return text or None
 
         stage_one: list[Spectrum] = []
+        stitch_enabled = bool(stitch_cfg.get("enabled", False))
+        stitch_method_resolved = stitch_method if stitch_method else self.DEFAULT_STITCH_METHOD
+        stitch_points_resolved = stitch_points
+        stitch_windows_cfg = stitch_cfg.get("windows")
+        stitch_policy_resolved = stitch_policy
+        stitch_attempted_specs = 0
+        stitch_windows_attempted = 0
+        stitch_windows_applied = 0
+        stitch_windows_fallback = 0
+
         for spec in specs:
             effective_domain = self._effective_domain(domain_cfg, spec)
             coerced = pipeline.coerce_domain(spec, effective_domain)
@@ -1838,6 +2005,65 @@ class UvVisPlugin(SpectroscopyPlugin):
                     rng_seed=despike_cfg.get("rng_seed"),
                     exclusion_windows=exclusion_windows,
                 )
+            if stitch_enabled:
+                resolved_windows = self._resolve_stitch_windows(
+                    stitch_windows_cfg, processed
+                )
+                stitched = pipeline.stitch_regions(
+                    processed,
+                    resolved_windows,
+                    shoulder_points=stitch_points_resolved,
+                    method=stitch_method_resolved,
+                )
+                diagnostics = [
+                    dict(entry)
+                    for entry in (stitched.meta.get("stitched_regions") or [])
+                    if isinstance(entry, Mapping)
+                ]
+                if resolved_windows:
+                    stitch_attempted_specs += 1
+                    stitch_windows_attempted += len(diagnostics)
+                    stitch_windows_applied += sum(
+                        1 for entry in diagnostics if entry.get("applied")
+                    )
+                    stitch_windows_fallback += sum(
+                        1 for entry in diagnostics if not entry.get("applied")
+                    )
+                revert_to_raw = False
+                if (
+                    stitch_policy_resolved == "raw"
+                    and resolved_windows
+                    and diagnostics
+                    and not any(entry.get("applied") for entry in diagnostics)
+                ):
+                    revert_to_raw = True
+                if revert_to_raw:
+                    raw_meta = dict(processed.meta or {})
+                    existing_regions = raw_meta.get("stitched_regions")
+                    combined_regions: List[Dict[str, Any]] = []
+                    if isinstance(existing_regions, list):
+                        combined_regions.extend(
+                            [dict(entry) for entry in existing_regions if isinstance(entry, Mapping)]
+                        )
+                    combined_regions.extend(diagnostics)
+                    if combined_regions:
+                        raw_meta["stitched_regions"] = combined_regions
+                    raw_meta["stitched"] = bool(raw_meta.get("stitched", False)) and any(
+                        entry.get("applied") for entry in combined_regions
+                    )
+                    raw_meta["stitch_fallback_policy"] = stitch_policy_resolved
+                    raw_meta["stitch_method"] = stitch_method_resolved
+                    raw_meta["stitch_shoulders"] = stitch_points_resolved
+                    processed = Spectrum(
+                        wavelength=np.asarray(processed.wavelength, dtype=float).copy(),
+                        intensity=np.asarray(processed.intensity, dtype=float).copy(),
+                        meta=raw_meta,
+                    )
+                else:
+                    stitched.meta["stitch_fallback_policy"] = stitch_policy_resolved
+                    stitched.meta["stitch_method"] = stitch_method_resolved
+                    stitched.meta["stitch_shoulders"] = stitch_points_resolved
+                    processed = stitched
             processed.meta["join_indices"] = tuple(joins)
             stage_one.append(processed)
 
@@ -2149,6 +2375,14 @@ class UvVisPlugin(SpectroscopyPlugin):
         final_specs = [processed_map[key] for key in order_keys if key in processed_map]
         processed_blanks = [spec for spec in final_specs if spec.meta.get("role") == "blank"]
         processed_samples_only = [spec for spec in final_specs if spec.meta.get("role") != "blank"]
+        pre_ctx["stitch"].update(
+            {
+                "specs_attempted": int(stitch_attempted_specs),
+                "windows_attempted": int(stitch_windows_attempted),
+                "windows_applied": int(stitch_windows_applied),
+                "windows_fallback": int(stitch_windows_fallback),
+            }
+        )
         pre_ctx["counts"] = {
             "input_samples": len(samples_stage),
             "input_blanks": len(blanks_stage),
@@ -2334,6 +2568,17 @@ class UvVisPlugin(SpectroscopyPlugin):
             return None
         try:
             return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_int(value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        try:
+            return int(float(value))
         except (TypeError, ValueError):
             return None
 
@@ -3939,6 +4184,35 @@ class UvVisPlugin(SpectroscopyPlugin):
             else:
                 peak_summary = "no_peaks"
             entries.append(f"Spectrum {sample_id}: ratios[{ratio_summary}] peaks[{peak_summary}]")
+            stitched_regions_raw = spec.meta.get("stitched_regions") if isinstance(spec.meta, Mapping) else None
+            if isinstance(stitched_regions_raw, list) and stitched_regions_raw:
+                stitched_regions = [
+                    entry for entry in stitched_regions_raw if isinstance(entry, Mapping)
+                ]
+                if stitched_regions:
+                    applied = sum(1 for entry in stitched_regions if entry.get("applied"))
+                    fallback = sum(1 for entry in stitched_regions if not entry.get("applied"))
+                    details: List[str] = [
+                        f"windows={len(stitched_regions)}",
+                        f"applied={applied}",
+                        f"fallback={fallback}",
+                    ]
+                    policy = spec.meta.get("stitch_fallback_policy") if isinstance(spec.meta, Mapping) else None
+                    if policy:
+                        details.append(f"policy={policy}")
+                    fallback_reasons: List[str] = []
+                    for region in stitched_regions:
+                        reason = region.get("fallback_reason")
+                        if not reason:
+                            continue
+                        reason_str = str(reason)
+                        if reason_str not in fallback_reasons:
+                            fallback_reasons.append(reason_str)
+                        if len(fallback_reasons) >= 3:
+                            break
+                    if fallback_reasons:
+                        details.append("reasons=" + "; ".join(fallback_reasons))
+                    entries.append(f"Stitch {sample_id}: {', '.join(details)}")
         if figures:
             entries.append(f"Generated plots: {', '.join(sorted(figures))}")
         calibration = getattr(self, "_last_calibration_results", None)
@@ -4051,7 +4325,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         sample_id = self._safe_sample_id(spec, f"spec_{id(spec)}")
         fig, ax = self._create_subplots(figsize=(6, 4))
         ax.plot(wl, intensity, label="Processed", linewidth=1.5)
-        stage_order = ["raw", "blanked", "baseline_corrected", "joined", "despiked", "smoothed"]
+        stage_order = [
+            "raw",
+            "joined",
+            "despiked",
+            "stitched",
+            "blanked",
+            "baseline_corrected",
+            "smoothed",
+        ]
         ordered_names = [name for name in stage_order if name in channels]
         ordered_names.extend(name for name in channels.keys() if name not in ordered_names)
         for name in ordered_names:
@@ -4609,6 +4891,39 @@ class UvVisPlugin(SpectroscopyPlugin):
             preprocessing_lines.append(f"Join correction enabled{detail}.")
         else:
             preprocessing_lines.append("Join correction disabled.")
+        stitch_cfg = preprocessing.get("stitch") or {}
+        if stitch_cfg.get("enabled"):
+            detail_parts = []
+            method_token = stitch_cfg.get("method")
+            if method_token:
+                detail_parts.append(f"method={method_token}")
+            shoulders_val = stitch_cfg.get("shoulder_points")
+            if shoulders_val is not None:
+                detail_parts.append(f"shoulders={shoulders_val}")
+            fallback_val = stitch_cfg.get("fallback_policy")
+            if fallback_val:
+                detail_parts.append(f"fallback={fallback_val}")
+            specs_attempted = stitch_cfg.get("specs_attempted")
+            windows_attempted = stitch_cfg.get("windows_attempted")
+            windows_applied = stitch_cfg.get("windows_applied")
+            windows_fallback = stitch_cfg.get("windows_fallback")
+            metrics_parts: List[str] = []
+            if isinstance(specs_attempted, int):
+                metrics_parts.append(f"specs={specs_attempted}")
+            if isinstance(windows_attempted, int):
+                applied_val = int(windows_applied) if isinstance(windows_applied, int) else 0
+                fallback_count = (
+                    int(windows_fallback) if isinstance(windows_fallback, int) else 0
+                )
+                metrics_parts.append(
+                    f"windows={windows_attempted} (applied={applied_val}, fallback={fallback_count})"
+                )
+            if metrics_parts:
+                detail_parts.extend(metrics_parts)
+            detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            preprocessing_lines.append(f"Detector stitching enabled{detail}.")
+        else:
+            preprocessing_lines.append("Detector stitching disabled.")
         despike_cfg = preprocessing.get("despike") or {}
         if despike_cfg.get("enabled"):
             detail_parts = []
