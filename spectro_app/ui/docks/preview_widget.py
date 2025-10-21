@@ -76,6 +76,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._last_cursor_pos: Optional[tuple[float, float]] = None
 
         self._sample_labels: List[str] = []
+        self._hidden_labels: Set[str] = set()
         self._single_mode: bool = False
         self._single_window_start: int = 0
         self._single_window_size: int = 1
@@ -212,6 +213,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
     # Public API
     def set_spectra(self, spectra: Sequence[Spectrum], preserve_view: bool = False) -> bool:
         """Populate the plot with spectra and return ``True`` if data was shown."""
+
+        self._hidden_labels.clear()
 
         preserved_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         preserved_auto_range: Optional[tuple[object, object]] = None
@@ -480,6 +483,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._update_stage_controls(initial=initial)
         self._render_curves()
         self._sync_visible_stages()
+        self._apply_hidden_visibility()
         self._update_cursor_label(None)
         if initial:
             self._reset_view()
@@ -528,11 +532,17 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         for stage, curves in self._curve_items.items():
             visible = stage in self._visible_stages
             for curve in curves:
-                curve.setVisible(visible)
+                metadata = self._curve_metadata.get(curve)
+                if metadata is None:
+                    continue
+                dataset = metadata[0]
+                curve.setVisible(visible and dataset.label not in self._hidden_labels)
 
     def _update_navigation_ui(self) -> None:
         total = self._total_spectra
         is_single = self._single_mode and total > 0
+        hidden_labels = {label for label in self._hidden_labels if label in self._sample_labels}
+        hidden_count = len(hidden_labels)
 
         self.view_mode_button.blockSignals(True)
         self.view_mode_button.setChecked(is_single)
@@ -551,17 +561,33 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             labels = self._current_single_labels()
             if not labels:
                 summary = f"Showing 0 of {total} spectra"
-            elif len(labels) == 1:
-                summary = f"Showing 1 of {total}: {labels[0]}"
             else:
-                summary = f"Showing {len(labels)} of {total}: {', '.join(labels)}"
+                annotated: List[str] = []
+                visible_count = 0
+                for label in labels:
+                    if label in hidden_labels:
+                        annotated.append(f"{label} (hidden)")
+                    else:
+                        annotated.append(label)
+                        visible_count += 1
+                summary = f"Showing {visible_count} of {total}: {', '.join(annotated)}"
         else:
             if total == 0:
                 summary = "No spectra available"
-            elif total == 1:
-                summary = "Showing the only spectrum"
             else:
-                summary = f"Showing all {total} spectra"
+                visible_total = total - hidden_count
+                if total == 1:
+                    if hidden_count:
+                        summary = "No spectra visible (1 hidden)"
+                    else:
+                        summary = "Showing the only spectrum"
+                elif hidden_count:
+                    summary = (
+                        f"Showing {max(visible_total, 0)} of {total} spectra "
+                        f"({hidden_count} hidden)"
+                    )
+                else:
+                    summary = f"Showing all {total} spectra"
 
         self.selection_label.setText(summary)
 
@@ -650,6 +676,32 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 self._curve_items[stage].append(curve)
                 self._curve_metadata[curve] = (dataset, pen, legend_text)
 
+    def _apply_hidden_visibility(self) -> None:
+        for curve, (dataset, original_pen, legend_text) in self._curve_metadata.items():
+            hidden = dataset.label in self._hidden_labels
+            stage_visible = dataset.stage in self._visible_stages
+            curve.setVisible(stage_visible and not hidden)
+
+            entry = self._legend_entries.get(curve)
+            if not entry:
+                continue
+            sample_item, label_item = entry
+            try:
+                sample_item.setOpacity(0.25 if hidden else 1.0)
+            except AttributeError:
+                pass
+
+            if not hidden and curve is self._selected_curve:
+                continue
+
+            sample_item.setPen(pg.mkPen(original_pen))
+            if hidden:
+                label_item.setText(
+                    f'<span style="color:#7f7f7f;">{html.escape(legend_text)} (hidden)</span>'
+                )
+            else:
+                label_item.setText(html.escape(legend_text))
+
     def _reset_view(self) -> None:
         self.plot.plotItem.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
         self.plot.plotItem.autoRange()
@@ -660,8 +712,13 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         else:
             self._visible_stages.discard(stage)
         for curve in self._curve_items.get(stage, []):
-            curve.setVisible(checked)
+            metadata = self._curve_metadata.get(curve)
+            if metadata is None:
+                continue
+            dataset = metadata[0]
+            curve.setVisible(checked and dataset.label not in self._hidden_labels)
         self._update_cursor_label(None)
+        self._apply_hidden_visibility()
 
     def _on_mouse_moved(self, event: Iterable[object]) -> None:
         if not event:
@@ -741,6 +798,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 label_item.setText(html.escape(legend_text))
         self._selected_curve = None
         self._selected_label = None
+        self._apply_hidden_visibility()
 
     def _update_cursor_label(self, coords: Optional[tuple[float, float]]) -> None:
         if coords is None or not self._visible_stages:
@@ -769,6 +827,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         best_distance = float("inf")
         for stage in self._visible_stages:
             for dataset in self._stage_datasets.get(stage, []):
+                if dataset.label in self._hidden_labels:
+                    continue
                 if dataset.x.size == 0:
                     continue
                 distances = np.abs(dataset.x - target_x)
@@ -789,8 +849,16 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         export_action = menu.addAction("Export figure…")
         reset_action = menu.addAction("Reset view")
         menu.addSeparator()
+        hide_action = menu.addAction("Hide selected spectrum")
+        show_hidden_action = menu.addAction("Show hidden spectra")
+        menu.addSeparator()
         zoom_in_action = menu.addAction("Zoom in here")
         zoom_out_action = menu.addAction("Zoom out here")
+
+        if self._selected_label is None or self._selected_label in self._hidden_labels:
+            hide_action.setEnabled(False)
+        if not self._hidden_labels:
+            show_hidden_action.setEnabled(False)
         action = menu.exec(self.plot.mapToGlobal(pos))
         if action == copy_action:
             self._copy_data_at_cursor()
@@ -798,6 +866,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._export_figure()
         elif action == reset_action:
             self._reset_view()
+        elif action == hide_action:
+            self._hide_selected_spectrum()
+        elif action == show_hidden_action:
+            self._show_hidden_spectra()
         elif action in {zoom_in_action, zoom_out_action}:
             view_box = self.plot.plotItem.getViewBox()
             if view_box is None:
@@ -809,6 +881,30 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 self._apply_zoom(0.8, center)
             else:
                 self._apply_zoom(1.25, center)
+
+    def _hide_selected_spectrum(self) -> None:
+        label = self._selected_label
+        if label is None or label in self._hidden_labels:
+            return
+        self._hidden_labels.add(label)
+        self._clear_selection()
+        self._apply_hidden_visibility()
+        self._update_navigation_ui()
+        if self._last_cursor_pos is not None:
+            self._update_cursor_label(self._last_cursor_pos)
+        else:
+            self._update_cursor_label(None)
+
+    def _show_hidden_spectra(self) -> None:
+        if not self._hidden_labels:
+            return
+        self._hidden_labels.clear()
+        self._apply_hidden_visibility()
+        self._update_navigation_ui()
+        if self._last_cursor_pos is not None:
+            self._update_cursor_label(self._last_cursor_pos)
+        else:
+            self._update_cursor_label(None)
 
     def _copy_data_at_cursor(self) -> None:
         if not self._last_cursor_result:
