@@ -347,15 +347,39 @@ def write_workbook(
     _ensure_parent(workbook_path)
 
     wb = Workbook()
+    processed_list = list(processed or [])
+    blank_spectra = [
+        spectrum
+        for spectrum in processed_list
+        if (spectrum.meta or {}).get("role") == "blank"
+    ]
+    non_blank_spectra = [
+        spectrum
+        for spectrum in processed_list
+        if (spectrum.meta or {}).get("role") != "blank"
+    ]
+
     ws_processed = wb.active
     ws_processed.title = "Processed_Spectra"
-    header, rows = _processed_table_wide(processed)
+    header, rows = _processed_table_wide(non_blank_spectra)
     ws_processed.append(header)
     for row in rows:
         ws_processed.append(row)
 
     ws_metadata = wb.create_sheet("Metadata")
-    _write_dict_rows(ws_metadata, _metadata_rows(processed))
+    _write_dict_rows(ws_metadata, _metadata_rows(non_blank_spectra))
+
+    if blank_spectra:
+        ws_blanks = wb.create_sheet("Blanks")
+        blank_header, blank_rows = _processed_table_wide(blank_spectra)
+        ws_blanks.append(blank_header)
+        for row in blank_rows:
+            ws_blanks.append(row)
+
+        metadata_rows = _metadata_rows(blank_spectra)
+        if blank_rows and metadata_rows:
+            ws_blanks.append([])
+        _write_dict_rows(ws_blanks, metadata_rows)
 
     ws_qc = wb.create_sheet("QC_Flags")
     _write_dict_rows(ws_qc, _qc_rows(qc_table))
