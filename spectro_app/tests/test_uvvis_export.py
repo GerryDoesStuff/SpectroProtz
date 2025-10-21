@@ -251,6 +251,65 @@ def test_write_workbook_includes_blank_sheet(tmp_path):
             assert mapped.get("role") == "blank"
             assert mapped.get("sample_id") == "Blank-1"
 
+
+def test_export_includes_blanks_by_default(tmp_path):
+    plugin = UvVisPlugin()
+    wavelengths = np.linspace(200.0, 210.0, 6)
+    sample_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.linspace(0.1, 0.6, wavelengths.size),
+        meta={"sample_id": "Sample-1", "role": "sample", "mode": "absorbance"},
+    )
+    blank_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.zeros_like(wavelengths),
+        meta={"sample_id": "Blank-1", "role": "blank", "mode": "absorbance"},
+    )
+
+    recipe = {
+        "blank": {"subtract": False, "require": False},
+        "export": {"path": str(tmp_path / "include_blanks.xlsx")},
+    }
+
+    processed, qc_rows = plugin.analyze([sample_spec, blank_spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    wb = load_workbook(recipe["export"]["path"])
+    assert "Blanks" in wb.sheetnames
+    assert any((spec.meta or {}).get("role") == "blank" for spec in result.processed)
+    assert any(row.get("role") == "blank" for row in result.qc_table)
+
+
+def test_export_excludes_blanks_when_disabled(tmp_path):
+    plugin = UvVisPlugin()
+    wavelengths = np.linspace(200.0, 210.0, 6)
+    sample_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.linspace(0.1, 0.6, wavelengths.size),
+        meta={"sample_id": "Sample-1", "role": "sample", "mode": "absorbance"},
+    )
+    blank_spec = Spectrum(
+        wavelength=wavelengths,
+        intensity=np.zeros_like(wavelengths),
+        meta={"sample_id": "Blank-1", "role": "blank", "mode": "absorbance"},
+    )
+
+    recipe = {
+        "blank": {"subtract": False, "require": False},
+        "export": {
+            "path": str(tmp_path / "exclude_blanks.xlsx"),
+            "include_blanks": False,
+        },
+    }
+
+    processed, qc_rows = plugin.analyze([sample_spec, blank_spec], recipe)
+    result = plugin.export(processed, qc_rows, recipe)
+
+    wb = load_workbook(recipe["export"]["path"])
+    assert "Blanks" not in wb.sheetnames
+    assert all((spec.meta or {}).get("role") != "blank" for spec in result.processed)
+    assert all(row.get("role") != "blank" for row in result.qc_table)
+
 def test_uvvis_export_writes_text_summary(tmp_path):
     plugin = UvVisPlugin()
     spec = _mock_spectrum()

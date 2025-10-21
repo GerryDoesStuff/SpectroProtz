@@ -2338,6 +2338,23 @@ class UvVisPlugin(SpectroscopyPlugin):
             return None
 
     @staticmethod
+    def _coerce_bool(value: object, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, np.integer)):
+            return bool(value)
+        token = str(value).strip().lower()
+        if not token:
+            return default
+        if token in {"0", "false", "no", "off"}:
+            return False
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        return default
+
+    @staticmethod
     def _safe_sample_id(spec: Spectrum, fallback: str) -> str:
         meta = spec.meta or {}
         return str(
@@ -4780,6 +4797,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                 pdf.savefig(figure)
 
     def export(self, specs, qc, recipe):
+        specs = list(specs or [])
+        qc = list(qc or [])
         export_cfg_raw = dict(recipe.get("export", {})) if recipe else {}
         preview_disabled = bool(export_cfg_raw.get(PREVIEW_EXPORT_DISABLED_FLAG))
         export_cfg = {
@@ -4787,6 +4806,23 @@ class UvVisPlugin(SpectroscopyPlugin):
             for key, value in export_cfg_raw.items()
             if key != PREVIEW_EXPORT_DISABLED_FLAG
         }
+        include_blanks = self._coerce_bool(export_cfg.pop("include_blanks", None), default=True)
+        if not include_blanks:
+            specs = [
+                spec
+                for spec in specs
+                if str((spec.meta or {}).get("role", "")).strip().lower() != "blank"
+            ]
+            filtered_qc: List[Dict[str, object]] = []
+            for row in qc:
+                role_token = ""
+                if isinstance(row, Mapping):
+                    role_raw = row.get("role")
+                    role_token = str(role_raw).strip().lower() if role_raw is not None else ""
+                if role_token == "blank":
+                    continue
+                filtered_qc.append(row)
+            qc = filtered_qc
         workbook_target: Optional[Path] = None
         if not preview_disabled:
             workbook_target = self._coerce_export_path(
@@ -4803,7 +4839,9 @@ class UvVisPlugin(SpectroscopyPlugin):
             layout_warning = (
                 "Processed layout option no longer configurable; wrote columnar export."
             )
-        figures, figure_objs = self._generate_figures(specs, qc, formats=export_cfg.get("formats"))
+        figures, figure_objs = self._generate_figures(
+            specs, qc, formats=export_cfg.get("formats")
+        )
         audit_entries = self._build_audit_entries(specs, qc, recipe, figures)
         workbook_audit = list(audit_entries)
         if layout_warning:
