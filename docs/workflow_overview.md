@@ -240,6 +240,7 @@ The preprocessing stage honours the following recipe keys:
   injection during QA, and define exclusion regions when narrow, real features
   must survive untouched. Add padding when a steep slope or guard band at a
   detector boundary should be left untouched.【F:spectro_app/plugins/uvvis/plugin.py†L1185-L1289】【F:spectro_app/tests/test_pipeline_uvvis.py†L170-L280】
+- **Detector stitching** – `stitch.enabled` toggles polynomial filling of masked overlap windows using shoulder samples, while `stitch.method`, `stitch.shoulder_points`, `stitch.fallback_policy`, and `stitch.windows` (parsed by `normalise_stitch_windows`) refine the fit strategy. Recipes typically keep `method: linear` with 2–5 shoulder points to avoid amplifying noise; higher-order polynomials should only be used when long shoulder spans are available. Fallback policies of `preserve`/`raw` retain the pre-stitched trace when no shoulders are available or a fit fails, but still surface audit records so operators can review gaps before smoothing or replicate averaging.【F:spectro_app/plugins/uvvis/plugin.py†L298-L333】【F:spectro_app/plugins/uvvis/plugin.py†L1946-L2066】【F:spectro_app/plugins/uvvis/pipeline.py†L1670-L1858】
 - **Baseline correction** – `baseline.method` selects `asls`, `rubberband` or
   `snip`. Combine with the parameters listed above; choose `asls` when gradual
   drift dominates, `rubberband` for broad curvature and `snip` for fluorescence
@@ -275,13 +276,22 @@ The preprocessing stage honours the following recipe keys:
 ## Presets and recipe authoring
 
 Shared UV-Vis defaults live in `spectro_app/plugins/uvvis/presets.yaml`. The
-`defaults` block mirrors the recipe structure (for example, the same `join` and
-`smoothing` keys) and is merged before user recipes are applied. Integrators can
-copy snippets from this file into YAML/JSON recipes to toggle behaviour, e.g.:
+`defaults` block mirrors the recipe structure (for example, the same `join`,
+`stitch`, and `smoothing` keys) and is merged before user recipes are applied.
+Integrators can copy snippets from this file into YAML/JSON recipes to toggle
+behaviour, e.g.:
 
 ```yaml
 join:
   enabled: false
+stitch:
+  enabled: true
+  method: linear
+  shoulder_points: 3
+  fallback_policy: preserve
+  windows:
+    - lower_nm: 400
+      upper_nm: 410
 smoothing:
   enabled: true
   window: 11
