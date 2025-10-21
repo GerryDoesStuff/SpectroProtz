@@ -703,7 +703,12 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             if not hidden and curve is self._selected_curve:
                 continue
 
-            sample_item.setPen(pg.mkPen(original_pen))
+            restored_pen = pg.mkPen(original_pen)
+            curve.setPen(restored_pen)
+            try:
+                sample_item.setPen(pg.mkPen(restored_pen))
+            except AttributeError:
+                sample_item.update()
             if hidden:
                 label_item.setText(
                     f'<span style="color:#7f7f7f;">{html.escape(legend_text)} (hidden)</span>'
@@ -779,11 +784,15 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         if metadata is None:
             return
         dataset, _, legend_text = metadata
-        curve.setPen(pg.mkPen(self._selection_pen))
+        selection_pen = pg.mkPen(self._selection_pen)
+        curve.setPen(selection_pen)
         entry = self._legend_entries.get(curve)
         if entry:
             sample_item, label_item = entry
-            sample_item.setPen(pg.mkPen(self._selection_pen))
+            try:
+                sample_item.setPen(pg.mkPen(selection_pen))
+            except AttributeError:
+                sample_item.update()
             escaped = html.escape(legend_text)
             highlighted = (
                 f'<span style="font-weight:600; color:{self._selection_color.name()};">{escaped}</span>'
@@ -799,11 +808,15 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         metadata = self._curve_metadata.get(self._selected_curve)
         if metadata is not None:
             _dataset, original_pen, legend_text = metadata
-            self._selected_curve.setPen(original_pen)
+            restored_pen = pg.mkPen(original_pen)
+            self._selected_curve.setPen(restored_pen)
             entry = self._legend_entries.get(self._selected_curve)
             if entry:
                 sample_item, label_item = entry
-                sample_item.setPen(pg.mkPen(original_pen))
+                try:
+                    sample_item.setPen(pg.mkPen(restored_pen))
+                except AttributeError:
+                    sample_item.update()
                 label_item.setText(html.escape(legend_text))
         self._selected_curve = None
         self._selected_label = None

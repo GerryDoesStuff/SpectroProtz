@@ -1,4 +1,5 @@
 import builtins
+import html
 import importlib
 import sys
 
@@ -193,3 +194,49 @@ def test_export_action_disabled_when_exporters_missing(monkeypatch, qt_app):
     finally:
         monkeypatch.setattr(builtins, "__import__", original_import, raising=False)
         importlib.reload(preview_widget)
+
+
+def test_legend_handles_missing_sample_pen(monkeypatch, qt_app):
+    sample_cls = pg.graphicsItems.LegendItem.ItemSample
+    monkeypatch.delattr(sample_cls, "setPen", raising=False)
+
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        spectrum = Spectrum(
+            wavelength=np.array([400.0, 500.0, 600.0], dtype=float),
+            intensity=np.array([0.1, 0.3, 0.2], dtype=float),
+            meta={"sample_id": "Legend test"},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        curve = next(iter(widget._curve_metadata))
+        dataset, original_pen, legend_text = widget._curve_metadata[curve]
+        entry = widget._legend_entries[curve]
+        sample_item, label_item = entry
+        assert not hasattr(sample_item, "setPen")
+
+        widget._select_curve(curve)
+        qt_app.processEvents()
+
+        assert widget._selected_curve is curve
+        assert widget._selection_color.name() in label_item.text
+        assert curve.opts["pen"].color().name() == widget._selection_color.name()
+
+        widget._hidden_labels.add(dataset.label)
+        widget._apply_hidden_visibility()
+        qt_app.processEvents()
+
+        assert "(hidden)" in label_item.text
+        assert "#7f7f7f" in label_item.text
+
+        widget._clear_selection()
+        qt_app.processEvents()
+
+        assert widget._selected_curve is None
+        assert html.escape(legend_text) in label_item.text
+        assert curve.opts["pen"].color().name() == original_pen.color().name()
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
