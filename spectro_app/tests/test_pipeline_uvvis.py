@@ -610,6 +610,89 @@ def test_preprocess_join_correction_emits_channel_without_detected_joins(monkeyp
     assert stats.get("indices") == []
 
 
+def test_preprocess_stitching_runs_before_join_detection(monkeypatch):
+    plugin = UvVisPlugin()
+    wl = np.linspace(400, 420, 5)
+    base_intensity = np.linspace(0.0, 1.0, wl.size)
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=base_intensity.copy(),
+        meta={"role": "sample"},
+    )
+
+    stitched_intensity = base_intensity + 10.0
+    stitched_regions = [
+        {
+            "lower_nm": 405.0,
+            "upper_nm": 415.0,
+            "applied": True,
+            "shoulder_count": 5,
+        }
+    ]
+
+    recorded: Dict[str, object] = {}
+
+    def fake_stitch_regions(
+        input_spec: Spectrum,
+        windows,
+        *,
+        shoulder_points=None,
+        method=None,
+    ) -> Spectrum:
+        meta = dict(input_spec.meta or {})
+        channels = dict(meta.get("channels") or {})
+        channels["stitched"] = stitched_intensity.copy()
+        meta["channels"] = channels
+        meta["stitched"] = True
+        meta["stitched_regions"] = stitched_regions
+        return Spectrum(
+            wavelength=np.asarray(input_spec.wavelength, dtype=float).copy(),
+            intensity=stitched_intensity.copy(),
+            meta=meta,
+        )
+
+    def fake_detect_joins(wavelength, intensity, **kwargs):
+        recorded["detect_intensity"] = np.asarray(intensity, dtype=float).copy()
+        recorded["detect_kwargs"] = kwargs
+        return [2]
+
+    def fake_correct_joins(spec: Spectrum, indices, **kwargs) -> Spectrum:
+        recorded["pre_correction_meta"] = dict(spec.meta)
+        channels = dict(spec.meta.get("channels") or {})
+        channels["joined"] = np.asarray(spec.intensity, dtype=float).copy()
+        spec.meta["channels"] = channels
+        return spec
+
+    monkeypatch.setattr(pipeline, "stitch_regions", fake_stitch_regions)
+    monkeypatch.setattr(pipeline, "detect_joins", fake_detect_joins)
+    monkeypatch.setattr(pipeline, "correct_joins", fake_correct_joins)
+
+    recipe = {
+        "blank": {"subtract": False, "require": False},
+        "stitch": {
+            "enabled": True,
+            "windows": [{"min_nm": 405.0, "max_nm": 415.0}],
+        },
+        "join": {"enabled": True, "window": 3},
+    }
+
+    processed = plugin.preprocess([spec], recipe)
+    assert recorded["detect_intensity"].shape == stitched_intensity.shape
+    assert np.allclose(recorded["detect_intensity"], stitched_intensity)
+
+    pre_meta = recorded["pre_correction_meta"]
+    assert pre_meta.get("stitch_method") == plugin.DEFAULT_STITCH_METHOD
+    assert pre_meta.get("stitch_shoulders") == plugin.DEFAULT_STITCH_SHOULDER_POINTS
+    assert pre_meta.get("stitch_fallback_policy") == plugin.DEFAULT_STITCH_FALLBACK_POLICY
+
+    assert processed and len(processed) == 1
+    result = processed[0]
+    assert result.meta.get("join_indices") == (2,)
+    channels = result.meta.get("channels") or {}
+    assert np.allclose(channels.get("stitched"), stitched_intensity)
+    assert np.allclose(channels.get("joined"), result.intensity)
+
+
 def test_despike_records_channel():
     wl = np.linspace(400, 440, 5)
     intensity = np.array([1.0, 1.05, 5.0, 1.1, 1.15])
