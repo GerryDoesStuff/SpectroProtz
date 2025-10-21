@@ -457,8 +457,12 @@ class QCDock(QDockWidget):
     def _ensure_constrained_layout_active(self):
         if not self._supports_constrained_layout or self._uses_constrained_layout:
             return
-        if self.canvas.size().isEmpty():
-            self._pending_constrained_layout_activation = True
+        width = self.canvas.width()
+        height = self.canvas.height()
+        if width <= 1 or height <= 1:
+            if not self._pending_constrained_layout_activation:
+                self._pending_constrained_layout_activation = True
+                QtCore.QTimer.singleShot(0, self._ensure_constrained_layout_active)
             return
         try:
             self.figure.set_layout_engine("constrained")
@@ -486,6 +490,10 @@ class QCDock(QDockWidget):
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.canvas and event.type() == QtCore.QEvent.Type.Resize:
-            if self._pending_constrained_layout_activation and not self.canvas.size().isEmpty():
+            if (
+                self._pending_constrained_layout_activation
+                and self.canvas.width() > 1
+                and self.canvas.height() > 1
+            ):
                 self._ensure_constrained_layout_active()
         return super().eventFilter(obj, event)
