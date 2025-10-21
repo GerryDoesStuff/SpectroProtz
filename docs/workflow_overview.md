@@ -113,7 +113,7 @@ target-specific calibration models: it collects standards, fits linear
 regressions with goodness-of-fit checks, calculates limits of detection and
 quantitation, and annotates QC rows and spectra with calibration payloads.
 Unknown samples receive predicted concentrations or explicit “no model” status.
-The calibration status and aggregates are cached for exporters.【F:spectro_app/plugins/uvvis/plugin.py†L1935-L3058】
+The calibration status and aggregates are cached for exporters.【F:spectro_app/plugins/uvvis/plugin.py†L3622-L4798】
 
 ### Export
 
@@ -125,10 +125,12 @@ without reshaping. The exporter generates figures (processed traces, join
 overlays, calibration plots, QC summaries), composes a textual audit trail, and
 writes an Excel workbook when a path is provided. Optional sidecar JSON recipes
 and PDF reports (embedding figures plus the audit narrative) are emitted when
-requested. The plugin closes Matplotlib handles, records export destinations and
-audit messages in the results context, and returns a `BatchResult` bundling
-processed spectra, QC tables, rendered figures, audit logs, and human-readable
-report text.【F:spectro_app/plugins/uvvis/plugin.py†L3059-L3503】
+requested. Setting `export.include_blanks` to `false` drops blank spectra and QC
+rows from workbooks, generated figures, and per-spectrum exports. The plugin
+closes Matplotlib handles, records export destinations and audit messages in the
+results context, and returns a `BatchResult` bundling processed spectra, QC
+tables, rendered figures, audit logs, and human-readable report
+text.【F:spectro_app/plugins/uvvis/plugin.py†L4799-L5019】
 
 ## Global processing toggles
 
