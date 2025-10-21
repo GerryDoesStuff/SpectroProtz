@@ -44,6 +44,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
     STAGE_LABELS: Dict[str, str] = {
         "raw": "Raw",
         "joined": "Joined",
+        "stitched": "Stitched",
         "despiked": "Despiked",
         "blanked": "Blanked",
         "baseline_corrected": "Baseline",
@@ -54,6 +55,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "smoothed",
         "despiked",
         "joined",
+        "stitched",
         "baseline_corrected",
         "blanked",
         "raw",
@@ -64,6 +66,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "blanked": QtCore.Qt.PenStyle.DashLine,
         "baseline_corrected": QtCore.Qt.PenStyle.DashDotLine,
         "joined": QtCore.Qt.PenStyle.DashDotDotLine,
+        "stitched": QtCore.Qt.PenStyle.DashLine,
         "despiked": QtCore.Qt.PenStyle.SolidLine,
         "smoothed": QtCore.Qt.PenStyle.SolidLine,
     }
