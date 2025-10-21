@@ -15,11 +15,19 @@ try:  # QtSvg is an optional dependency on some systems
 except ImportError:  # pragma: no cover - fallback when QtSvg is unavailable
     QSvgRenderer = None
 
+_EXPORTERS_AVAILABLE = False
+
 try:  # PyQtGraph provides the interactive plotting canvas
     import pyqtgraph as pg
-    import pyqtgraph.exporters  # noqa: F401  # ensure exporters namespace is initialised
 except Exception:  # pragma: no cover - headless / optional dependency missing
     pg = None  # type: ignore
+else:  # pragma: no branch - executed only when pyqtgraph import succeeds
+    try:
+        import pyqtgraph.exporters as _pg_exporters  # noqa: F401  # ensure exporters namespace is initialised
+    except Exception:  # pragma: no cover - exporters are optional
+        _EXPORTERS_AVAILABLE = False
+    else:
+        _EXPORTERS_AVAILABLE = True
 
 
 @dataclass
@@ -92,6 +100,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._selected_label: Optional[str] = None
         self._selection_color = QtGui.QColor("#d62728")
         self._selection_pen = pg.mkPen(color=self._selection_color, width=4)
+        self._exporters_available: bool = _EXPORTERS_AVAILABLE
 
         self._build_ui()
 
@@ -847,6 +856,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self)
         copy_action = menu.addAction("Copy data at cursor")
         export_action = menu.addAction("Export figure…")
+        if not self._exporters_available:
+            export_action.setEnabled(False)
+            export_action.setToolTip(
+                "PyQtGraph exporters could not be imported; figure export is disabled."
+            )
         reset_action = menu.addAction("Reset view")
         menu.addSeparator()
         hide_action = menu.addAction("Hide selected spectrum")
@@ -863,7 +877,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         if action == copy_action:
             self._copy_data_at_cursor()
         elif action == export_action:
-            self._export_figure()
+            if self._exporters_available:
+                self._export_figure()
+            else:
+                self._show_export_unavailable_message()
         elif action == reset_action:
             self._reset_view()
         elif action == hide_action:
@@ -914,8 +931,18 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         text = f"{x_val:.6g}\t{y_val:.6g}\t{dataset.label}\t{stage_label}"
         QtWidgets.QApplication.clipboard().setText(text)
 
+    def _show_export_unavailable_message(self) -> None:
+        QtWidgets.QMessageBox.warning(
+            self,
+            "Export unavailable",
+            "PyQtGraph exporters could not be imported. Figure export is disabled.",
+        )
+
     def _export_figure(self) -> None:
         if pg is None:  # pragma: no cover - only when dependency missing
+            return
+        if not self._exporters_available:
+            self._show_export_unavailable_message()
             return
         dialog = QtWidgets.QFileDialog(self)
         dialog.setWindowTitle("Export figure")
