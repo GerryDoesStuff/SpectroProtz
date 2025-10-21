@@ -49,6 +49,8 @@ def _sanitize_export_for_preview(recipe: dict) -> dict:
                 continue
             if key_text.startswith("recipe"):
                 continue
+            if key_text in {"text_summary_path", "text_report", "text_report_path"}:
+                continue
             sanitized_export[key] = value
     sanitized_export[PREVIEW_EXPORT_DISABLED_FLAG] = True
     sanitized["export"] = sanitized_export
