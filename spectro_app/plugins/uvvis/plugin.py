@@ -1957,10 +1957,73 @@ class UvVisPlugin(SpectroscopyPlugin):
             effective_domain = self._effective_domain(domain_cfg, spec)
             coerced = pipeline.coerce_domain(spec, effective_domain)
             processed = coerced
+            resolved_windows: list[Mapping[str, object]] | None = None
+            diagnostics: list[dict[str, object]] = []
+            if stitch_enabled:
+                resolved_windows = self._resolve_stitch_windows(
+                    stitch_windows_cfg, coerced
+                )
+                stitched = pipeline.stitch_regions(
+                    coerced,
+                    resolved_windows,
+                    shoulder_points=stitch_points_resolved,
+                    method=stitch_method_resolved,
+                )
+                diagnostics = [
+                    dict(entry)
+                    for entry in (stitched.meta.get("stitched_regions") or [])
+                    if isinstance(entry, Mapping)
+                ]
+                if resolved_windows:
+                    stitch_attempted_specs += 1
+                    stitch_windows_attempted += len(diagnostics)
+                    stitch_windows_applied += sum(
+                        1 for entry in diagnostics if entry.get("applied")
+                    )
+                    stitch_windows_fallback += sum(
+                        1 for entry in diagnostics if not entry.get("applied")
+                    )
+                revert_to_raw = False
+                if (
+                    stitch_policy_resolved == "raw"
+                    and resolved_windows
+                    and diagnostics
+                    and not any(entry.get("applied") for entry in diagnostics)
+                ):
+                    revert_to_raw = True
+                if revert_to_raw:
+                    raw_meta = dict(coerced.meta or {})
+                    existing_regions = raw_meta.get("stitched_regions")
+                    combined_regions: List[Dict[str, Any]] = []
+                    if isinstance(existing_regions, list):
+                        combined_regions.extend(
+                            [dict(entry) for entry in existing_regions if isinstance(entry, Mapping)]
+                        )
+                    combined_regions.extend(diagnostics)
+                    if combined_regions:
+                        raw_meta["stitched_regions"] = combined_regions
+                    raw_meta["stitched"] = bool(raw_meta.get("stitched", False)) and any(
+                        entry.get("applied") for entry in combined_regions
+                    )
+                    raw_meta["stitch_fallback_policy"] = stitch_policy_resolved
+                    raw_meta["stitch_method"] = stitch_method_resolved
+                    raw_meta["stitch_shoulders"] = stitch_points_resolved
+                    processed = Spectrum(
+                        wavelength=np.asarray(coerced.wavelength, dtype=float).copy(),
+                        intensity=np.asarray(coerced.intensity, dtype=float).copy(),
+                        meta=raw_meta,
+                    )
+                else:
+                    stitched.meta["stitch_fallback_policy"] = stitch_policy_resolved
+                    stitched.meta["stitch_method"] = stitch_method_resolved
+                    stitched.meta["stitch_shoulders"] = stitch_points_resolved
+                    processed = stitched
             joins: list[int] = []
             if join_cfg.get("enabled"):
                 join_window = int(join_cfg.get("window", 10))
-                join_windows = self._resolve_join_windows(join_cfg.get("windows"), processed)
+                join_windows = self._resolve_join_windows(
+                    join_cfg.get("windows"), processed
+                )
                 joins = pipeline.detect_joins(
                     processed.wavelength,
                     processed.intensity,
@@ -2005,65 +2068,6 @@ class UvVisPlugin(SpectroscopyPlugin):
                     rng_seed=despike_cfg.get("rng_seed"),
                     exclusion_windows=exclusion_windows,
                 )
-            if stitch_enabled:
-                resolved_windows = self._resolve_stitch_windows(
-                    stitch_windows_cfg, processed
-                )
-                stitched = pipeline.stitch_regions(
-                    processed,
-                    resolved_windows,
-                    shoulder_points=stitch_points_resolved,
-                    method=stitch_method_resolved,
-                )
-                diagnostics = [
-                    dict(entry)
-                    for entry in (stitched.meta.get("stitched_regions") or [])
-                    if isinstance(entry, Mapping)
-                ]
-                if resolved_windows:
-                    stitch_attempted_specs += 1
-                    stitch_windows_attempted += len(diagnostics)
-                    stitch_windows_applied += sum(
-                        1 for entry in diagnostics if entry.get("applied")
-                    )
-                    stitch_windows_fallback += sum(
-                        1 for entry in diagnostics if not entry.get("applied")
-                    )
-                revert_to_raw = False
-                if (
-                    stitch_policy_resolved == "raw"
-                    and resolved_windows
-                    and diagnostics
-                    and not any(entry.get("applied") for entry in diagnostics)
-                ):
-                    revert_to_raw = True
-                if revert_to_raw:
-                    raw_meta = dict(processed.meta or {})
-                    existing_regions = raw_meta.get("stitched_regions")
-                    combined_regions: List[Dict[str, Any]] = []
-                    if isinstance(existing_regions, list):
-                        combined_regions.extend(
-                            [dict(entry) for entry in existing_regions if isinstance(entry, Mapping)]
-                        )
-                    combined_regions.extend(diagnostics)
-                    if combined_regions:
-                        raw_meta["stitched_regions"] = combined_regions
-                    raw_meta["stitched"] = bool(raw_meta.get("stitched", False)) and any(
-                        entry.get("applied") for entry in combined_regions
-                    )
-                    raw_meta["stitch_fallback_policy"] = stitch_policy_resolved
-                    raw_meta["stitch_method"] = stitch_method_resolved
-                    raw_meta["stitch_shoulders"] = stitch_points_resolved
-                    processed = Spectrum(
-                        wavelength=np.asarray(processed.wavelength, dtype=float).copy(),
-                        intensity=np.asarray(processed.intensity, dtype=float).copy(),
-                        meta=raw_meta,
-                    )
-                else:
-                    stitched.meta["stitch_fallback_policy"] = stitch_policy_resolved
-                    stitched.meta["stitch_method"] = stitch_method_resolved
-                    stitched.meta["stitch_shoulders"] = stitch_points_resolved
-                    processed = stitched
             processed.meta["join_indices"] = tuple(joins)
             stage_one.append(processed)
 
