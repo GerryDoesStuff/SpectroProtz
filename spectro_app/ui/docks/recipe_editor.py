@@ -701,6 +701,58 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.addRow("Poly order", self.smooth_poly)
         layout.addWidget(smoothing_section)
 
+        # --- Peak detection ---
+        peaks_section = CollapsibleSection("Peak detection")
+        peaks_form = QFormLayout()
+        peaks_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        peaks_section.setContentLayout(peaks_form)
+
+        self.peaks_enable = QCheckBox("Enable peak detection")
+        self.peaks_enable.setToolTip(
+            "Detect prominent spectral peaks and report their wavelength, height,"
+            " and width statistics in analysis outputs."
+        )
+        self.peaks_prominence = QDoubleSpinBox()
+        self.peaks_prominence.setDecimals(4)
+        self.peaks_prominence.setRange(0.0, 1e6)
+        self.peaks_prominence.setSingleStep(0.01)
+        self.peaks_prominence.setValue(0.01)
+        self.peaks_prominence.setToolTip(
+            "Minimum prominence (absorbance) a peak must exceed. Increase when"
+            " noise triggers false positives; decrease to capture subtle peaks."
+        )
+        self.peaks_min_distance = QSpinBox()
+        self.peaks_min_distance.setRange(1, 100000)
+        self.peaks_min_distance.setValue(5)
+        self.peaks_min_distance.setToolTip(
+            "Minimum separation between detected peaks, expressed in data"
+            " points. Raise to merge tightly clustered maxima."
+        )
+        self.peaks_max_peaks = QSpinBox()
+        self.peaks_max_peaks.setRange(0, 100000)
+        self.peaks_max_peaks.setValue(5)
+        self.peaks_max_peaks.setToolTip(
+            "Limit on the number of peaks reported per spectrum. Set to zero to"
+            " disable reporting while keeping detection active."
+        )
+        self.peaks_height = QLineEdit()
+        self.peaks_height.setPlaceholderText("Optional minimum height")
+        self.peaks_height.setClearButtonEnabled(True)
+        self.peaks_height.setToolTip(
+            "Optional absolute intensity threshold. Leave blank to accept any"
+            " height meeting the prominence criterion."
+        )
+        height_validator = QDoubleValidator(0.0, 1e12, 6, self.peaks_height)
+        height_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.peaks_height.setValidator(height_validator)
+
+        peaks_form.addRow(self.peaks_enable)
+        peaks_form.addRow("Prominence", self.peaks_prominence)
+        peaks_form.addRow("Min distance", self.peaks_min_distance)
+        peaks_form.addRow("Max peaks", self.peaks_max_peaks)
+        peaks_form.addRow("Height", self.peaks_height)
+        layout.addWidget(peaks_section)
+
         # --- QC / Drift ---
         qc_section = CollapsibleSection("Quality control – drift limits")
         qc_layout = QVBoxLayout()
@@ -816,6 +868,7 @@ class RecipeEditorDock(QDockWidget):
             self._update_baseline_anchor_buttons
         )
         self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.peaks_enable.toggled.connect(self._update_feature_controls_enabled)
         self.despike_enable.toggled.connect(self._update_feature_controls_enabled)
         self.join_enable.toggled.connect(self._update_feature_controls_enabled)
         self.blank_subtract.toggled.connect(self._update_feature_controls_enabled)
@@ -825,6 +878,11 @@ class RecipeEditorDock(QDockWidget):
             self.smooth_enable.toggled,
             self.smooth_window.valueChanged,
             self.smooth_poly.valueChanged,
+            self.peaks_enable.toggled,
+            self.peaks_prominence.valueChanged,
+            self.peaks_min_distance.valueChanged,
+            self.peaks_max_peaks.valueChanged,
+            self.peaks_height.textChanged,
             self.baseline_lambda.valueChanged,
             self.baseline_p.valueChanged,
             self.baseline_niter.valueChanged,
@@ -943,6 +1001,39 @@ class RecipeEditorDock(QDockWidget):
             self.smooth_poly.setValue(
                 self._safe_int(smoothing.get("polyorder"), self.smooth_poly.value())
             )
+
+            features_cfg = (
+                params.get("features", {})
+                if isinstance(params.get("features"), dict)
+                else {}
+            )
+            peaks_cfg_raw = features_cfg.get("peaks") if isinstance(features_cfg, Mapping) else None
+            peaks_cfg = peaks_cfg_raw if isinstance(peaks_cfg_raw, Mapping) else {}
+            peaks_enabled = bool(peaks_cfg.get("enabled", False))
+            self.peaks_enable.setChecked(peaks_enabled)
+            self.peaks_prominence.setValue(
+                self._safe_float(
+                    peaks_cfg.get("prominence"),
+                    self.peaks_prominence.value(),
+                )
+            )
+            self.peaks_min_distance.setValue(
+                self._safe_int(
+                    peaks_cfg.get("min_distance", peaks_cfg.get("distance")),
+                    self.peaks_min_distance.value(),
+                )
+            )
+            self.peaks_max_peaks.setValue(
+                self._safe_int(
+                    peaks_cfg.get("max_peaks", peaks_cfg.get("num_peaks")),
+                    self.peaks_max_peaks.value(),
+                )
+            )
+            height_value = peaks_cfg.get("height")
+            if height_value in (None, ""):
+                self.peaks_height.setText("")
+            else:
+                self.peaks_height.setText(str(height_value))
 
             baseline_cfg = (
                 params.get("baseline", {}) if isinstance(params.get("baseline"), dict) else {}
@@ -1324,6 +1415,12 @@ class RecipeEditorDock(QDockWidget):
         smoothing_enabled = self.smooth_enable.isChecked()
         self.smooth_window.setEnabled(smoothing_enabled)
         self.smooth_poly.setEnabled(smoothing_enabled)
+
+        peaks_enabled = self.peaks_enable.isChecked()
+        self.peaks_prominence.setEnabled(peaks_enabled)
+        self.peaks_min_distance.setEnabled(peaks_enabled)
+        self.peaks_max_peaks.setEnabled(peaks_enabled)
+        self.peaks_height.setEnabled(peaks_enabled)
 
         despike_enabled = self.despike_enable.isChecked()
         self.despike_window.setEnabled(despike_enabled)
@@ -1910,6 +2007,30 @@ class RecipeEditorDock(QDockWidget):
                 "polyorder": int(self.smooth_poly.value()),
             }
         )
+
+        features_cfg = self._ensure_dict(params, "features")
+        peaks_enabled = self.peaks_enable.isChecked()
+        if peaks_enabled:
+            peak_payload: dict[str, object] = {
+                "enabled": True,
+                "prominence": float(self.peaks_prominence.value()),
+                "min_distance": int(self.peaks_min_distance.value()),
+                "max_peaks": int(self.peaks_max_peaks.value()),
+            }
+            height_text = self.peaks_height.text().strip()
+            if height_text:
+                try:
+                    peak_payload["height"] = float(height_text)
+                except ValueError:
+                    peak_payload["height"] = height_text
+            else:
+                peak_payload["height"] = None
+            features_cfg["peaks"] = peak_payload
+        else:
+            features_cfg.pop("peaks", None)
+
+        if not features_cfg:
+            params.pop("features", None)
 
         despike_cfg = self._ensure_dict(params, "despike")
         despike_enabled = self.despike_enable.isChecked()

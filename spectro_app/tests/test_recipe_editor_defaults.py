@@ -96,10 +96,67 @@ def test_despike_exclusion_roundtrip(qt_app):
         qt_app.processEvents()
 
 
+def test_peak_detection_roundtrip(qt_app):
+    dock = RecipeEditorDock()
+    try:
+        dock.peaks_enable.setChecked(True)
+        dock.peaks_prominence.setValue(0.25)
+        dock.peaks_min_distance.setValue(7)
+        dock.peaks_max_peaks.setValue(3)
+        dock.peaks_height.setText("1.5")
+        qt_app.processEvents()
+
+        dock._update_model_from_ui(force=True)
+        features = dock.recipe.params.get("features", {})
+        peaks = features.get("peaks")
+        assert isinstance(peaks, dict)
+        assert peaks.get("enabled") is True
+        assert peaks.get("prominence") == pytest.approx(0.25)
+        assert peaks.get("min_distance") == 7
+        assert peaks.get("max_peaks") == 3
+        assert peaks.get("height") == pytest.approx(1.5)
+
+        recipe_dict = dock.recipe_dict()
+        dock.set_recipe(recipe_dict)
+        qt_app.processEvents()
+        assert dock.peaks_enable.isChecked() is True
+        assert dock.peaks_prominence.value() == pytest.approx(0.25)
+        assert dock.peaks_min_distance.value() == 7
+        assert dock.peaks_max_peaks.value() == 3
+        assert dock.peaks_height.text() == "1.5"
+
+        dock.peaks_height.clear()
+        qt_app.processEvents()
+        dock._update_model_from_ui(force=True)
+        features = dock.recipe.params.get("features", {})
+        peaks = features.get("peaks")
+        assert isinstance(peaks, dict)
+        assert peaks.get("height") is None
+
+        dock.peaks_enable.setChecked(False)
+        qt_app.processEvents()
+        dock._update_model_from_ui(force=True)
+        features_after_disable = dock.recipe.params.get("features")
+        assert not features_after_disable or "peaks" not in features_after_disable
+    finally:
+        dock.deleteLater()
+        qt_app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("checkbox_attr", "widget_attrs", "expect_enabled_when_checked"),
     [
         ("smooth_enable", ["smooth_window", "smooth_poly"], True),
+        (
+            "peaks_enable",
+            [
+                "peaks_prominence",
+                "peaks_min_distance",
+                "peaks_max_peaks",
+                "peaks_height",
+            ],
+            True,
+        ),
         ("despike_enable", ["despike_window", "despike_zscore"], True),
         (
             "despike_enable",

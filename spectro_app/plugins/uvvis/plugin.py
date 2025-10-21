@@ -2679,6 +2679,8 @@ class UvVisPlugin(SpectroscopyPlugin):
         intensity: np.ndarray,
         peak_cfg: Dict[str, object],
     ) -> List[Dict[str, float]]:
+        if not bool(peak_cfg.get("enabled", True)):
+            return []
         if intensity.size < 3:
             return []
         prominence = float(peak_cfg.get("prominence", 0.01))
