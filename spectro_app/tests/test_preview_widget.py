@@ -270,3 +270,48 @@ def test_legend_handles_missing_sample_pen(monkeypatch, qt_app):
     finally:
         widget.deleteLater()
         qt_app.processEvents()
+
+
+def test_click_selected_curve_clears_selection(monkeypatch, qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        spectrum = Spectrum(
+            wavelength=np.array([400.0, 500.0, 600.0], dtype=float),
+            intensity=np.array([0.1, 0.2, 0.3], dtype=float),
+            meta={"sample_id": "Selectable"},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        curve = next(iter(widget._curve_metadata))
+        widget._select_curve(curve)
+        assert widget._selected_curve is curve
+        assert widget._selected_label == "Selectable"
+
+        scene = widget.plot.scene()
+        monkeypatch.setattr(scene, "items", lambda pos: [curve])
+
+        class FakeEvent:
+            def __init__(self) -> None:
+                self.accepted = False
+
+            def button(self) -> QtCore.Qt.MouseButton:
+                return QtCore.Qt.MouseButton.LeftButton
+
+            def scenePos(self) -> QtCore.QPointF:
+                return QtCore.QPointF(0, 0)
+
+            def accept(self) -> None:
+                self.accepted = True
+
+        event = FakeEvent()
+        widget._on_mouse_clicked(event)
+        qt_app.processEvents()
+
+        assert event.accepted is True
+        assert widget._selected_curve is None
+        assert widget._selected_label is None
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
