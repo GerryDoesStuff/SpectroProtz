@@ -701,7 +701,10 @@ def test_uvvis_derivative_respects_recipe_window():
 
 def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     plugin = UvVisPlugin()
-    spec = _mock_spectrum()
+    spec_a = _mock_spectrum()
+    spec_b = _mock_spectrum()
+    spec_b.meta = dict(spec_b.meta)
+    spec_b.meta["sample_id"] = "Sample-2"
     recipe = {
         "export": {
             "path": str(tmp_path / "uvvis_wide.xlsx"),
@@ -709,7 +712,7 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
         }
     }
 
-    processed, qc_rows = plugin.analyze([spec], recipe)
+    processed, qc_rows = plugin.analyze([spec_a, spec_b], recipe)
     plugin.export(processed, qc_rows, recipe)
 
     workbook_path = Path(recipe["export"]["path"])
@@ -725,17 +728,37 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     assert header[0] == "wavelength"
     assert all(isinstance(name, str) for name in header[1:])
 
-    sample_meta = processed[0].meta or {}
-    sample_label_value = excel_writer._clean_value(
-        sample_meta.get("sample_id")
-        or sample_meta.get("channel")
-        or sample_meta.get("blank_id")
-        or "spec_0"
-    )
-    if sample_label_value in (None, ""):
-        sample_label_value = "spec_0"
-    sample_label = str(sample_label_value)
-    assert all(name.startswith(f"{sample_label}:") for name in header[1:])
+    sample_labels = []
+    for idx, spec in enumerate(processed):
+        sample_meta = spec.meta or {}
+        sample_label_value = excel_writer._clean_value(
+            sample_meta.get("sample_id")
+            or sample_meta.get("channel")
+            or sample_meta.get("blank_id")
+            or f"spec_{idx}"
+        )
+        if sample_label_value in (None, ""):
+            sample_label_value = f"spec_{idx}"
+        sample_labels.append(str(sample_label_value))
+
+    columns = header[1:]
+    stage_to_columns: dict[str, list[str]] = {}
+    for column in columns:
+        if ":" in column:
+            _, stage = column.split(":", 1)
+        else:
+            stage = ""
+        stage_to_columns.setdefault(stage, []).append(column)
+
+    assert "processed" in stage_to_columns
+    ordered_stages = list(stage_to_columns.keys())
+    assert ordered_stages[0] == "processed"
+    for stage, stage_columns in stage_to_columns.items():
+        if stage:
+            expected = [f"{sample}:{stage}" for sample in sample_labels]
+        else:
+            expected = sample_labels[:]
+        assert stage_columns == expected
 
     data_rows = [list(row) for row in ws_processed.iter_rows(min_row=2, values_only=True)]
     assert len(data_rows) == len(expected_rows)
