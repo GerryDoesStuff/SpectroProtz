@@ -1904,3 +1904,22 @@ def test_compute_peak_metrics_uses_quadratic_refinement():
     # Quadratic refinement should adjust the result away from the discrete grid.
     assert abs(peak["wavelength"] - peak["raw_wavelength"]) > 0
     assert abs(peak["fwhm"] - peak["raw_fwhm"]) > 0
+
+
+def test_analyze_skips_disabled_peaks():
+    wl = np.linspace(400.0, 500.0, 201)
+    peak_center = 450.0
+    intensity = np.exp(-0.5 * ((wl - peak_center) / 2.5) ** 2)
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample"})
+
+    plugin_enabled = UvVisPlugin()
+    recipe_enabled = {"blank": {"subtract": False}, "features": {"peaks": {"enabled": True}}}
+    processed_enabled, qc_enabled = plugin_enabled.analyze([spec], recipe_enabled)
+    assert qc_enabled and qc_enabled[0]["peak_metrics"], "Expected peaks when enabled"
+    assert processed_enabled and processed_enabled[0].meta.get("features", {}).get("peaks")
+
+    plugin_disabled = UvVisPlugin()
+    recipe_disabled = {"blank": {"subtract": False}, "features": {"peaks": {"enabled": False}}}
+    processed_disabled, qc_disabled = plugin_disabled.analyze([spec], recipe_disabled)
+    assert qc_disabled and qc_disabled[0]["peak_metrics"] == []
+    assert processed_disabled and processed_disabled[0].meta.get("features", {}).get("peaks") == []
