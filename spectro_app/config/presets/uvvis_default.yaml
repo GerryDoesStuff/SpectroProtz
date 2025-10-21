@@ -14,6 +14,12 @@ params:
         - min_nm: 340.0
           max_nm: 360.0
           spikes: 1
+  stitch:
+    enabled: false
+    shoulder_points: 5
+    method: linear
+    fallback_policy: preserve
+    windows: []
   qc:
     quiet_window:
       min: 850.0

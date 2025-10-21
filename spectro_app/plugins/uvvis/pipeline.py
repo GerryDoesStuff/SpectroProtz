@@ -2548,6 +2548,43 @@ def average_replicates(
     outputs: List[Spectrum] = []
     mapping: Dict[Tuple[str, str], Spectrum] = {}
 
+    def _merge_stitch_meta(target_meta: Dict[str, Any], members_seq: Sequence[Spectrum]) -> None:
+        combined_regions: List[Dict[str, Any]] = []
+        stitched_flag = bool(target_meta.get("stitched"))
+        fallback_policy = target_meta.get("stitch_fallback_policy")
+        method_val = target_meta.get("stitch_method")
+        shoulders_val = target_meta.get("stitch_shoulders")
+
+        for member in members_seq:
+            member_meta = member.meta if isinstance(member.meta, Mapping) else {}
+            regions = member_meta.get("stitched_regions") if isinstance(member_meta, Mapping) else None
+            if isinstance(regions, list):
+                combined_regions.extend(
+                    [dict(entry) for entry in regions if isinstance(entry, Mapping)]
+                )
+            if member_meta.get("stitched"):
+                stitched_flag = True
+            if fallback_policy is None and member_meta.get("stitch_fallback_policy") is not None:
+                fallback_policy = member_meta.get("stitch_fallback_policy")
+            if method_val is None and member_meta.get("stitch_method") is not None:
+                method_val = member_meta.get("stitch_method")
+            if shoulders_val is None and member_meta.get("stitch_shoulders") is not None:
+                shoulders_val = member_meta.get("stitch_shoulders")
+
+        if combined_regions:
+            target_meta["stitched_regions"] = combined_regions
+        elif target_meta.get("stitched_regions") in (None, []):
+            target_meta.pop("stitched_regions", None)
+
+        if stitched_flag:
+            target_meta["stitched"] = True
+        if fallback_policy is not None:
+            target_meta["stitch_fallback_policy"] = fallback_policy
+        if method_val is not None:
+            target_meta["stitch_method"] = method_val
+        if shoulders_val is not None:
+            target_meta["stitch_shoulders"] = shoulders_val
+
     for key, members in groups.items():
         sources = [
             member.meta.get("source_file")
@@ -2572,6 +2609,7 @@ def average_replicates(
                 }
             ]
             intensity = np.asarray(member.intensity, dtype=float).copy()
+            _merge_stitch_meta(meta, [member])
             meta["channels"] = _average_replicate_channels([member], intensity)
             averaged = Spectrum(
                 wavelength=np.asarray(member.wavelength, dtype=float).copy(),
@@ -2653,6 +2691,7 @@ def average_replicates(
                 for idx, member in enumerate(members)
             ]
             included_members = [member for flag, member in zip(included_mask, members) if flag]
+            _merge_stitch_meta(meta, included_members)
             meta["channels"] = _average_replicate_channels(included_members, averaged_intensity)
             averaged = Spectrum(wavelength=ref_wl.copy(), intensity=averaged_intensity, meta=meta)
 
