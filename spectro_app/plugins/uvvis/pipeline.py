@@ -10,6 +10,7 @@ from scipy import sparse
 from scipy.ndimage import median_filter, uniform_filter1d
 from scipy.signal import savgol_filter
 from scipy.sparse.linalg import spsolve
+from numpy.polynomial import Polynomial
 
 from spectro_app.engine.plugin_api import Spectrum
 
@@ -20,6 +21,8 @@ __all__ = [
     "detect_joins",
     "correct_joins",
     "normalise_exclusion_windows",
+    "normalise_stitch_windows",
+    "stitch_regions",
     "despike_spectrum",
     "smooth_spectrum",
     "average_replicates",
@@ -792,6 +795,112 @@ def normalise_exclusion_windows(exclusions_cfg: object) -> List[Dict[str, float 
     return normalised
 
 
+def normalise_stitch_windows(windows_cfg: object) -> List[Dict[str, Any]]:
+    """Normalise stitch window configuration preserving auxiliary options."""
+
+    if windows_cfg is None:
+        return []
+
+    windows_iterable: object
+    if isinstance(windows_cfg, Mapping):
+        recognised_keys = {
+            "min",
+            "max",
+            "lower",
+            "upper",
+            "min_nm",
+            "max_nm",
+            "lower_nm",
+            "upper_nm",
+        }
+        if any(key in windows_cfg for key in recognised_keys):
+            windows_iterable = [windows_cfg]
+        else:
+            windows_iterable = windows_cfg.get("windows")
+            if windows_iterable is None:
+                windows_iterable = windows_cfg.get("regions")
+            if windows_iterable is None:
+                return []
+    else:
+        windows_iterable = windows_cfg
+
+    if not isinstance(windows_iterable, Sequence) or isinstance(windows_iterable, (str, bytes)):
+        return []
+
+    recognised_bounds = {
+        "min",
+        "max",
+        "lower",
+        "upper",
+        "min_nm",
+        "max_nm",
+        "lower_nm",
+        "upper_nm",
+    }
+
+    normalised: List[Dict[str, Any]] = []
+    for entry in windows_iterable:
+        if entry is None:
+            continue
+
+        extras: Dict[str, Any] = {}
+        lo: object | None
+        hi: object | None
+
+        if isinstance(entry, Mapping):
+            lo = (
+                entry.get("min_nm")
+                if entry.get("min_nm") is not None
+                else entry.get("lower_nm")
+            )
+            if lo is None:
+                lo = entry.get("min")
+            if lo is None:
+                lo = entry.get("lower")
+            hi = (
+                entry.get("max_nm")
+                if entry.get("max_nm") is not None
+                else entry.get("upper_nm")
+            )
+            if hi is None:
+                hi = entry.get("max")
+            if hi is None:
+                hi = entry.get("upper")
+            extras = {k: v for k, v in entry.items() if k not in recognised_bounds}
+        elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)):
+            data = list(entry)
+            extras = {}
+            if data and isinstance(data[-1], Mapping) and len(data) >= 3:
+                extras = {k: v for k, v in data[-1].items()}
+                data = data[:-1]
+            lo = data[0] if data else None
+            hi = data[1] if len(data) > 1 else None
+        else:
+            continue
+
+        try:
+            lower_val = float(lo) if lo is not None else None
+        except (TypeError, ValueError):
+            lower_val = None
+        try:
+            upper_val = float(hi) if hi is not None else None
+        except (TypeError, ValueError):
+            upper_val = None
+
+        if lower_val is not None and upper_val is not None and lower_val > upper_val:
+            lower_val, upper_val = upper_val, lower_val
+
+        if lower_val is None and upper_val is None:
+            continue
+
+        record: Dict[str, Any] = dict(extras)
+        record["lower_nm"] = lower_val
+        record["upper_nm"] = upper_val
+        normalised.append(record)
+
+    return normalised
+
+
 def detect_joins(
     wavelength: Sequence[float],
     intensity: Sequence[float],
@@ -1554,6 +1663,202 @@ def correct_joins(
     return Spectrum(
         wavelength=np.asarray(spec.wavelength, dtype=float).copy(),
         intensity=np.asarray(corrected, dtype=float).copy(),
+        meta=meta,
+    )
+
+
+def stitch_regions(
+    spec: Spectrum,
+    windows: Sequence[Mapping[str, Any]] | Sequence[Sequence[object]] | None,
+    *,
+    shoulder_points: int = 5,
+    method: str = "linear",
+) -> Spectrum:
+    """Replace detector join gaps by fitting shoulder samples around windows."""
+
+    normalised_windows = normalise_stitch_windows(windows)
+    x = np.asarray(spec.wavelength, dtype=float)
+    y = np.asarray(spec.intensity, dtype=float)
+
+    if not normalised_windows:
+        return Spectrum(
+            wavelength=x.copy(),
+            intensity=y.copy(),
+            meta=dict(spec.meta),
+        )
+
+    def _resolve_degree(name: str) -> int:
+        lowered = name.strip().lower()
+        if lowered in {"linear", "line", "lin"}:
+            return 1
+        if lowered in {"quadratic", "poly2", "degree2"}:
+            return 2
+        if lowered in {"cubic", "poly3", "degree3"}:
+            return 3
+        if lowered.startswith("poly") and lowered[4:].isdigit():
+            deg_val = int(lowered[4:])
+            if deg_val < 1:
+                raise ValueError("Polynomial degree must be at least 1 for stitching")
+            return deg_val
+        raise ValueError(f"Unsupported stitching method '{name}'")
+
+    corrected = y.copy()
+    changed_mask = np.zeros_like(y, dtype=bool)
+    diagnostics: List[Dict[str, Any]] = []
+
+    default_points = max(0, int(shoulder_points))
+    finite_mask = np.isfinite(x) & np.isfinite(y)
+
+    for entry in normalised_windows:
+        window_meta = dict(entry)
+        lower_val = entry.get("lower_nm")
+        upper_val = entry.get("upper_nm")
+
+        # Ensure stored bounds are float | None
+        lower_bound = float(lower_val) if lower_val is not None else None
+        upper_bound = float(upper_val) if upper_val is not None else None
+
+        window_method_raw = entry.get("method", method)
+        window_method = str(window_method_raw)
+        try:
+            degree = _resolve_degree(window_method)
+        except ValueError as exc:
+            diagnostics.append(
+                {
+                    **window_meta,
+                    "lower_nm": lower_bound,
+                    "upper_nm": upper_bound,
+                    "method": window_method,
+                    "original_min": None,
+                    "original_max": None,
+                    "shoulders_used": {
+                        "left_nm": [],
+                        "right_nm": [],
+                        "left_intensity": [],
+                        "right_intensity": [],
+                    },
+                    "shoulder_counts": {"left": 0, "right": 0},
+                    "fallback_reason": str(exc),
+                    "applied": False,
+                }
+            )
+            continue
+
+        points_raw = (
+            entry.get("shoulder_points")
+            if entry.get("shoulder_points") is not None
+            else entry.get("points")
+        )
+        if points_raw is None:
+            requested_points = default_points
+        else:
+            try:
+                requested_points = int(points_raw)
+            except (TypeError, ValueError):
+                requested_points = default_points
+        if requested_points < 0:
+            requested_points = 0
+
+        window_mask = np.ones_like(x, dtype=bool)
+        if lower_bound is not None:
+            window_mask &= x >= lower_bound
+        if upper_bound is not None:
+            window_mask &= x <= upper_bound
+
+        indices = np.where(window_mask)[0]
+        original_values = y[indices] if indices.size else np.array([], dtype=float)
+
+        fallback_reason: str | None = None
+        applied = False
+
+        left_indices = np.array([], dtype=int)
+        right_indices = np.array([], dtype=int)
+
+        if indices.size:
+            window_min = float(np.nanmin(x[indices]))
+            window_max = float(np.nanmax(x[indices]))
+
+            left_candidates = np.where((x < window_min) & finite_mask)[0]
+            right_candidates = np.where((x > window_max) & finite_mask)[0]
+
+            if requested_points > 0:
+                left_indices = left_candidates[-requested_points:]
+                right_indices = right_candidates[:requested_points]
+            else:
+                left_indices = np.array([], dtype=int)
+                right_indices = np.array([], dtype=int)
+
+            support_indices = np.concatenate((left_indices, right_indices))
+            if support_indices.size:
+                # Ensure unique and sorted by wavelength
+                unique_support = np.unique(support_indices)
+                support_indices = unique_support[np.argsort(x[unique_support])]
+            shoulder_counts = {"left": int(left_indices.size), "right": int(right_indices.size)}
+
+            if support_indices.size < degree + 1:
+                fallback_reason = (
+                    "insufficient shoulder samples for degree"
+                    if support_indices.size
+                    else "no shoulder samples"
+                )
+            else:
+                try:
+                    poly = Polynomial.fit(x[support_indices], y[support_indices], degree)
+                    corrected_values = np.asarray(poly(x[indices]), dtype=float)
+                except Exception as exc:  # pragma: no cover - numerical edge cases
+                    fallback_reason = f"fit failure: {exc}"[:200]
+                else:
+                    corrected[indices] = corrected_values
+                    changed_mask[indices] = True
+                    applied = True
+        else:
+            shoulder_counts = {"left": 0, "right": 0}
+            fallback_reason = "no samples in window"
+
+        diagnostics.append(
+            {
+                **window_meta,
+                "lower_nm": lower_bound,
+                "upper_nm": upper_bound,
+                "method": window_method,
+                "degree": degree,
+                "requested_shoulder_points": requested_points,
+                "original_min": float(np.nanmin(original_values))
+                if original_values.size
+                else None,
+                "original_max": float(np.nanmax(original_values))
+                if original_values.size
+                else None,
+                "shoulders_used": {
+                    "left_nm": x[left_indices].astype(float).tolist(),
+                    "right_nm": x[right_indices].astype(float).tolist(),
+                    "left_intensity": y[left_indices].astype(float).tolist()
+                    if left_indices.size
+                    else [],
+                    "right_intensity": y[right_indices].astype(float).tolist()
+                    if right_indices.size
+                    else [],
+                },
+                "shoulder_counts": shoulder_counts,
+                "fallback_reason": fallback_reason,
+                "applied": applied,
+            }
+        )
+
+    meta = dict(spec.meta)
+    if np.any(changed_mask):
+        meta.setdefault("stitched", True)
+    existing_regions = meta.get("stitched_regions")
+    if isinstance(existing_regions, list):
+        combined_regions = list(existing_regions)
+        combined_regions.extend(diagnostics)
+        meta["stitched_regions"] = combined_regions
+    else:
+        meta["stitched_regions"] = diagnostics
+    _update_channel(meta, "stitched", corrected, overwrite=True)
+    return Spectrum(
+        wavelength=x.copy(),
+        intensity=corrected.astype(float, copy=True),
         meta=meta,
     )
 
