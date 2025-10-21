@@ -110,8 +110,16 @@ def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], Lis
         return ["wavelength"], []
 
     wavelength_grid: np.ndarray | None = None
-    column_order: List[str] = []
     column_data: Dict[str, Dict[float, Any]] = {}
+    channel_buckets: Dict[str, List[str]] = {}
+    bucket_insertion_order: List[str] = []
+
+    def _ensure_bucket(key: str) -> None:
+        if key not in channel_buckets:
+            channel_buckets[key] = []
+            bucket_insertion_order.append(key)
+
+    _ensure_bucket("processed")
 
     for idx, spec in enumerate(processed):
         wavelengths = np.asarray(spec.wavelength, dtype=float).reshape(-1)
@@ -140,24 +148,44 @@ def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], Lis
 
         for channel_label, data in _iter_channels(spec, wavelengths):
             channel_name = channel_label or "processed"
+            bucket_key = channel_name or "processed"
+            _ensure_bucket(bucket_key)
             column_name = f"{sample_label}:{channel_name}" if channel_name else sample_label
             if column_name in column_data:
                 raise ValueError(
                     f"Duplicate column for sample '{sample_label}' and channel '{channel_name}'"
                 )
-            column_order.append(column_name)
+            channel_buckets[bucket_key].append(column_name)
             column_data[column_name] = {
                 float(wl): _clean_value(inten_val)
                 for wl, inten_val in zip(wavelengths, data)
             }
 
     assert wavelength_grid is not None  # for mypy
-    header = ["wavelength"] + column_order
+    grouped_columns: List[str] = []
+    seen_buckets = set()
+
+    if "processed" in channel_buckets:
+        grouped_columns.extend(channel_buckets["processed"])
+        seen_buckets.add("processed")
+
+    for stage_name in _STAGE_CHANNEL_ORDER:
+        if stage_name in channel_buckets and stage_name not in seen_buckets:
+            grouped_columns.extend(channel_buckets[stage_name])
+            seen_buckets.add(stage_name)
+
+    for bucket_name in bucket_insertion_order:
+        if bucket_name in seen_buckets:
+            continue
+        grouped_columns.extend(channel_buckets[bucket_name])
+        seen_buckets.add(bucket_name)
+
+    header = ["wavelength"] + grouped_columns
     rows: List[List[Any]] = []
     for wl in wavelength_grid:
         wl_value = float(wl)
         row = [_clean_value(wl_value)]
-        for column_name in column_order:
+        for column_name in grouped_columns:
             row.append(column_data[column_name].get(wl_value))
         rows.append(row)
 
