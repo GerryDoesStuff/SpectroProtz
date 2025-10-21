@@ -307,11 +307,12 @@ def _baseline_asls(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int 
     if L < 3:
         return np.zeros_like(y)
 
-    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(L - 2, L))
+    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(L - 2, L), format="csc")
+    laplacian = (D.T @ D).tocsc()
     w = np.ones(L)
     for _ in range(max(1, int(niter))):
-        W = sparse.spdiags(w, 0, L, L)
-        Z = W + lam * (D.T @ D)
+        W = sparse.diags(w, 0, shape=(L, L), format="csc")
+        Z = W + lam * laplacian
         z = spsolve(Z, w * y)
         w = p * (y > z) + (1 - p) * (y <= z)
     return z
