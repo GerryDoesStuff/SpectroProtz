@@ -1,3 +1,7 @@
+import builtins
+import importlib
+import sys
+
 import numpy as np
 import pytest
 
@@ -5,10 +9,10 @@ pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 pytest.importorskip("pyqtgraph", exc_type=ImportError)
 
 import pyqtgraph as pg
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from spectro_app.engine.plugin_api import Spectrum
-from spectro_app.ui.docks.preview_widget import SpectraPlotWidget
+import spectro_app.ui.docks.preview_widget as preview_widget
 
 
 @pytest.fixture(scope="module")
@@ -21,7 +25,7 @@ def qt_app():
 
 
 def test_smoothed_fallback_renders_preview(qt_app):
-    widget = SpectraPlotWidget()
+    widget = preview_widget.SpectraPlotWidget()
     try:
         spectrum = Spectrum(
             wavelength=np.array([400.0, 500.0, 600.0], dtype=float),
@@ -50,7 +54,7 @@ def test_smoothed_fallback_renders_preview(qt_app):
 
 
 def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app):
-    widget = SpectraPlotWidget()
+    widget = preview_widget.SpectraPlotWidget()
     try:
         wavelength = np.array([400.0, 500.0, 600.0], dtype=float)
         intensity = np.array([0.2, 0.5, 0.3], dtype=float)
@@ -80,7 +84,7 @@ def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app
 
 
 def test_preserve_view_keeps_ranges_and_selection(qt_app):
-    widget = SpectraPlotWidget()
+    widget = preview_widget.SpectraPlotWidget()
     try:
         base_wavelength = np.linspace(400.0, 800.0, 50, dtype=float)
         spectra = [
@@ -130,3 +134,62 @@ def test_preserve_view_keeps_ranges_and_selection(qt_app):
     finally:
         widget.deleteLater()
         qt_app.processEvents()
+
+
+def test_export_action_disabled_when_exporters_missing(monkeypatch, qt_app):
+    original_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pyqtgraph.exporters":
+            raise ImportError("exporters unavailable")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    sys.modules.pop("pyqtgraph.exporters", None)
+
+    reloaded = importlib.reload(preview_widget)
+
+    try:
+        assert reloaded.pg is not None
+        assert not reloaded._EXPORTERS_AVAILABLE
+
+        widget = reloaded.SpectraPlotWidget()
+        try:
+            spectrum = Spectrum(
+                wavelength=np.array([400.0, 500.0, 600.0], dtype=float),
+                intensity=np.array([0.2, 0.4, 0.1], dtype=float),
+                meta={},
+            )
+
+            assert widget.set_spectra([spectrum])
+            qt_app.processEvents()
+
+            assert widget._curve_items["smoothed"]
+
+            captured: dict[str, bool] = {}
+
+            def fake_exec(self, pos):
+                actions = {action.text(): action for action in self.actions()}
+                captured["export_enabled"] = actions["Export figure…"].isEnabled()
+                return None
+
+            monkeypatch.setattr(QtWidgets.QMenu, "exec", fake_exec)
+            widget._show_context_menu(QtCore.QPoint(0, 0))
+            assert captured.get("export_enabled") is False
+
+            messages: list[str] = []
+
+            monkeypatch.setattr(
+                reloaded.SpectraPlotWidget,
+                "_show_export_unavailable_message",
+                lambda self: messages.append("export-unavailable"),
+            )
+
+            widget._export_figure()
+            assert messages == ["export-unavailable"]
+        finally:
+            widget.deleteLater()
+            qt_app.processEvents()
+    finally:
+        monkeypatch.setattr(builtins, "__import__", original_import, raising=False)
+        importlib.reload(preview_widget)
