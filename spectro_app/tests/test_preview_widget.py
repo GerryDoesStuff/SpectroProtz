@@ -84,6 +84,51 @@ def test_stage_default_skips_smoothed_fallback_when_other_stage_available(qt_app
         qt_app.processEvents()
 
 
+def test_peak_markers_created_and_follow_visibility(qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        wavelength = np.array([400.0, 500.0, 600.0, 700.0], dtype=float)
+        intensity = np.array([0.2, 0.6, 0.3, 0.1], dtype=float)
+        peaks = [
+            {"wavelength": 500.0, "intensity": 0.6},
+            {"wavelength": 600.0, "intensity": 0.3},
+        ]
+        spectrum = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"features": {"peaks": peaks}, "sample_id": "Sample with peaks"},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        label = widget._sample_labels[0]
+        assert label in widget._peak_items
+        scatter = widget._peak_items[label]
+        x_data, y_data = scatter.getData()
+        np.testing.assert_allclose(np.array(x_data), np.array([500.0, 600.0]))
+        np.testing.assert_allclose(np.array(y_data), np.array([0.6, 0.3]))
+        assert scatter.isVisible()
+
+        smoothed_checkbox = widget._stage_controls["smoothed"]
+        smoothed_checkbox.setChecked(False)
+        qt_app.processEvents()
+        assert not scatter.isVisible()
+
+        smoothed_checkbox.setChecked(True)
+        qt_app.processEvents()
+        assert scatter.isVisible()
+
+        curve = widget._curve_items["smoothed"][0]
+        widget._select_curve(curve)
+        widget._hide_selected_spectrum()
+        qt_app.processEvents()
+        assert not scatter.isVisible()
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
 def test_blank_role_spectra_are_excluded(qt_app):
     widget = preview_widget.SpectraPlotWidget()
     try:
