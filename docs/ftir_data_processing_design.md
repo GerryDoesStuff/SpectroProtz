@@ -18,6 +18,7 @@
    - Wavenumber calibration and resampling.
    - Noise reduction (Savitzky–Golay, wavelet, etc.).
    - Baseline correction (rubber-band, asymmetric least squares).
+   - Common background spectra fitting/subtraction (e.g., water, ethanol).
    - Normalization/scaling strategies (vector, area, peak-based).
    - Quality-control hooks for flagging low SNR or missing regions.
 
@@ -45,7 +46,7 @@
 
 7. **Reporting & Visualization**
    - Plotting utilities (raw vs. processed spectra, fitted peaks, residuals).
-   - Summary reports (HTML/PDF/Markdown) including composition tables and QC flags.
+   - Summary reports (HTML/PDF/Markdown) including composition tables, background subtraction diagnostics, and QC flags.
    - Export of intermediate data (processed spectra, peak tables, concentration estimates).
 
 8. **Extensibility & Configuration**
@@ -67,7 +68,8 @@
 1. Establish internal data structures for spectra and metadata.
 2. Implement OPUS reader with test coverage using reference files.
 3. Add preprocessing utilities (baseline, smoothing, normalization).
-4. Create initial visualization helpers for QC.
+4. Develop shared background modeling tools (reference spectrum collection, fitting, subtraction).
+5. Create initial visualization helpers for QC.
 
 ### Phase 2 – Peak Analysis
 1. Implement detection methods with configurable parameters.
