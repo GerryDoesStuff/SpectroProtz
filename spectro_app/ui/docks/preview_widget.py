@@ -80,6 +80,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._stage_datasets: Dict[str, List[_StageDataset]] = {}
         self._all_stage_datasets: Dict[str, List[_StageDataset]] = {}
         self._curve_items: Dict[str, List[pg.PlotDataItem]] = {}
+        self._peak_items: Dict[str, pg.ScatterPlotItem] = {}
+        self._all_peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._peak_styles: Dict[str, tuple[QtGui.QBrush, QtGui.QPen]] = {}
         self._visible_stages: set[str] = set()
         self._color_map: Dict[str, QtGui.QColor] = {}
         self._legend: Optional[pg.LegendItem] = None
@@ -266,6 +270,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         smoothed_fallbacks: List[_StageDataset] = []
         self._smoothed_fallback_active = False
         self._curve_items.clear()
+        self._peak_items.clear()
+        self._all_peak_points = {}
+        self._peak_points = {}
+        self._peak_styles = {}
         self._visible_stages.clear()
         self._color_map.clear()
         if self._legend is not None:
@@ -326,6 +334,33 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     smoothed_fallbacks.append(dataset)
                     any_data = True
 
+            features = dict(meta.get("features") or {})
+            peaks_meta = features.get("peaks", [])
+            if isinstance(peaks_meta, Sequence) and not isinstance(peaks_meta, (str, bytes)):
+                peak_wavelengths: List[float] = []
+                peak_intensities: List[float] = []
+                for peak in peaks_meta:
+                    if not isinstance(peak, dict):
+                        continue
+                    wavelength = peak.get("wavelength")
+                    intensity_val = peak.get("intensity")
+                    if wavelength is None or intensity_val is None:
+                        continue
+                    try:
+                        wl_float = float(wavelength)
+                        int_float = float(intensity_val)
+                    except (TypeError, ValueError):
+                        continue
+                    if not (np.isfinite(wl_float) and np.isfinite(int_float)):
+                        continue
+                    peak_wavelengths.append(wl_float)
+                    peak_intensities.append(int_float)
+                if peak_wavelengths and peak_intensities:
+                    self._all_peak_points[label] = (
+                        np.asarray(peak_wavelengths, dtype=float),
+                        np.asarray(peak_intensities, dtype=float),
+                    )
+
         if smoothed_fallbacks:
             stage_datasets.setdefault("smoothed", []).extend(smoothed_fallbacks)
             self._smoothed_fallback_active = True
@@ -338,6 +373,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._total_spectra = 0
             self._single_mode = False
             self._smoothed_fallback_active = False
+            self._all_peak_points = {}
+            self._peak_points = {}
             for checkbox in self._stage_controls.values():
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
@@ -467,6 +504,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._single_mode = False
 
         stage_datasets: Dict[str, List[_StageDataset]] = {stage: [] for stage in self.STAGE_LABELS}
+        peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
         if self._single_mode and self._total_spectra > 0:
             selected_labels = set(self._current_single_labels())
             for stage in self.STAGE_LABELS:
@@ -475,11 +513,18 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     for dataset in self._all_stage_datasets.get(stage, [])
                     if dataset.label in selected_labels
                 ]
+            peak_points = {
+                label: data
+                for label, data in self._all_peak_points.items()
+                if label in selected_labels
+            }
         else:
             for stage in self.STAGE_LABELS:
                 stage_datasets[stage] = list(self._all_stage_datasets.get(stage, []))
+            peak_points = dict(self._all_peak_points)
 
         self._stage_datasets = stage_datasets
+        self._peak_points = peak_points
         self._rebuild_plot(initial=initial)
         self._update_navigation_ui()
 
@@ -491,7 +536,14 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     self.plot.removeItem(curve)
                 except Exception:
                     pass
+        for scatter in self._peak_items.values():
+            try:
+                self.plot.removeItem(scatter)
+            except Exception:
+                pass
         self._curve_items = {stage: [] for stage in self.STAGE_LABELS}
+        self._peak_items = {}
+        self._peak_styles = {}
         self._curve_metadata.clear()
         self._legend_entries.clear()
 
@@ -691,6 +743,48 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 self._curve_items[stage].append(curve)
                 self._curve_metadata[curve] = (dataset, pen, legend_text)
 
+        for label, (peak_x, peak_y) in self._peak_points.items():
+            if peak_x.size == 0 or peak_y.size == 0:
+                continue
+            color = self._color_map.get(label, pg.mkColor("#1f77b4"))
+            base_brush = pg.mkBrush(color)
+            base_pen = pg.mkPen(color=color, width=1)
+            scatter = pg.ScatterPlotItem(x=peak_x, y=peak_y, brush=base_brush, pen=base_pen, size=9, symbol="o")
+            scatter.setZValue(10)
+            self.plot.addItem(scatter)
+            self._peak_items[label] = scatter
+            self._peak_styles[label] = (QtGui.QBrush(base_brush), QtGui.QPen(base_pen))
+            scatter.setVisible(self._is_peak_visible(label))
+
+    def _is_peak_visible(self, label: str) -> bool:
+        if label in self._hidden_labels:
+            return False
+        if not self._visible_stages:
+            return False
+        for stage in self._visible_stages:
+            for dataset in self._stage_datasets.get(stage, []):
+                if dataset.label == label:
+                    return True
+        return False
+
+    def _apply_peak_selection_style(self, label: str) -> None:
+        scatter = self._peak_items.get(label)
+        if scatter is None:
+            return
+        scatter.setBrush(pg.mkBrush(self._selection_color))
+        scatter.setPen(pg.mkPen(self._selection_color, width=1.5))
+
+    def _restore_peak_style(self, label: str) -> None:
+        scatter = self._peak_items.get(label)
+        if scatter is None:
+            return
+        original = self._peak_styles.get(label)
+        if original is None:
+            return
+        brush, pen = original
+        scatter.setBrush(QtGui.QBrush(brush))
+        scatter.setPen(QtGui.QPen(pen))
+
     def _apply_hidden_visibility(self) -> None:
         for curve, (dataset, original_pen, legend_text) in self._curve_metadata.items():
             hidden = dataset.label in self._hidden_labels
@@ -721,6 +815,14 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 )
             else:
                 label_item.setText(html.escape(legend_text))
+
+        for label, scatter in self._peak_items.items():
+            visible = self._is_peak_visible(label) and label not in self._hidden_labels
+            scatter.setVisible(visible)
+            if visible and label == self._selected_label:
+                self._apply_peak_selection_style(label)
+            else:
+                self._restore_peak_style(label)
 
     def _reset_view(self) -> None:
         self.plot.plotItem.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
@@ -832,6 +934,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             label_item.setText(highlighted)
         self._selected_curve = curve
         self._selected_label = dataset.label
+        self._apply_peak_selection_style(dataset.label)
+        self._apply_hidden_visibility()
 
     def _clear_selection(self) -> None:
         if self._selected_curve is None:
@@ -850,8 +954,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 except AttributeError:
                     sample_item.update()
                 label_item.setText(html.escape(legend_text))
+        label = self._selected_label
         self._selected_curve = None
         self._selected_label = None
+        if label is not None:
+            self._restore_peak_style(label)
         self._apply_hidden_visibility()
 
     def _update_cursor_label(self, coords: Optional[tuple[float, float]]) -> None:
