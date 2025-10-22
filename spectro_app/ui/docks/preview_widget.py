@@ -84,6 +84,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._all_peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._peak_styles: Dict[str, tuple[QtGui.QBrush, QtGui.QPen]] = {}
+        self._peaks_enabled: bool = True
         self._visible_stages: set[str] = set()
         self._color_map: Dict[str, QtGui.QColor] = {}
         self._legend: Optional[pg.LegendItem] = None
@@ -132,6 +133,17 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             checkbox.toggled.connect(lambda checked, stage=key: self._on_stage_toggled(stage, checked))
             stages_row.addWidget(checkbox)
             self._stage_controls[key] = checkbox
+
+        self.peaks_button = QtWidgets.QToolButton()
+        self.peaks_button.setText("Peaks")
+        self.peaks_button.setCheckable(True)
+        self.peaks_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.peaks_button.toggled.connect(self._on_peaks_toggled)
+        self.peaks_button.blockSignals(True)
+        self.peaks_button.setChecked(self._peaks_enabled)
+        self.peaks_button.blockSignals(False)
+        self.peaks_button.setEnabled(False)
+        stages_row.addWidget(self.peaks_button)
 
         stages_row.addStretch(1)
 
@@ -238,6 +250,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         preserved_single_mode: Optional[bool] = None
         preserved_window_start: Optional[int] = None
         preserved_window_size: Optional[int] = None
+        preserved_peaks_enabled: Optional[bool] = None
         if preserve_view:
             view_box = self.plot.plotItem.getViewBox()
             if view_box is not None:
@@ -264,6 +277,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             preserved_single_mode = self._single_mode if self._total_spectra > 0 else False
             preserved_window_start = self._single_window_start
             preserved_window_size = self._single_window_size
+            preserved_peaks_enabled = self._peaks_enabled
 
         stage_datasets: Dict[str, List[_StageDataset]] = {key: [] for key in self.STAGE_LABELS}
         self._stage_datasets = {key: [] for key in self.STAGE_LABELS}
@@ -380,6 +394,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 checkbox.setChecked(False)
                 checkbox.setEnabled(False)
                 checkbox.blockSignals(False)
+            self.peaks_button.blockSignals(True)
+            self.peaks_button.setChecked(False)
+            self.peaks_button.blockSignals(False)
+            self.peaks_button.setEnabled(False)
+            self._peaks_enabled = True
             self.cursor_label.setText("λ: ––– | I: –––")
             message = (
                 "No spectra available"
@@ -431,6 +450,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
         if preserve_view and preserved_visible_stages is not None:
             self._visible_stages = set(preserved_visible_stages)
+
+        if preserve_view and preserved_peaks_enabled is not None:
+            self._peaks_enabled = preserved_peaks_enabled
+        else:
+            self._peaks_enabled = True
 
         self.plot.setTitle("")
         self._apply_view_mode(initial=not preserve_view)
@@ -549,6 +573,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
         self._update_stage_controls(initial=initial)
         self._render_curves()
+        self._refresh_peaks_button()
         self._sync_visible_stages()
         self._apply_hidden_visibility()
         self._update_cursor_label(None)
@@ -604,6 +629,18 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     continue
                 dataset = metadata[0]
                 curve.setVisible(visible and dataset.label not in self._hidden_labels)
+        self._update_peak_items_visibility()
+
+    def _refresh_peaks_button(self) -> None:
+        has_peaks = bool(self._peak_points)
+        desired_checked = self._peaks_enabled and has_peaks
+        self.peaks_button.blockSignals(True)
+        self.peaks_button.setEnabled(has_peaks)
+        self.peaks_button.setChecked(desired_checked)
+        self.peaks_button.blockSignals(False)
+
+    def _update_peak_items_visibility(self) -> None:
+        self._update_peak_items_visibility()
 
     def _update_navigation_ui(self) -> None:
         total = self._total_spectra
@@ -754,10 +791,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self.plot.addItem(scatter)
             self._peak_items[label] = scatter
             self._peak_styles[label] = (QtGui.QBrush(base_brush), QtGui.QPen(base_pen))
-            scatter.setVisible(self._is_peak_visible(label))
+            scatter.setVisible(self._is_peak_visible(label) and label not in self._hidden_labels)
 
     def _is_peak_visible(self, label: str) -> bool:
-        if label in self._hidden_labels:
+        if not self._peaks_enabled:
             return False
         if not self._visible_stages:
             return False
@@ -841,6 +878,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             curve.setVisible(checked and dataset.label not in self._hidden_labels)
         self._update_cursor_label(None)
         self._apply_hidden_visibility()
+
+    def _on_peaks_toggled(self, checked: bool) -> None:
+        self._peaks_enabled = checked
+        self._update_peak_items_visibility()
 
     def _on_mouse_moved(self, event: Iterable[object]) -> None:
         if not event:

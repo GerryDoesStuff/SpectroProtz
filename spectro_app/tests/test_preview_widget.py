@@ -110,6 +110,17 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
         np.testing.assert_allclose(np.array(y_data), np.array([0.6, 0.3]))
         assert scatter.isVisible()
 
+        assert widget.peaks_button.isEnabled()
+        assert widget.peaks_button.isChecked()
+
+        widget.peaks_button.setChecked(False)
+        qt_app.processEvents()
+        assert not scatter.isVisible()
+
+        widget.peaks_button.setChecked(True)
+        qt_app.processEvents()
+        assert scatter.isVisible()
+
         smoothed_checkbox = widget._stage_controls["smoothed"]
         smoothed_checkbox.setChecked(False)
         qt_app.processEvents()
@@ -124,6 +135,45 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
         widget._hide_selected_spectrum()
         qt_app.processEvents()
         assert not scatter.isVisible()
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
+def test_peaks_toggle_preserved_with_preserve_view(qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        wavelength = np.array([410.0, 510.0, 610.0], dtype=float)
+        intensity = np.array([0.3, 0.7, 0.2], dtype=float)
+        peaks = [
+            {"wavelength": 510.0, "intensity": 0.7},
+            {"wavelength": 610.0, "intensity": 0.2},
+        ]
+        spectrum = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"features": {"peaks": peaks}, "sample_id": "Preserve Peaks"},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        assert widget.peaks_button.isChecked()
+        widget.peaks_button.setChecked(False)
+        qt_app.processEvents()
+        assert not widget.peaks_button.isChecked()
+
+        first_label = widget._sample_labels[0]
+        first_scatter = widget._peak_items[first_label]
+        assert not first_scatter.isVisible()
+
+        assert widget.set_spectra([spectrum], preserve_view=True)
+        qt_app.processEvents()
+
+        assert not widget.peaks_button.isChecked()
+        refreshed_label = widget._sample_labels[0]
+        refreshed_scatter = widget._peak_items[refreshed_label]
+        assert not refreshed_scatter.isVisible()
     finally:
         widget.deleteLater()
         qt_app.processEvents()
