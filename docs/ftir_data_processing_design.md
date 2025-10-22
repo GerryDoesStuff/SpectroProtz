@@ -94,7 +94,7 @@
 
 ## 4. Dependencies & Resources
 
-- Libraries: `numpy`, `scipy`, `pandas`, `matplotlib/plotly`, `lmfit` or custom optimizer, `pyopus` (if available) or custom OPUS reader.
+- Libraries: `numpy`, `scipy`, `pandas`, `matplotlib/plotly`, `lmfit` or custom optimizer, `brukeropusreader` (see <https://github.com/drbaa/brukeropusreader>) or `opusFC` for OPUS ingestion; a lightweight custom reader module will be drafted during Phase 1 if licensing gaps remain, with availability aligned to the initial pipeline prototype.
 - Reference data: IR spectral database (format to be defined), calibration datasets, QC spectra.
 - Tooling: `pytest`, `mypy`, documentation generator (Sphinx/MkDocs).
 
