@@ -640,7 +640,16 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self.peaks_button.blockSignals(False)
 
     def _update_peak_items_visibility(self) -> None:
-        self._update_peak_items_visibility()
+        if not self._peak_items:
+            return
+
+        for label, scatter in self._peak_items.items():
+            visible = self._is_peak_visible(label) and label not in self._hidden_labels
+            scatter.setVisible(visible)
+            if visible and label == self._selected_label:
+                self._apply_peak_selection_style(label)
+            else:
+                self._restore_peak_style(label)
 
     def _update_navigation_ui(self) -> None:
         total = self._total_spectra
