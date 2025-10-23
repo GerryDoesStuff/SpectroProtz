@@ -155,7 +155,10 @@ def init_db(outdir:str):
 
 def store_headers(con,file_id:str,headers:Dict[str,str]):
     meta_json=json.dumps(headers,ensure_ascii=False)
-    con.execute('INSERT OR REPLACE INTO spectra VALUES (?,?,?,?)',[file_id,'',0,0,meta_json])
+    con.execute(
+        'INSERT OR REPLACE INTO spectra (file_id,path,n_points,n_spectra,meta_json) VALUES (?,?,?,?,?)',
+        [file_id,'',0,0,meta_json]
+    )
 
 def index_file(path:str,con,args):
     headers=parse_jdx_headers(path)
