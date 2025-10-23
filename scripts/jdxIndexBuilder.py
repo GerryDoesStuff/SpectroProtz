@@ -219,8 +219,57 @@ def standardize_x(x:np.ndarray,units:str)->np.ndarray:
         return 10000.0/np.maximum(x,1e-12)
     return x
 
-def transmittance_to_abs(y:np.ndarray)->np.ndarray:
-    T=np.clip(y,1e-6,1.0);return -np.log10(T)
+def transmittance_to_abs(y:np.ndarray,percent:bool=False)->np.ndarray:
+    """Convert a transmittance trace into absorbance.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Transmittance values expressed either as a fraction (0-1) or percent
+        (0-100).
+    percent : bool, optional
+        When True, interpret the input values as percent transmittance.
+
+    Returns
+    -------
+    np.ndarray
+        Absorbance values computed as ``A = -log10(T)``.
+    """
+
+    y_arr=np.asarray(y,dtype=float)
+    if percent:
+        y_arr=y_arr/100.0
+    T=np.clip(y_arr,1e-6,1.0)
+    return -np.log10(T)
+
+
+def _transmittance_mode(y_units:str)->Optional[str]:
+    """Detect whether the provided Y units denote transmittance.
+
+    Returns ``'fraction'`` for 0-1 transmittance, ``'percent'`` for %T, or
+    ``None`` when no conversion is required.
+    """
+
+    if not y_units:
+        return None
+    u=y_units.strip().lower()
+    if not u:
+        return None
+    compact=re.sub(r'\s+','',u)
+    if 'transmittance' not in u and '%t' not in compact and 't%' not in compact:
+        return None
+    if '%' in u or 'percent' in u or 'pct' in u or '%t' in compact or 't%' in compact:
+        return 'percent'
+    return 'fraction'
+
+
+def convert_y_for_processing(y:np.ndarray,y_units:str)->np.ndarray:
+    """Return a copy of *y* converted to absorbance when required."""
+
+    mode=_transmittance_mode(y_units)
+    if mode is None:
+        return np.asarray(y,dtype=float).copy()
+    return transmittance_to_abs(y,percent=(mode=='percent'))
 
 def als_baseline(y:np.ndarray,lam=1e5,p=0.01,niter=10)->np.ndarray:
     L=len(y);D=sparse.diags([1,-2,1],[0,-1,-2],shape=(L,L-2));w=np.ones(L)
@@ -276,8 +325,10 @@ def index_file(path:str,con,args):
     file_id=file_sha1(path)
     store_headers(con,file_id,headers)
     total_peaks=0
+    y_units=headers.get('YUNITS','')
     for sid,y in enumerate(Y):
-        y_proc=preprocess(y,args.sg_win,args.sg_poly,args.als_lam,args.als_p)
+        y_for_processing=convert_y_for_processing(y,y_units)
+        y_proc=preprocess(y_for_processing,args.sg_win,args.sg_poly,args.als_lam,args.als_p)
         dist_pts=max(1,int(args.min_distance/max(1e-9,np.median(np.diff(x)))))
         idxs,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
         pid=0
