@@ -140,6 +140,45 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
         qt_app.processEvents()
 
 
+def test_update_peak_items_visibility_respects_state(qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        wavelength = np.array([405.0, 505.0, 605.0], dtype=float)
+        intensity = np.array([0.25, 0.65, 0.35], dtype=float)
+        peaks = [
+            {"wavelength": 505.0, "intensity": 0.65},
+            {"wavelength": 605.0, "intensity": 0.35},
+        ]
+        spectrum = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"features": {"peaks": peaks}, "sample_id": "Update Peaks"},
+        )
+
+        assert widget.set_spectra([spectrum])
+        qt_app.processEvents()
+
+        label = widget._sample_labels[0]
+        scatter = widget._peak_items[label]
+        assert scatter.isVisible()
+
+        widget._peaks_enabled = False
+        widget._update_peak_items_visibility()
+        assert not scatter.isVisible()
+
+        widget._peaks_enabled = True
+        widget._hidden_labels.add(label)
+        widget._update_peak_items_visibility()
+        assert not scatter.isVisible()
+
+        widget._hidden_labels.clear()
+        widget._update_peak_items_visibility()
+        assert scatter.isVisible()
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
 def test_peaks_toggle_preserved_with_preserve_view(qt_app):
     widget = preview_widget.SpectraPlotWidget()
     try:
