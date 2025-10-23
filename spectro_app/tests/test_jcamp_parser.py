@@ -82,6 +82,34 @@ def test_parse_jcamp_multispec_preserves_multiple_blocks(tmp_path):
     np.testing.assert_allclose(spectra[1], np.array([0.5, 0.6, 0.7, 0.8]))
 
 
+def test_parse_jcamp_multispec_trims_short_replicate_columns(tmp_path):
+    sample = """##TITLE=Uneven Replicates
+##JCAMP-DX=5.01
+##DATA TYPE=INFRARED SPECTRUM
+##XUNITS=1/CM
+##YUNITS=TRANSMITTANCE
+##XFACTOR=1
+##YFACTOR=1
+##XYDATA=(XY..Y)
+4000 0.10 0.20
+3995 0.30 0.40
+3990 0.50
+3985 0.60
+##END"""
+
+    path = tmp_path / "uneven_replicates.jdx"
+    path.write_text(sample)
+
+    x, spectra, _ = parse_jcamp_multispec(str(path))
+
+    assert len(spectra) == 2
+    np.testing.assert_allclose(x, np.array([4000.0, 3995.0, 3990.0, 3985.0]))
+    np.testing.assert_allclose(spectra[0], np.array([0.10, 0.30, 0.50, 0.60]))
+    assert len(spectra[1]) == 2
+    np.testing.assert_allclose(spectra[1], np.array([0.20, 0.40]))
+    assert not np.isnan(spectra[1]).any()
+
+
 def test_convert_y_for_processing_handles_fraction_transmittance():
     y = np.array([0.5, 0.25, 1.0])
 
