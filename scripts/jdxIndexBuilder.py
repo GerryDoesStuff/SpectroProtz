@@ -74,33 +74,141 @@ def parse_jdx_headers(path:str)->Dict[str,str]:
     return headers
 
 
+def _parse_numeric(value:Optional[str])->Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError,ValueError):
+        if isinstance(value,str):
+            m=re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?',value)
+            if m:
+                try:
+                    return float(m.group(0))
+                except ValueError:
+                    return None
+    return None
+
+
+def _expand_xpp_block(lines:List[List[float]],headers:Dict[str,str],xfactor:float,yfactor:float)->Tuple[np.ndarray,List[np.ndarray]]:
+    if not lines:
+        raise ValueError('Empty XYDATA block')
+    start_vals=[ln[0] for ln in lines if len(ln)>=1]
+    counts=[max(0,len(ln)-1) for ln in lines]
+    y_vals=[]
+    for ln in lines:
+        if len(ln)>=2:
+            y_vals.extend(ln[1:])
+    if not y_vals:
+        raise ValueError('No Y data found in XYDATA block')
+    firstx=_parse_numeric(headers.get('FIRSTX'))
+    deltax=_parse_numeric(headers.get('DELTAX'))
+    npoints_raw=headers.get('NPOINTS')
+    npoints=None
+    if npoints_raw is not None:
+        try:
+            npoints=int(round(float(npoints_raw)))
+        except (TypeError,ValueError):
+            pass
+    if firstx is None and start_vals:
+        firstx=start_vals[0]
+    if deltax is None and len(start_vals)>1:
+        deltas=[]
+        for i in range(len(start_vals)-1):
+            cnt=counts[i]
+            if cnt>0:
+                deltas.append((start_vals[i+1]-start_vals[i])/cnt)
+        if deltas:
+            deltax=float(np.median(deltas))
+    if npoints is None:
+        npoints=len(y_vals)
+    if deltax is None:
+        lastx=_parse_numeric(headers.get('LASTX'))
+        if lastx is not None and firstx is not None and npoints>1:
+            deltax=(lastx-firstx)/(npoints-1)
+    if deltax is None:
+        minx=_parse_numeric(headers.get('MINX'))
+        maxx=_parse_numeric(headers.get('MAXX'))
+        if firstx is not None and minx is not None and maxx is not None and npoints>1:
+            span=maxx-minx
+            if abs(span)>0:
+                # choose direction matching firstx proximity
+                asc=firstx<=maxx
+                target=maxx if asc else minx
+                deltax=(target-firstx)/(npoints-1)
+    if deltax is None:
+        raise ValueError('Unable to determine DELTAX for compressed XYDATA block')
+    if firstx is None:
+        raise ValueError('Unable to determine FIRSTX for compressed XYDATA block')
+    if len(y_vals)<npoints:
+        raise ValueError('Y data shorter than expected NPOINTS in XYDATA block')
+    if len(y_vals)>npoints:
+        y_vals=y_vals[:npoints]
+    x=np.asarray(firstx+np.arange(npoints)*deltax,dtype=float)*xfactor
+    y=np.asarray(y_vals,dtype=float)*yfactor
+    return x,[y]
+
+
+def _parse_column_block(lines:List[List[float]],xfactor:float,yfactor:float)->Tuple[np.ndarray,List[np.ndarray]]:
+    maxlen=max(len(r) for r in lines)
+    mat=np.full((len(lines),maxlen),np.nan)
+    for i,r in enumerate(lines):
+        mat[i,:len(r)]=r
+    x=mat[:,0]*xfactor
+    Y=mat[:,1:]*yfactor
+    spectra=[Y[:,i] for i in range(Y.shape[1]) if not np.all(np.isnan(Y[:,i]))]
+    return x,spectra
+
+
 def parse_jcamp_multispec(path:str)->Tuple[np.ndarray,List[np.ndarray],Dict]:
     headers=parse_jdx_headers(path)
     xfactor=float(headers.get('XFACTOR','1'))
     yfactor=float(headers.get('YFACTOR','1'))
     xunits=headers.get('XUNITS','')
-    yunits=headers.get('YUNITS','')
-    rows=[];in_xy=False
+    blocks=[]
+    current=None
     with open(path,'r',errors='ignore') as f:
         for raw in f:
-            s=raw.strip()
-            if s.upper().startswith('##XYDATA='):
-                in_xy=True;continue
-            if s.startswith('##') and in_xy:
-                break
-            if not in_xy: continue
-            nums=[float(n) for n in re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?',s)]
-            if len(nums)>=2:
-                rows.append(nums)
-    if not rows:
+            line=raw.strip()
+            if not line:
+                continue
+            upper=line.upper()
+            if upper.startswith('##XYDATA='):
+                descriptor=line.split('=',1)[1].strip() if '=' in line else ''
+                current={'descriptor':descriptor,'lines':[]}
+                blocks.append(current)
+                continue
+            if upper.startswith('##'):
+                current=None
+                continue
+            if current is None:
+                continue
+            nums=[float(n) for n in re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?',line)]
+            if nums:
+                current['lines'].append(nums)
+    if not blocks:
         raise ValueError('No XYDATA content')
-    maxlen=max(len(r) for r in rows)
-    mat=np.full((len(rows),maxlen),np.nan)
-    for i,r in enumerate(rows):
-        mat[i,:len(r)]=r
-    x=mat[:,0]*xfactor;Y=mat[:,1:]*yfactor
-    x_cm1=standardize_x(x,xunits)
-    return x_cm1,[Y[:,i] for i in range(Y.shape[1]) if not np.all(np.isnan(Y[:,i]))],headers
+    x_ref=None
+    spectra=[]
+    for block in blocks:
+        lines=block['lines']
+        if not lines:
+            continue
+        descriptor=block.get('descriptor','').upper()
+        if 'X++' in descriptor:
+            x_block,block_spectra=_expand_xpp_block(lines,headers,xfactor,yfactor)
+        else:
+            x_block,block_spectra=_parse_column_block(lines,xfactor,yfactor)
+        if x_ref is None:
+            x_ref=x_block
+        else:
+            if len(x_ref)!=len(x_block) or not np.allclose(x_ref,x_block,rtol=0,atol=1e-6):
+                raise ValueError('Inconsistent X axes between XYDATA blocks')
+        spectra.extend(block_spectra)
+    if x_ref is None or not spectra:
+        raise ValueError('No spectra parsed from JCAMP file')
+    x_cm1=standardize_x(x_ref,xunits)
+    return x_cm1,spectra,headers
 
 
 def standardize_x(x:np.ndarray,units:str)->np.ndarray:
