@@ -279,11 +279,19 @@ def als_baseline(y:np.ndarray,lam=1e5,p=0.01,niter=10)->np.ndarray:
     return z
 
 def preprocess(y:np.ndarray,sg_win:int,sg_poly:int,als_lam:float,als_p:float)->np.ndarray:
-    y2=y.copy()
-    if sg_win and sg_win%2==1 and sg_win>2:
-        y2=savgol_filter(y2,sg_win,sg_poly)
+    y2=np.asarray(y,dtype=float).copy()
+    n=len(y2)
+    if sg_win and sg_win%2==1 and sg_win>2 and n>=3:
+        win=min(sg_win,n if n%2==1 else n-1)
+        if win>=3:
+            poly=min(max(sg_poly,0),win-1)
+            if win>poly:
+                y2=savgol_filter(y2,win,poly)
     if als_lam>0:
-        y2=y2-als_baseline(y2,lam=als_lam,p=als_p)
+        if n>=3:
+            y2=y2-als_baseline(y2,lam=als_lam,p=als_p)
+        elif n:
+            y2=y2-np.mean(y2)
     m=np.max(np.abs(y2))
     if m>0: y2/=m
     return y2
