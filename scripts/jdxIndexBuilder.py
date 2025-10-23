@@ -150,13 +150,22 @@ def _expand_xpp_block(lines:List[List[float]],headers:Dict[str,str],xfactor:floa
 
 
 def _parse_column_block(lines:List[List[float]],xfactor:float,yfactor:float)->Tuple[np.ndarray,List[np.ndarray]]:
-    maxlen=max(len(r) for r in lines)
-    mat=np.full((len(lines),maxlen),np.nan)
-    for i,r in enumerate(lines):
-        mat[i,:len(r)]=r
-    x=mat[:,0]*xfactor
-    Y=mat[:,1:]*yfactor
-    spectra=[Y[:,i] for i in range(Y.shape[1]) if not np.all(np.isnan(Y[:,i]))]
+    if not lines:
+        raise ValueError('Empty column block')
+
+    max_cols=max(len(r) for r in lines)
+    x_vals:List[float]=[]
+    column_values:List[List[float]]=[[] for _ in range(max_cols-1)]
+
+    for row in lines:
+        if not row:
+            continue
+        x_vals.append(row[0]*xfactor)
+        for col_idx in range(1,len(row)):
+            column_values[col_idx-1].append(row[col_idx]*yfactor)
+
+    x=np.asarray(x_vals,dtype=float)
+    spectra=[np.asarray(vals,dtype=float) for vals in column_values if vals]
     return x,spectra
 
 
@@ -271,6 +280,35 @@ def convert_y_for_processing(y:np.ndarray,y_units:str)->np.ndarray:
         return np.asarray(y,dtype=float).copy()
     return transmittance_to_abs(y,percent=(mode=='percent'))
 
+
+def sanitize_xy(x:np.ndarray,y:np.ndarray)->Tuple[np.ndarray,np.ndarray]:
+    """Return finite, aligned ``(x, y)`` arrays for downstream processing."""
+
+    x_arr=np.asarray(x,dtype=float)
+    y_arr=np.asarray(y,dtype=float)
+
+    n=min(len(x_arr),len(y_arr))
+    if n==0:
+        return x_arr[:0],y_arr[:0]
+
+    x_arr=x_arr[:n].copy()
+    y_arr=y_arr[:n].astype(float,copy=True)
+
+    if not np.all(np.isfinite(y_arr)):
+        finite_idx=np.flatnonzero(np.isfinite(y_arr))
+        if finite_idx.size==0:
+            return x_arr[:0],y_arr[:0]
+        last=finite_idx[-1]+1
+        x_arr=x_arr[:last]
+        y_arr=y_arr[:last]
+
+    finite_mask=np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.all(finite_mask):
+        x_arr=x_arr[finite_mask]
+        y_arr=y_arr[finite_mask]
+
+    return x_arr,y_arr
+
 def als_baseline(y:np.ndarray,lam=1e5,p=0.01,niter=10)->np.ndarray:
     L=len(y);D=sparse.diags([1,-2,1],[0,-1,-2],shape=(L,L-2));w=np.ones(L)
     for _ in range(niter):
@@ -333,32 +371,41 @@ def index_file(path:str,con,args):
     file_id=file_sha1(path)
     store_headers(con,file_id,headers)
     total_peaks=0
+    processed_spectra=0
+    max_points=0
     y_units=headers.get('YUNITS','')
     for sid,y in enumerate(Y):
-        y_for_processing=convert_y_for_processing(y,y_units)
+        x_clean,y_clean=sanitize_xy(x,y)
+        if x_clean.size==0 or y_clean.size==0:
+            continue
+
+        processed_spectra+=1
+        max_points=max(max_points,len(x_clean))
+
+        y_for_processing=convert_y_for_processing(y_clean,y_units)
         y_proc=preprocess(y_for_processing,args.sg_win,args.sg_poly,args.als_lam,args.als_p)
-        diffs=np.diff(x)
+        diffs=np.diff(x_clean)
         if diffs.size:
             step=np.nanmedian(np.abs(diffs))
         else:
             step=np.nan
         if not np.isfinite(step) or step<=0:
-            span=np.nanmax(x)-np.nanmin(x) if x.size else np.nan
-            if np.isfinite(span) and span>0 and len(x)>1:
-                step=span/(len(x)-1)
+            span=np.nanmax(x_clean)-np.nanmin(x_clean) if x_clean.size else np.nan
+            if np.isfinite(span) and span>0 and len(x_clean)>1:
+                step=span/(len(x_clean)-1)
             else:
                 step=float(args.min_distance) if args.min_distance>0 else 1.0
         dist_pts=max(1,int(np.ceil(float(args.min_distance)/max(step,1e-9))))
         idxs,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
         pid=0
         for i in idxs:
-            fit=fit_peak(x,y_proc,i,args.model,args.fit_window_pts)
+            fit=fit_peak(x_clean,y_proc,i,args.model,args.fit_window_pts)
             if not fit or fit['r2']<args.min_r2: continue
             con.execute('INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?)',[file_id,sid,pid,fit['center'],fit['fwhm'],fit['amplitude'],fit['area'],fit['r2']])
             pid+=1
         total_peaks+=pid
-    con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,len(x),len(Y),file_id])
-    return len(Y),total_peaks
+    con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
+    return processed_spectra,total_peaks
 
 def weighted_median(x,w):
     o=np.argsort(x);x=x[o];w=w[o];c=np.cumsum(w)/(np.sum(w)+1e-12)
