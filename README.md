@@ -107,6 +107,13 @@ parses JCAMP-DX spectra, normalises axes, and fits peaks after converting any
 transmittance (%T or fractional) signals into absorbance with `A = -log10(T)`.
 This ensures downstream preprocessing and peak finding work with a consistent
 representation regardless of how the original instrument exported the Y axis.
+Results are persisted in `peaks.duckdb` under `index_dir` with four tables:
+
+- `spectra` – one row per JCAMP source file including normalised metadata.
+- `peaks` – fitted peak parameters for every detected spectrum peak.
+- `file_consensus` – per-file consensus clusters with representative centre,
+  width, and supporting peak count.
+- `global_consensus` – global consensus clusters aggregating across all files.
 
 List the available metadata fields that can be projected into the report:
 

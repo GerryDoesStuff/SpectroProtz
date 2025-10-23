@@ -29,7 +29,52 @@ from scipy.signal import find_peaks, savgol_filter
 from scipy.optimize import curve_fit
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
-from sklearn.cluster import DBSCAN
+try:
+    from sklearn.cluster import DBSCAN
+except Exception:  # pragma: no cover - fallback for minimal environments
+    class DBSCAN:  # type: ignore
+        """Minimal 1-D density clustering fallback used when scikit-learn is
+        unavailable. The implementation groups sorted values whose successive
+        spacing is within ``eps``. Groups that do not meet ``min_samples`` are
+        labelled as noise (-1)."""
+
+        def __init__(self, eps: float, min_samples: int, **_: Dict):
+            self.eps = float(eps)
+            self.min_samples = int(min_samples)
+
+        def fit_predict(self, X):
+            arr = np.asarray(X, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] != 1:
+                raise RuntimeError('Fallback DBSCAN only supports 1-D inputs')
+            values = arr[:, 0]
+            n = len(values)
+            if n == 0:
+                return np.empty(0, dtype=int)
+            order = np.argsort(values)
+            labels = np.full(n, -1, dtype=int)
+            cluster: List[int] = []
+            cluster_id = 0
+            last_val = None
+            for idx in order:
+                val = values[idx]
+                if not cluster:
+                    cluster = [idx]
+                    last_val = val
+                    continue
+                if last_val is not None and abs(val - last_val) <= self.eps:
+                    cluster.append(idx)
+                    last_val = val
+                    continue
+                if len(cluster) >= self.min_samples:
+                    for c_idx in cluster:
+                        labels[c_idx] = cluster_id
+                    cluster_id += 1
+                cluster = [idx]
+                last_val = val
+            if len(cluster) >= self.min_samples:
+                for c_idx in cluster:
+                    labels[c_idx] = cluster_id
+            return labels
 
 PROMOTED_KEYS = {
     'TITLE':'title','DATA TYPE':'data_type','JCAMP-DX':'jcamp_ver','NPOINTS':'npoints_hdr',
@@ -354,6 +399,8 @@ def init_db(outdir:str):
     con=duckdb.connect(os.path.join(outdir,'peaks.duckdb'))
     con.execute('''CREATE TABLE IF NOT EXISTS spectra(file_id TEXT PRIMARY KEY,path TEXT,n_points INT,n_spectra INT,meta_json TEXT);''')
     con.execute('''CREATE TABLE IF NOT EXISTS peaks(file_id TEXT,spectrum_id INT,peak_id INT,center DOUBLE,fwhm DOUBLE,amplitude DOUBLE,area DOUBLE,r2 DOUBLE,PRIMARY KEY(file_id,spectrum_id,peak_id));''')
+    con.execute('''CREATE TABLE IF NOT EXISTS file_consensus(file_id TEXT,cluster_id INT,center DOUBLE,fwhm DOUBLE,support INT,PRIMARY KEY(file_id,cluster_id));''')
+    con.execute('''CREATE TABLE IF NOT EXISTS global_consensus(cluster_id INT PRIMARY KEY,center DOUBLE,support INT);''')
     return con
 
 def store_headers(con,file_id:str,headers:Dict[str,str]):
@@ -422,8 +469,14 @@ def build_file_consensus(con,args):
         for cl in set(labels):
             if cl==-1: continue
             m=labels==cl;cx=c[m];cf=f[m];cw=w[m]
-            out.append(dict(file_id=fid,center=weighted_median(cx,cw),fwhm=np.nanmedian(cf),support=np.sum(m)))
-    return pd.DataFrame(out)
+            out.append(dict(file_id=fid,center=weighted_median(cx,cw),fwhm=np.nanmedian(cf),support=int(np.sum(m))))
+    fc=pd.DataFrame(out)
+    if fc.empty:
+        return fc
+    fc=fc.sort_values(['file_id','center']).reset_index(drop=True)
+    fc['cluster_id']=fc.groupby('file_id').cumcount()
+    cols=['file_id','cluster_id','center','fwhm','support']
+    return fc[cols]
 
 def build_global_consensus(con,fc,args):
     if fc.empty: return pd.DataFrame()
@@ -431,8 +484,28 @@ def build_global_consensus(con,fc,args):
     out=[]
     for cl in set(labels):
         if cl==-1: continue
-        m=labels==cl;cx=c[m];out.append(dict(center=np.median(cx),support=np.sum(m)))
-    return pd.DataFrame(out)
+        m=labels==cl;cx=c[m];out.append(dict(center=float(np.median(cx)),support=int(np.sum(m))))
+    gc=pd.DataFrame(out)
+    if gc.empty:
+        return gc
+    gc=gc.sort_values('center').reset_index(drop=True)
+    gc['cluster_id']=np.arange(len(gc),dtype=int)
+    cols=['cluster_id','center','support']
+    return gc[cols]
+
+def persist_consensus(con,fc,gc):
+    con.execute('DELETE FROM file_consensus')
+    con.execute('DELETE FROM global_consensus')
+    if not fc.empty:
+        con.executemany(
+            'INSERT INTO file_consensus (file_id,cluster_id,center,fwhm,support) VALUES (?,?,?,?,?)',
+            fc[['file_id','cluster_id','center','fwhm','support']].itertuples(index=False,name=None)
+        )
+    if not gc.empty:
+        con.executemany(
+            'INSERT INTO global_consensus (cluster_id,center,support) VALUES (?,?,?)',
+            gc[['cluster_id','center','support']].itertuples(index=False,name=None)
+        )
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('data_dir');ap.add_argument('index_dir')
@@ -450,5 +523,7 @@ def main():
     for p in files:
         n_s,n_p=index_file(p,con,args);total_specs+=n_s;total_peaks+=n_p
     fc=build_file_consensus(con,args);gc=build_global_consensus(con,fc,args)
+    persist_consensus(con,fc,gc)
     print(f'Indexed spectra: {total_specs} | Peaks: {total_peaks} | File clusters: {len(fc)} | Global: {len(gc)}')
+    con.close()
 if __name__=='__main__': main()
