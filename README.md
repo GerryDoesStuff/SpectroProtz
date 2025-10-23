@@ -102,6 +102,12 @@ walks every `.jdx` file, normalises header names to snake case, merges
 continuation lines, and emits a deterministic record set that is convenient for
 diffing or downstream processing.
 
+The higher-level peak indexer, [`scripts/jdxIndexBuilder.py`](scripts/jdxIndexBuilder.py),
+parses JCAMP-DX spectra, normalises axes, and fits peaks after converting any
+transmittance (%T or fractional) signals into absorbance with `A = -log10(T)`.
+This ensures downstream preprocessing and peak finding work with a consistent
+representation regardless of how the original instrument exported the Y axis.
+
 List the available metadata fields that can be projected into the report:
 
 ```bash

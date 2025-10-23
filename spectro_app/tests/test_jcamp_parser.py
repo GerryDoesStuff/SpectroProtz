@@ -14,7 +14,11 @@ if 'sklearn' not in sys.modules:
     sys.modules['sklearn'] = sklearn_module
     sys.modules['sklearn.cluster'] = cluster_module
 
-from scripts.jdxIndexBuilder import parse_jcamp_multispec
+from scripts.jdxIndexBuilder import (
+    convert_y_for_processing,
+    parse_jcamp_multispec,
+    transmittance_to_abs,
+)
 
 
 def test_parse_jcamp_multispec_expands_compressed_single_spectrum(tmp_path):
@@ -76,3 +80,47 @@ def test_parse_jcamp_multispec_preserves_multiple_blocks(tmp_path):
     np.testing.assert_allclose(x, np.array([4000., 3999., 3998., 3997.]))
     np.testing.assert_allclose(spectra[0], np.array([0.1, 0.2, 0.3, 0.4]))
     np.testing.assert_allclose(spectra[1], np.array([0.5, 0.6, 0.7, 0.8]))
+
+
+def test_convert_y_for_processing_handles_fraction_transmittance():
+    y = np.array([0.5, 0.25, 1.0])
+
+    converted = convert_y_for_processing(y, "TRANSMITTANCE")
+
+    expected = transmittance_to_abs(y)
+    np.testing.assert_allclose(converted, expected)
+    # original array should remain untouched
+    np.testing.assert_allclose(y, np.array([0.5, 0.25, 1.0]))
+
+
+def test_convert_y_for_processing_handles_percent_transmittance(tmp_path):
+    sample = """##TITLE=Percent Transmittance
+##JCAMP-DX=5.01
+##DATA TYPE=INFRARED SPECTRUM
+##XUNITS=1/CM
+##YUNITS=%T
+##XFACTOR=1
+##YFACTOR=1
+##FIRSTX=1000
+##DELTAX=-1
+##NPOINTS=3
+##XYDATA=(X++(Y..Y))
+1000 50 75 100
+##END"""
+    path = tmp_path / "percent_transmittance.jdx"
+    path.write_text(sample)
+
+    _, spectra, headers = parse_jcamp_multispec(str(path))
+
+    converted = convert_y_for_processing(spectra[0], headers.get("YUNITS", ""))
+    expected = transmittance_to_abs(np.array([50.0, 75.0, 100.0]), percent=True)
+
+    np.testing.assert_allclose(converted, expected)
+
+
+def test_convert_y_for_processing_leaves_absorbance_untouched():
+    y = np.array([0.1, 0.2, 0.3])
+
+    converted = convert_y_for_processing(y, "ABSORBANCE")
+
+    np.testing.assert_allclose(converted, y)
