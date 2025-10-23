@@ -329,7 +329,18 @@ def index_file(path:str,con,args):
     for sid,y in enumerate(Y):
         y_for_processing=convert_y_for_processing(y,y_units)
         y_proc=preprocess(y_for_processing,args.sg_win,args.sg_poly,args.als_lam,args.als_p)
-        dist_pts=max(1,int(args.min_distance/max(1e-9,np.median(np.diff(x)))))
+        diffs=np.diff(x)
+        if diffs.size:
+            step=np.nanmedian(np.abs(diffs))
+        else:
+            step=np.nan
+        if not np.isfinite(step) or step<=0:
+            span=np.nanmax(x)-np.nanmin(x) if x.size else np.nan
+            if np.isfinite(span) and span>0 and len(x)>1:
+                step=span/(len(x)-1)
+            else:
+                step=float(args.min_distance) if args.min_distance>0 else 1.0
+        dist_pts=max(1,int(np.ceil(float(args.min_distance)/max(step,1e-9))))
         idxs,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
         pid=0
         for i in idxs:
