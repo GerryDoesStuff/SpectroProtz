@@ -22,13 +22,15 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob
+import os, re, json, math, argparse, hashlib, glob, logging
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, savgol_filter
 from scipy.optimize import curve_fit
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
+logger=logging.getLogger(__name__)
+
 try:
     from sklearn.cluster import DBSCAN
 except Exception:  # pragma: no cover - fallback for minimal environments
@@ -410,6 +412,11 @@ def init_db(outdir:str):
     con.execute('''CREATE TABLE IF NOT EXISTS peaks(file_id TEXT,spectrum_id INT,peak_id INT,center DOUBLE,fwhm DOUBLE,amplitude DOUBLE,area DOUBLE,r2 DOUBLE,PRIMARY KEY(file_id,spectrum_id,peak_id));''')
     con.execute('''CREATE TABLE IF NOT EXISTS file_consensus(file_id TEXT,cluster_id INT,center DOUBLE,fwhm DOUBLE,support INT,PRIMARY KEY(file_id,cluster_id));''')
     con.execute('''CREATE TABLE IF NOT EXISTS global_consensus(cluster_id INT PRIMARY KEY,center DOUBLE,support INT);''')
+    con.execute('''CREATE TABLE IF NOT EXISTS ingest_errors(
+        file_path TEXT PRIMARY KEY,
+        error TEXT,
+        occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );''')
     return con
 
 def store_headers(con,file_id:str,headers:Dict[str,str]):
@@ -438,12 +445,31 @@ def index_file(path:str,con,args):
     headers=parse_jdx_headers(path)
     try:
         x,Y,headers=parse_jcamp_multispec(path)
-    except: return 0,0
+    except Exception as exc:
+        logger.error("Failed to parse JCAMP file %s: %s", path, exc)
+        try:
+            con.execute(
+                """
+                INSERT INTO ingest_errors (file_path,error)
+                VALUES (?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    error=excluded.error,
+                    occurred_at=now()
+                """,
+                [path, str(exc)]
+            )
+        except Exception:
+            logger.debug("Failed to record ingest error for %s", path, exc_info=True)
+        if getattr(args,'strict',False):
+            raise
+        return 0,0
     file_id=file_sha1(path)
     total_peaks=0
     processed_spectra=0
     max_points=0
     y_units=headers.get('YUNITS','')
+
+    con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
 
     con.execute('BEGIN TRANSACTION')
     try:
@@ -549,6 +575,7 @@ def main():
     ap.add_argument('--fit-window-pts',type=int,default=50,dest='fit_window_pts')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
+    ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
     args=ap.parse_args()
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]

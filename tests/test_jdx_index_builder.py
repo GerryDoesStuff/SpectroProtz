@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
+import pytest
 
 
 def _load_index_builder():
@@ -28,6 +29,7 @@ def _build_args(prominence: float) -> SimpleNamespace:
         model="Gaussian",
         fit_window_pts=5,
         min_r2=0.0,
+        strict=False,
     )
 
 
@@ -55,6 +57,20 @@ def _write_test_jdx(path):
     path.write_text("\n".join(lines))
 
 
+def _write_malformed_jdx(path):
+    path.write_text(
+        "\n".join(
+            [
+                "##TITLE=Bad Spectrum",
+                "##JCAMP-DX=5.00",
+                "##DATA TYPE=INFRARED SPECTRUM",
+                "##XYDATA=(X,Y)",
+                "##END=",
+            ]
+        )
+    )
+
+
 def test_index_file_overwrites_existing_peaks(tmp_path):
     data_path = tmp_path / "sample.jdx"
     _write_test_jdx(data_path)
@@ -75,5 +91,62 @@ def test_index_file_overwrites_existing_peaks(tmp_path):
         ).fetchone()[0]
 
         assert stored_total == second_total
+    finally:
+        con.close()
+
+
+def test_index_file_logs_and_records_malformed_input(tmp_path, caplog):
+    data_path = tmp_path / "broken.jdx"
+    _write_malformed_jdx(data_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+
+    with caplog.at_level("ERROR"):
+        processed, peaks = idx.index_file(str(data_path), con, args)
+
+    try:
+        assert processed == 0
+        assert peaks == 0
+
+        assert any("Failed to parse JCAMP file" in record.getMessage() for record in caplog.records)
+
+        error_rows = con.execute(
+            "SELECT file_path, error FROM ingest_errors"
+        ).fetchall()
+
+        assert error_rows and error_rows[0][0] == str(data_path)
+        assert "No spectra parsed" in error_rows[0][1]
+
+        file_id = idx.file_sha1(str(data_path))
+        peak_count = con.execute(
+            "SELECT COUNT(*) FROM peaks WHERE file_id = ?",
+            [file_id],
+        ).fetchone()[0]
+        assert peak_count == 0
+    finally:
+        con.close()
+
+
+def test_index_file_strict_mode_raises(tmp_path):
+    data_path = tmp_path / "broken.jdx"
+    _write_malformed_jdx(data_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+    args.strict = True
+
+    try:
+        with pytest.raises(ValueError):
+            idx.index_file(str(data_path), con, args)
+
+        error_rows = con.execute(
+            "SELECT file_path FROM ingest_errors"
+        ).fetchall()
+        assert error_rows == [(str(data_path),)]
     finally:
         con.close()
