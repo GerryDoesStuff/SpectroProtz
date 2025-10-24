@@ -57,6 +57,30 @@ def _write_test_jdx(path):
     path.write_text("\n".join(lines))
 
 
+def _write_descending_test_jdx(path):
+    lines = [
+        "##TITLE=Two Peaks Descending",
+        "##JCAMP-DX=5.00",
+        "##DATA TYPE=INFRARED SPECTRUM",
+        "##XUNITS=1/CM",
+        "##YUNITS=ABSORBANCE",
+        "##NPOINTS=10",
+        "##XYDATA=(X,Y)",
+        "1009 0.0",
+        "1008 0.1",
+        "1007 1.0",
+        "1006 0.1",
+        "1005 0.0",
+        "1004 0.0",
+        "1003 0.2",
+        "1002 0.2",
+        "1001 0.2",
+        "1000 0.0",
+        "##END=",
+    ]
+    path.write_text("\n".join(lines))
+
+
 def _write_malformed_jdx(path):
     path.write_text(
         "\n".join(
@@ -148,5 +172,38 @@ def test_index_file_strict_mode_raises(tmp_path):
             "SELECT file_path FROM ingest_errors"
         ).fetchall()
         assert error_rows == [(str(data_path),)]
+    finally:
+        con.close()
+
+
+def test_descending_axis_consensus_matches(tmp_path):
+    asc_path = tmp_path / "ascending.jdx"
+    desc_path = tmp_path / "descending.jdx"
+    _write_test_jdx(asc_path)
+    _write_descending_test_jdx(desc_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+    args.file_min_samples = 1
+    args.file_eps_factor = 0.5
+    args.file_eps_min = 0.1
+
+    try:
+        idx.index_file(str(asc_path), con, args)
+        idx.index_file(str(desc_path), con, args)
+
+        fc = idx.build_file_consensus(con, args)
+
+        asc_id = idx.file_sha1(str(asc_path))
+        desc_id = idx.file_sha1(str(desc_path))
+
+        asc_centers = sorted(fc.loc[fc["file_id"] == asc_id, "center"].tolist())
+        desc_centers = sorted(fc.loc[fc["file_id"] == desc_id, "center"].tolist())
+
+        assert asc_centers
+        assert desc_centers
+        assert asc_centers == pytest.approx(desc_centers)
     finally:
         con.close()

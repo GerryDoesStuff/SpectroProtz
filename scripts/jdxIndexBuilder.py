@@ -393,7 +393,10 @@ def fit_peak(x,y,idx,model,window):
         A,x0,sig,C=popt;yfit=gaussian(xs,*popt)
         fwhm=2.3548*abs(sig)
         r2=1-np.sum((ys-yfit)**2)/(np.sum((ys-np.mean(ys))**2)+1e-12)
-        area=float(np.trapz(yfit-C,xs))
+        order=np.argsort(xs)
+        xs_sorted=xs[order]
+        y_sorted=yfit[order]
+        area=float(np.trapz(y_sorted-C,xs_sorted))
         return dict(center=x0,fwhm=fwhm,amplitude=A,area=area,r2=r2)
     except: return None
 
@@ -527,8 +530,24 @@ def build_file_consensus(con,args):
         labels=DBSCAN(eps=eps,min_samples=args.file_min_samples).fit_predict(c.reshape(-1,1))
         for cl in set(labels):
             if cl==-1: continue
-            m=labels==cl;cx=c[m];cf=f[m];cw=w[m]
-            out.append(dict(file_id=fid,center=weighted_median(cx,cw),fwhm=np.nanmedian(cf),support=int(np.sum(m))))
+            m=labels==cl
+            cx=c[m]
+            cf=f[m]
+            cw=w[m]
+            valid=np.isfinite(cw) & (cw>0)
+            if not np.any(valid):
+                continue
+            cx=cx[valid]
+            cf=cf[valid]
+            cw=cw[valid]
+            out.append(
+                dict(
+                    file_id=fid,
+                    center=weighted_median(cx,cw),
+                    fwhm=np.nanmedian(cf),
+                    support=int(np.sum(valid)),
+                )
+            )
     fc=pd.DataFrame(out)
     if fc.empty:
         return fc
