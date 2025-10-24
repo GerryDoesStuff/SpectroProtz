@@ -115,6 +115,42 @@ Results are persisted in `peaks.duckdb` under `index_dir` with four tables:
   width, and supporting peak count.
 - `global_consensus` – global consensus clusters aggregating across all files.
 
+The `spectra` table includes both foundational bookkeeping fields and promoted
+JCAMP headers for convenient filtering and projection:
+
+- Core columns: `file_id` (TEXT), `path` (TEXT), `n_points` (INT),
+  `n_spectra` (INT), and `meta_json` (TEXT).
+- Promoted columns:
+
+  | Column          | JCAMP header        | Type   |
+  | -------------- | ------------------- | ------ |
+  | `title`        | `TITLE`             | TEXT   |
+  | `data_type`    | `DATA TYPE`         | TEXT   |
+  | `jcamp_ver`    | `JCAMP-DX`          | TEXT   |
+  | `npoints_hdr`  | `NPOINTS`           | DOUBLE |
+  | `x_units_raw`  | `XUNITS`            | TEXT   |
+  | `y_units_raw`  | `YUNITS`            | TEXT   |
+  | `x_factor`     | `XFACTOR`           | DOUBLE |
+  | `y_factor`     | `YFACTOR`           | DOUBLE |
+  | `deltax_hdr`   | `DELTAX`            | DOUBLE |
+  | `firstx`       | `FIRSTX`            | DOUBLE |
+  | `lastx`        | `LASTX`             | DOUBLE |
+  | `firsty`       | `FIRSTY`            | DOUBLE |
+  | `maxx`         | `MAXX`              | DOUBLE |
+  | `minx`         | `MINX`              | DOUBLE |
+  | `maxy`         | `MAXY`              | DOUBLE |
+  | `miny`         | `MINY`              | DOUBLE |
+  | `resolution`   | `RESOLUTION`        | DOUBLE |
+  | `state`        | `STATE`             | TEXT   |
+  | `class`        | `CLASS`             | TEXT   |
+  | `origin`       | `ORIGIN`            | TEXT   |
+  | `owner`        | `OWNER`             | TEXT   |
+  | `date`         | `DATE`              | TEXT   |
+  | `names`        | `NAMES`             | TEXT   |
+  | `cas`          | `CAS REGISTRY NO`   | TEXT   |
+  | `molform`      | `MOLFORM`           | TEXT   |
+  | `nist_source`  | `$NIST SOURCE`      | TEXT   |
+
 List the available metadata fields that can be projected into the report:
 
 ```bash
