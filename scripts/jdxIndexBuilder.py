@@ -85,6 +85,7 @@ PROMOTED_KEYS = {
     'NAMES':'names','CAS REGISTRY NO':'cas','MOLFORM':'molform','$NIST SOURCE':'nist_source'
 }
 NUMERIC_KEYS={'NPOINTS','XFACTOR','YFACTOR','DELTAX','FIRSTX','LASTX','FIRSTY','MAXX','MINX','MAXY','MINY','RESOLUTION'}
+PROMOTED_COLUMN_TYPES={PROMOTED_KEYS[k]:('DOUBLE' if k in NUMERIC_KEYS else 'TEXT') for k in PROMOTED_KEYS}
 KEY_RE=re.compile(r'^##\s*([^=]+?)\s*=\s*(.*)$')
 COMMENT_RE=re.compile(r'^\s*\$\$')
 
@@ -397,7 +398,15 @@ def fit_peak(x,y,idx,model,window):
 def init_db(outdir:str):
     os.makedirs(outdir,exist_ok=True)
     con=duckdb.connect(os.path.join(outdir,'peaks.duckdb'))
-    con.execute('''CREATE TABLE IF NOT EXISTS spectra(file_id TEXT PRIMARY KEY,path TEXT,n_points INT,n_spectra INT,meta_json TEXT);''')
+    con.execute('''CREATE TABLE IF NOT EXISTS spectra(
+        file_id TEXT PRIMARY KEY,
+        path TEXT,
+        n_points INT,
+        n_spectra INT,
+        meta_json TEXT
+    );''')
+    for column,sql_type in PROMOTED_COLUMN_TYPES.items():
+        con.execute(f'ALTER TABLE spectra ADD COLUMN IF NOT EXISTS {column} {sql_type}')
     con.execute('''CREATE TABLE IF NOT EXISTS peaks(file_id TEXT,spectrum_id INT,peak_id INT,center DOUBLE,fwhm DOUBLE,amplitude DOUBLE,area DOUBLE,r2 DOUBLE,PRIMARY KEY(file_id,spectrum_id,peak_id));''')
     con.execute('''CREATE TABLE IF NOT EXISTS file_consensus(file_id TEXT,cluster_id INT,center DOUBLE,fwhm DOUBLE,support INT,PRIMARY KEY(file_id,cluster_id));''')
     con.execute('''CREATE TABLE IF NOT EXISTS global_consensus(cluster_id INT PRIMARY KEY,center DOUBLE,support INT);''')
@@ -405,9 +414,24 @@ def init_db(outdir:str):
 
 def store_headers(con,file_id:str,headers:Dict[str,str]):
     meta_json=json.dumps(headers,ensure_ascii=False)
+    columns=['file_id','path','n_points','n_spectra','meta_json']
+    values=[file_id,'',0,0,meta_json]
+    for key,column in PROMOTED_KEYS.items():
+        raw=headers.get(key)
+        if raw is None:
+            coerced=None
+        elif key in NUMERIC_KEYS:
+            num=_parse_numeric(raw)
+            coerced=float(num) if num is not None else None
+        else:
+            coerced=raw
+        columns.append(column)
+        values.append(coerced)
+    placeholders=','.join(['?']*len(values))
+    col_clause=','.join(columns)
     con.execute(
-        'INSERT OR REPLACE INTO spectra (file_id,path,n_points,n_spectra,meta_json) VALUES (?,?,?,?,?)',
-        [file_id,'',0,0,meta_json]
+        f'INSERT OR REPLACE INTO spectra ({col_clause}) VALUES ({placeholders})',
+        values
     )
 
 def index_file(path:str,con,args):
