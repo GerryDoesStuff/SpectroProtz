@@ -134,10 +134,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             stages_row.addWidget(checkbox)
             self._stage_controls[key] = checkbox
 
-        self.peaks_button = QtWidgets.QToolButton()
-        self.peaks_button.setText("Peaks")
-        self.peaks_button.setCheckable(True)
-        self.peaks_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.peaks_button = QtWidgets.QCheckBox("Peaks")
         self.peaks_button.toggled.connect(self._on_peaks_toggled)
         self.peaks_button.blockSignals(True)
         self.peaks_button.setChecked(self._peaks_enabled)

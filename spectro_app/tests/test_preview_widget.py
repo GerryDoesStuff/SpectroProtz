@@ -110,6 +110,7 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
         np.testing.assert_allclose(np.array(y_data), np.array([0.6, 0.3]))
         assert scatter.isVisible()
 
+        assert isinstance(widget.peaks_button, QtWidgets.QCheckBox)
         assert widget.peaks_button.isEnabled()
         assert widget.peaks_button.isChecked()
 
