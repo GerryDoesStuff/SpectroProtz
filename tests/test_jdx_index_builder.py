@@ -95,6 +95,88 @@ def _write_malformed_jdx(path):
     )
 
 
+def _write_non_ftir_jdx(path):
+    path.write_text(
+        "\n".join(
+            [
+                "##TITLE=UV",
+                "##JCAMP-DX=5.00",
+                "##DATA TYPE=UV/VIS SPECTRUM",
+                "##CLASS=ABSORPTION",
+                "##XYDATA=(X,Y)",
+                "200 0.1",
+                "210 0.2",
+                "220 0.3",
+                "##END=",
+            ]
+        )
+    )
+
+
+def test_is_ftir_spectrum_detects_ir_variants():
+    assert idx.is_ftir_spectrum({"DATA TYPE": "Infrared spectrum"})
+    assert idx.is_ftir_spectrum({"CLASS": "FT-IR"})
+    with pytest.raises(idx.UnsupportedSpectrumError) as excinfo:
+        idx.is_ftir_spectrum({"DATA TYPE": "UV/VIS SPECTRUM"})
+    assert "UV/VIS" in str(excinfo.value)
+
+
+def test_index_file_records_non_ftir_skip(tmp_path, caplog):
+    data_path = tmp_path / "uv.jdx"
+    _write_non_ftir_jdx(data_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+
+    with caplog.at_level("INFO"):
+        processed, peaks = idx.index_file(str(data_path), con, args)
+
+    try:
+        assert processed == 0
+        assert peaks == 0
+        assert any("Skipping non-FTIR" in record.getMessage() for record in caplog.records)
+
+        row = con.execute(
+            "SELECT error FROM ingest_errors WHERE file_path = ?",
+            [str(data_path)],
+        ).fetchone()
+        assert row is not None and "Unsupported spectrum type" in row[0]
+
+        file_id = idx.file_sha1(str(data_path))
+        peak_count = con.execute(
+            "SELECT COUNT(*) FROM peaks WHERE file_id = ?",
+            [file_id],
+        ).fetchone()[0]
+        assert peak_count == 0
+    finally:
+        con.close()
+
+
+def test_index_file_raises_for_non_ftir_when_collecting(tmp_path):
+    data_path = tmp_path / "uv.jdx"
+    _write_non_ftir_jdx(data_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+    args._collect_skips = True
+
+    try:
+        with pytest.raises(idx.UnsupportedSpectrumError):
+            idx.index_file(str(data_path), con, args)
+
+        row = con.execute(
+            "SELECT error FROM ingest_errors WHERE file_path = ?",
+            [str(data_path)],
+        ).fetchone()
+        assert row is not None and "Unsupported spectrum type" in row[0]
+    finally:
+        con.close()
+
+
 def test_index_file_overwrites_existing_peaks(tmp_path):
     data_path = tmp_path / "sample.jdx"
     _write_test_jdx(data_path)
