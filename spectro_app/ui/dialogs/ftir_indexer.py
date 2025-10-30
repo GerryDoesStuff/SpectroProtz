@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import ast
+import json
 import traceback
 from types import SimpleNamespace
 from typing import Dict, Any
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -27,6 +29,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from spectro_app.app_context import AppContext
 
 from scripts.jdxIndexBuilder import (
     build_file_consensus,
@@ -202,11 +206,15 @@ class IndexerWorker(QObject):
 class FtirIndexerDialog(QDialog):
     """Configuration dialog for building FTIR indexes via jdxIndexBuilder."""
 
-    def __init__(self, parent: QWidget | None = None):
+    last_index_path_changed = pyqtSignal(str)
+
+    def __init__(self, appctx: AppContext, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("FTIR Index Builder")
         self.setModal(True)
         self._defaults = _load_cli_defaults()
+        self._appctx = appctx
+        self._settings = appctx.settings
 
         self._source_dir_edit = QLineEdit()
         self._source_dir_edit.setPlaceholderText("Select JCAMP-DX source folder")
@@ -420,6 +428,20 @@ class FtirIndexerDialog(QDialog):
         self._status_label = QLabel("Ready.")
         self._status_label.setWordWrap(True)
 
+        self._last_index_label = QLabel("No index run yet.")
+        self._last_index_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._last_index_label.setWordWrap(True)
+        self._open_index_button = QPushButton("Open folder")
+        self._open_index_button.setEnabled(False)
+        self._open_index_button.clicked.connect(self._open_last_index_folder)
+        last_index_layout = QHBoxLayout()
+        last_index_layout.addWidget(self._last_index_label, 1)
+        last_index_layout.addWidget(self._open_index_button)
+        last_index_container = QWidget()
+        last_index_container.setLayout(last_index_layout)
+
         self._button_box = QDialogButtonBox()
         self._run_button = self._button_box.addButton("Run", QDialogButtonBox.ButtonRole.AcceptRole)
         self._cancel_button = self._button_box.addButton(
@@ -435,6 +457,7 @@ class FtirIndexerDialog(QDialog):
         layout.addWidget(self._progress_bar)
         layout.addWidget(self._log_output, 1)
         layout.addWidget(self._status_label)
+        layout.addWidget(last_index_container)
         layout.addWidget(self._button_box)
 
         self._worker_thread: QThread | None = None
@@ -445,8 +468,11 @@ class FtirIndexerDialog(QDialog):
         self._total_files = 0
         self._processed_files = 0
         self._current_index_path: Path | None = None
+        self._last_index_path: str | None = None
+        self._last_run_params: Dict[str, Any] | None = None
 
         self._apply_defaults()
+        self._load_saved_preferences()
 
     # ------------------------------------------------------------------
     def _build_path_row(self, editor: QLineEdit, picker) -> QWidget:
@@ -497,6 +523,104 @@ class FtirIndexerDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         self._apply_defaults()
+
+    def _load_saved_preferences(self) -> None:
+        settings = self._settings
+        data_dir = settings.value("indexer/dataDir", "", type=str) or ""
+        index_dir = settings.value("indexer/indexDir", "", type=str) or ""
+        params_raw = settings.value("indexer/params", "", type=str) or ""
+        last_index = settings.value("indexer/lastIndexPath", "", type=str) or ""
+
+        if data_dir:
+            self._source_dir_edit.setText(data_dir)
+        if index_dir:
+            self._index_dir_edit.setText(index_dir)
+        if params_raw:
+            try:
+                params = json.loads(params_raw)
+            except (TypeError, json.JSONDecodeError):  # pragma: no cover - corrupted settings
+                params = {}
+            self._apply_saved_params(params)
+        self._update_last_index_display(last_index or None)
+
+    def _apply_saved_params(self, params: Dict[str, Any]) -> None:
+        setters: Dict[str, Any] = {
+            "prominence": lambda value: self._prominence_spin.setValue(float(value)),
+            "min_distance": lambda value: self._min_distance_spin.setValue(int(value)),
+            "sg_win": lambda value: self._sg_window_spin.setValue(int(value)),
+            "sg_poly": lambda value: self._sg_poly_spin.setValue(int(value)),
+            "als_lam": lambda value: self._als_lambda_spin.setValue(float(value)),
+            "als_p": lambda value: self._als_p_spin.setValue(float(value)),
+            "fit_window_pts": lambda value: self._fit_window_spin.setValue(int(value)),
+            "min_r2": lambda value: self._min_r2_spin.setValue(float(value)),
+            "file_min_samples": lambda value: self._file_min_samples_spin.setValue(int(value)),
+            "file_eps_factor": lambda value: self._file_eps_factor_spin.setValue(float(value)),
+            "file_eps_min": lambda value: self._file_eps_min_spin.setValue(float(value)),
+            "global_min_samples": lambda value: self._global_min_samples_spin.setValue(int(value)),
+            "global_eps_abs": lambda value: self._global_eps_abs_spin.setValue(float(value)),
+            "strict": lambda value: self._strict_check.setChecked(bool(value)),
+        }
+
+        for key, setter in setters.items():
+            if key in params:
+                try:
+                    setter(params[key])
+                except (TypeError, ValueError):  # pragma: no cover - invalid persisted value
+                    continue
+
+    def _persist_preferences(self, success: bool, db_path: str | None = None) -> None:
+        if not self._last_run_params:
+            return
+
+        params = self._last_run_params
+        settings = self._settings
+        settings.setValue("indexer/dataDir", params.get("data_dir", ""))
+        settings.setValue("indexer/indexDir", params.get("index_dir", ""))
+
+        advanced_keys = {
+            "prominence",
+            "min_distance",
+            "sg_win",
+            "sg_poly",
+            "als_lam",
+            "als_p",
+            "fit_window_pts",
+            "min_r2",
+            "file_min_samples",
+            "file_eps_factor",
+            "file_eps_min",
+            "global_min_samples",
+            "global_eps_abs",
+            "strict",
+        }
+        advanced_params = {
+            key: params.get(key)
+            for key in advanced_keys
+            if key in params
+        }
+        settings.setValue("indexer/params", json.dumps(advanced_params))
+
+        if success and db_path:
+            resolved = str(Path(db_path).resolve())
+            settings.setValue("indexer/lastIndexPath", resolved)
+            self._update_last_index_display(resolved)
+            self.last_index_path_changed.emit(resolved)
+
+    def _update_last_index_display(self, path: str | None) -> None:
+        if path:
+            self._last_index_path = path
+            self._last_index_label.setText(path)
+            self._open_index_button.setEnabled(True)
+        else:
+            self._last_index_path = None
+            self._last_index_label.setText("No index run yet.")
+            self._open_index_button.setEnabled(False)
+
+    def _open_last_index_folder(self) -> None:
+        if not self._last_index_path:
+            return
+        folder = Path(self._last_index_path).resolve().parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     # ------------------------------------------------------------------
     def values(self) -> Dict[str, Any]:
@@ -629,6 +753,7 @@ class FtirIndexerDialog(QDialog):
         self._progress_bar.setValue(0)
         self._status_label.setText("Preparing to index…")
         self._current_index_path = (Path(params["index_dir"]).resolve() / "peaks.duckdb")
+        self._last_run_params = params.copy()
 
         self._worker = IndexerWorker(params)
         self._worker_thread = QThread(self)
@@ -662,6 +787,7 @@ class FtirIndexerDialog(QDialog):
         self._cancel_button.setEnabled(True)
         self._cancel_button.setText("Close")
         self._current_index_path = None
+        self._last_run_params = None
 
     def _on_worker_progress(self, processed: int, total: int) -> None:
         self._total_files = total
@@ -693,6 +819,7 @@ class FtirIndexerDialog(QDialog):
         self._progress_bar.setValue(self._progress_bar.maximum())
         footer = f"{summary}\nDatabase: {db_path}"
         self._status_label.setText(footer)
+        self._persist_preferences(True, db_path)
         self._finish_worker()
 
     def _on_worker_cancelled(self, summary: str, db_path: str) -> None:
@@ -700,6 +827,7 @@ class FtirIndexerDialog(QDialog):
         footer = f"{summary}\nDatabase: {db_path}"
         self._status_label.setText(footer)
         self._append_log(summary)
+        self._persist_preferences(False, None)
         self._finish_worker()
 
     def _on_worker_error(self, message: str) -> None:

@@ -31,9 +31,7 @@ from spectro_app.ui.docks.recipe_editor import RecipeEditorDock
 from spectro_app.ui.menus import build_menus
 
 if TYPE_CHECKING:  # pragma: no cover - imported only for typing
-    from spectro_app.ui.dialogs.ftir_reference_indexer import (
-        FtirReferenceIndexerDialog,
-    )
+    from spectro_app.ui.dialogs.ftir_indexer import FtirIndexerDialog
 
 
 class _ExportLayoutDialog(QtWidgets.QDialog):
@@ -157,7 +155,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._view_menu: Optional[QtWidgets.QMenu] = None
         self._panels_menu: Optional[QtWidgets.QMenu] = None
         self._default_layout_state: Optional[QtCore.QByteArray] = None
-        self._ftir_indexer_dialog: Optional["FtirReferenceIndexerDialog"] = None
+        self._ftir_indexer_dialog: Optional["FtirIndexerDialog"] = None
+        self._index_status_label: Optional[QtWidgets.QLabel] = None
         build_menus(self)
         self._refresh_recent_menu()
         self._collect_actions()
@@ -299,6 +298,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.addPermanentWidget(self.progress)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
+
+        index_label = QtWidgets.QLabel()
+        index_label.setObjectName("ftirIndexStatusLabel")
+        index_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        index_label.setVisible(False)
+        self.status.addPermanentWidget(index_label)
+        self._index_status_label = index_label
+        self._update_index_status_label()
+
+    def _update_index_status_label(self, path: Optional[str] = None) -> None:
+        if self._index_status_label is None:
+            return
+
+        if path is None:
+            stored = self.appctx.settings.value("indexer/lastIndexPath", "", type=str)
+            if isinstance(stored, str):
+                path = stored
+            else:
+                path = ""
+
+        display = (path or "").strip()
+        if display:
+            text = f"Last FTIR index: {display}"
+            self._index_status_label.setText(text)
+            self._index_status_label.setToolTip(display)
+            self._index_status_label.setVisible(True)
+        else:
+            self._index_status_label.clear()
+            self._index_status_label.setToolTip("")
+            self._index_status_label.setVisible(False)
 
     def _collect_actions(self):
         actions = {action.text(): action for action in self.findChildren(QtGui.QAction)}
@@ -956,11 +987,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_open_ftir_indexer(self):
         if self._ftir_indexer_dialog is None:
-            from spectro_app.ui.dialogs.ftir_reference_indexer import (
-                FtirReferenceIndexerDialog,
-            )
+            from spectro_app.ui.dialogs.ftir_indexer import FtirIndexerDialog
 
-            self._ftir_indexer_dialog = FtirReferenceIndexerDialog(self)
+            dialog = FtirIndexerDialog(self.appctx, self)
+            dialog.last_index_path_changed.connect(self._update_index_status_label)
+            dialog.finished.connect(lambda _result: self._update_index_status_label())
+            self._ftir_indexer_dialog = dialog
 
         self._ftir_indexer_dialog.show()
         self._ftir_indexer_dialog.raise_()
