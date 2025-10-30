@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
 import ast
 import json
+import importlib.util
 import traceback
 from types import SimpleNamespace
 from typing import Dict, Any, List, Tuple, Optional
 import random
+
+from pathlib import Path
 
 import numpy as np
 
@@ -64,7 +66,21 @@ def _load_cli_defaults() -> Dict[str, Any]:
     script requires (e.g. duckdb).
     """
 
-    module_path = Path(__file__).resolve().parents[2] / "scripts" / "jdxIndexBuilder.py"
+    module_name = "scripts.jdxIndexBuilder"
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(
+            "Unable to locate the 'scripts.jdxIndexBuilder' module. "
+            "Please ensure SpectroProtz is installed correctly and the 'scripts' package is available."
+        )
+
+    module_path = Path(spec.origin)
+    if not module_path.is_file():
+        raise RuntimeError(
+            "The 'scripts.jdxIndexBuilder' module was found, but its source file could not be accessed. "
+            "Please verify your installation."
+        )
+
     source = module_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
