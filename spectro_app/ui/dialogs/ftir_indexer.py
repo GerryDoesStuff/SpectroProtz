@@ -5,7 +5,7 @@ import ast
 import json
 import traceback
 from types import SimpleNamespace
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -38,6 +38,7 @@ from scripts.jdxIndexBuilder import (
     index_file,
     init_db,
     persist_consensus,
+    UnsupportedSpectrumError,
 )
 
 
@@ -115,6 +116,7 @@ class IndexerWorker(QObject):
     finished = pyqtSignal(str, str)
     cancelled = pyqtSignal(str, str)
     error_occurred = pyqtSignal(str)
+    non_ftir_detected = pyqtSignal(list)
 
     def __init__(self, params: Dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -149,6 +151,7 @@ class IndexerWorker(QObject):
                 )
 
             args = SimpleNamespace(**self._params)
+            setattr(args, "_collect_skips", True)
             if not hasattr(args, "model") or args.model is None:
                 args.model = "Gaussian"
 
@@ -157,13 +160,24 @@ class IndexerWorker(QObject):
             total_specs = 0
             total_peaks = 0
             processed_files = 0
+            skipped_non_ftir: List[Tuple[str, str]] = []
 
             for path in files:
                 if self._cancelled:
                     break
                 processed_files += 1
                 self.log_message.emit(f"Indexing {path}...")
-                n_specs, n_peaks = index_file(str(path), con, args)
+                try:
+                    n_specs, n_peaks = index_file(str(path), con, args)
+                except UnsupportedSpectrumError as exc:
+                    descriptor = getattr(exc, "descriptor", str(exc))
+                    skipped_non_ftir.append((str(path), descriptor))
+                    self.log_message.emit(
+                        f"Skipped non-FTIR spectrum: {path} ({descriptor})"
+                    )
+                    self.progress_update.emit(processed_files, total_files)
+                    self.stats_update.emit(total_specs, total_peaks)
+                    continue
                 total_specs += n_specs
                 total_peaks += n_peaks
                 self.log_message.emit(
@@ -173,6 +187,8 @@ class IndexerWorker(QObject):
                 self.stats_update.emit(total_specs, total_peaks)
 
             if self._cancelled:
+                if skipped_non_ftir:
+                    self.non_ftir_detected.emit(skipped_non_ftir)
                 self.log_message.emit("Indexing cancelled by user.")
                 summary = (
                     f"Indexed spectra: {total_specs} | Peaks: {total_peaks} | "
@@ -189,6 +205,8 @@ class IndexerWorker(QObject):
                 f"Indexed spectra: {total_specs} | Peaks: {total_peaks} | "
                 f"File clusters: {len(fc)} | Global: {len(gc)}"
             )
+            if skipped_non_ftir:
+                self.non_ftir_detected.emit(skipped_non_ftir)
             self.log_message.emit(summary)
             self.finished.emit(summary, str(peaks_path))
         except Exception as exc:
@@ -391,10 +409,11 @@ class FtirIndexerDialog(QDialog):
         # Options ------------------------------------------------------------
         self._strict_check = QCheckBox("Strict error handling")
         self._strict_check.setToolTip(
-            "Raise exceptions instead of skipping files when indexing encounters issues."
+            "Raise exceptions instead of skipping files when indexing encounters issues, including non-FTIR spectra."
         )
         self._strict_check.setWhatsThis(
-            "When enabled the indexer aborts on errors rather than skipping problematic spectra."
+            "When enabled the indexer aborts on any issue rather than skipping problematic spectra.\n"
+            "Non-FTIR files normally generate warnings and are logged, but strict mode raises an error."
         )
 
         options_widget = QWidget()
@@ -424,6 +443,17 @@ class FtirIndexerDialog(QDialog):
         self._log_output.setReadOnly(True)
         self._log_output.setPlaceholderText("Status messages will appear here during indexing.")
         self._log_output.setMinimumHeight(120)
+        self._log_default_tooltip = (
+            "Displays indexing progress, warnings, and skipped spectra.\n"
+            "Non-FTIR files are skipped automatically and recorded in the ingest_errors table."
+        )
+        self._log_default_whats_this = (
+            "The log shows live progress updates, errors, and notifications about skipped files.\n"
+            "Hover after a run to review any non-FTIR spectra that were omitted."
+        )
+        self._log_output.setToolTip(self._log_default_tooltip)
+        self._log_output.setWhatsThis(self._log_default_whats_this)
+        self._log_output.viewport().setToolTip(self._log_default_tooltip)
 
         self._status_label = QLabel("Ready.")
         self._status_label.setWordWrap(True)
@@ -470,6 +500,7 @@ class FtirIndexerDialog(QDialog):
         self._current_index_path: Path | None = None
         self._last_index_path: str | None = None
         self._last_run_params: Dict[str, Any] | None = None
+        self._skipped_non_ftir: List[Tuple[str, str]] = []
 
         self._apply_defaults()
         self._load_saved_preferences()
@@ -745,6 +776,9 @@ class FtirIndexerDialog(QDialog):
         self._cancel_button.setEnabled(True)
         self._cancel_button.setText("Cancel")
         self._log_output.clear()
+        self._log_output.setToolTip(self._log_default_tooltip)
+        self._log_output.setWhatsThis(self._log_default_whats_this)
+        self._log_output.viewport().setToolTip(self._log_default_tooltip)
         self._total_spectra = 0
         self._total_peaks = 0
         self._total_files = 0
@@ -754,6 +788,7 @@ class FtirIndexerDialog(QDialog):
         self._status_label.setText("Preparing to index…")
         self._current_index_path = (Path(params["index_dir"]).resolve() / "peaks.duckdb")
         self._last_run_params = params.copy()
+        self._skipped_non_ftir = []
 
         self._worker = IndexerWorker(params)
         self._worker_thread = QThread(self)
@@ -765,6 +800,7 @@ class FtirIndexerDialog(QDialog):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.cancelled.connect(self._on_worker_cancelled)
         self._worker.error_occurred.connect(self._on_worker_error)
+        self._worker.non_ftir_detected.connect(self._on_non_ftir_detected)
         self._worker_thread.start()
 
     def _cleanup_worker(self) -> None:
@@ -838,3 +874,39 @@ class FtirIndexerDialog(QDialog):
         else:
             self._status_label.setText(f"Error: {message}")
         QMessageBox.critical(self, "Indexing failed", message)
+
+    def _on_non_ftir_detected(self, entries: List[Tuple[str, str]]) -> None:
+        if not entries:
+            return
+        self._skipped_non_ftir = list(entries)
+        limit = 5
+        preview = entries[:limit]
+        summary_lines = [
+            f"• {Path(path).name}: {descriptor}" for path, descriptor in preview
+        ]
+        remaining = len(entries) - len(preview)
+        if remaining > 0:
+            summary_lines.append(
+                f"…and {remaining} more (hover over the log for the complete list)."
+            )
+        message = (
+            "The following files were skipped because they are not FTIR spectra:\n"
+            + "\n".join(summary_lines)
+        )
+        QMessageBox.warning(self, "Non-FTIR spectra skipped", message)
+
+        tooltip_lines = [
+            "Non-FTIR spectra were skipped during the last run:",
+            *(f"{path} — {descriptor}" for path, descriptor in entries),
+            "These files are recorded in the ingest_errors table of the index database.",
+        ]
+        tooltip = "\n".join(tooltip_lines)
+        self._log_output.setToolTip(tooltip)
+        self._log_output.viewport().setToolTip(tooltip)
+        self._log_output.setWhatsThis(
+            tooltip
+            + "\n\nUse the ingest_errors table in peaks.duckdb to review or export the skipped entries."
+        )
+        self._append_log(
+            f"Skipped {len(entries)} non-FTIR files. Hover over the log for details or query ingest_errors."
+        )

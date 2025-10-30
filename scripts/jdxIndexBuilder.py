@@ -31,6 +31,96 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
 
+
+class UnsupportedSpectrumError(RuntimeError):
+    """Raised when the JCAMP headers do not describe an FTIR spectrum."""
+
+    def __init__(self, descriptor: Optional[str] = None, header_key: Optional[str] = None):
+        descriptor_clean = (descriptor or "").strip()
+        if not descriptor_clean:
+            descriptor_clean = "Unknown spectrum type"
+        message = descriptor_clean
+        if header_key:
+            message = f"{descriptor_clean} (header {header_key})"
+        super().__init__(message)
+        self.descriptor = descriptor_clean
+        self.header_key = header_key
+
+
+_FTIR_HEADER_KEYS = {
+    "DATA TYPE",
+    "DATATYPE",
+    "CLASS",
+    "SPECTROMETER/DATATYPE",
+    "SPECTROMETER TYPE",
+    "SPECTROMETER",
+    "INSTRUMENT",
+    "TECHNIQUE",
+}
+
+
+def is_ftir_spectrum(headers: Dict[str, str]) -> bool:
+    """Return True when the provided headers describe an FTIR spectrum.
+
+    Parameters
+    ----------
+    headers:
+        Mapping of JCAMP header keys to values.
+
+    Returns
+    -------
+    bool
+        True when any recognised FTIR descriptor is found.
+
+    Raises
+    ------
+    UnsupportedSpectrumError
+        If none of the inspected headers appear to describe an FTIR spectrum.
+    """
+
+    candidates: List[Tuple[str, str]] = []
+    for key, value in headers.items():
+        if not value:
+            continue
+        key_upper = key.upper()
+        if key_upper in _FTIR_HEADER_KEYS or "DATA TYPE" in key_upper or "SPECTROMETER" in key_upper:
+            candidates.append((key, value))
+
+    def _normalise(text: str) -> List[str]:
+        cleaned = re.sub(r"[^A-Za-z0-9]+", " ", text).upper()
+        tokens = cleaned.split()
+        if not tokens:
+            return []
+        joined = " ".join(tokens)
+        # Include joined token variants so patterns like "FT IR" become "FTIR".
+        tokens.append(joined.replace(" ", ""))
+        return tokens
+
+    for key, value in candidates:
+        tokens = _normalise(value)
+        if not tokens:
+            continue
+        if any(tok in {"IR", "INFRARED", "FTIR"} for tok in tokens):
+            return True
+        if any(tok.startswith("FT") and tok.endswith("IR") for tok in tokens):
+            return True
+        if any(tok.endswith("INFRARED") for tok in tokens):
+            return True
+        if any(tok.endswith("IR") and len(tok) <= 4 for tok in tokens):
+            return True
+
+    primary_descriptor: Optional[Tuple[str, str]] = None
+    for candidate in candidates:
+        if candidate[0].upper().startswith("DATA"):
+            primary_descriptor = candidate
+            break
+    if primary_descriptor is None and candidates:
+        primary_descriptor = candidates[0]
+
+    descriptor_value = primary_descriptor[1] if primary_descriptor else None
+    descriptor_key = primary_descriptor[0] if primary_descriptor else None
+    raise UnsupportedSpectrumError(descriptor_value, descriptor_key)
+
 try:
     from sklearn.cluster import DBSCAN
 except Exception:  # pragma: no cover - fallback for minimal environments
@@ -447,6 +537,27 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
 def index_file(path:str,con,args):
     headers=parse_jdx_headers(path)
     try:
+        is_ftir_spectrum(headers)
+    except UnsupportedSpectrumError as exc:
+        message=f"Unsupported spectrum type: {exc.descriptor}"
+        logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+        try:
+            con.execute(
+                """
+                INSERT INTO ingest_errors (file_path,error)
+                VALUES (?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    error=excluded.error,
+                    occurred_at=now()
+                """,
+                [path, message]
+            )
+        except Exception:
+            logger.debug("Failed to record ingest error for %s", path, exc_info=True)
+        if getattr(args,'strict',False) or getattr(args,'_collect_skips',False):
+            raise
+        return 0,0
+    try:
         x,Y,headers=parse_jcamp_multispec(path)
     except Exception as exc:
         logger.error("Failed to parse JCAMP file %s: %s", path, exc)
@@ -600,7 +711,13 @@ def main():
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
     total_specs=0;total_peaks=0
     for p in files:
-        n_s,n_p=index_file(p,con,args);total_specs+=n_s;total_peaks+=n_p
+        try:
+            n_s,n_p=index_file(p,con,args)
+        except UnsupportedSpectrumError:
+            if getattr(args,'strict',False):
+                raise
+            n_s,n_p=0,0
+        total_specs+=n_s;total_peaks+=n_p
     fc=build_file_consensus(con,args);gc=build_global_consensus(con,fc,args)
     persist_consensus(con,fc,gc)
     print(f'Indexed spectra: {total_specs} | Peaks: {total_peaks} | File clusters: {len(fc)} | Global: {len(gc)}')
