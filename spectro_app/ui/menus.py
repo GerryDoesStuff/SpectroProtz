@@ -46,6 +46,15 @@ def build_menus(window):
         _act(window, "Check for Updates...", slot=window.on_check_updates)
     )
     tools_menu.addAction(
+        _act(
+            window,
+            "FTIR Reference Indexer...",
+            slot=window.on_open_ftir_indexer,
+            status_tip="Launch the JCAMP-to-DuckDB indexing workflow.",
+            tool_tip="Launch the JCAMP-to-DuckDB indexing workflow.",
+        )
+    )
+    tools_menu.addAction(
         _act(window, "Open Log Folder", slot=window.on_open_log_folder)
     )
 
@@ -53,10 +62,14 @@ def build_menus(window):
     help_menu.addAction(_act(window, "Help Contents", slot=window.on_help))
     help_menu.addAction(_act(window, "About", slot=window.on_about))
 
-def _act(parent, text, shortcut=None, slot=None):
+def _act(parent, text, shortcut=None, slot=None, *, status_tip=None, tool_tip=None):
     a = QAction(text, parent)
     if shortcut:
         a.setShortcut(shortcut)
     if slot:
         a.triggered.connect(slot)
+    if status_tip:
+        a.setStatusTip(status_tip)
+    if tool_tip:
+        a.setToolTip(tool_tip)
     return a

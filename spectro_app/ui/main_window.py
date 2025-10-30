@@ -2,7 +2,7 @@ import copy
 import json
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
@@ -29,6 +29,11 @@ from spectro_app.ui.docks.preview_widget import PreviewDock
 from spectro_app.ui.docks.qc_widget import QCDock
 from spectro_app.ui.docks.recipe_editor import RecipeEditorDock
 from spectro_app.ui.menus import build_menus
+
+if TYPE_CHECKING:  # pragma: no cover - imported only for typing
+    from spectro_app.ui.dialogs.ftir_reference_indexer import (
+        FtirReferenceIndexerDialog,
+    )
 
 
 class _ExportLayoutDialog(QtWidgets.QDialog):
@@ -152,6 +157,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._view_menu: Optional[QtWidgets.QMenu] = None
         self._panels_menu: Optional[QtWidgets.QMenu] = None
         self._default_layout_state: Optional[QtCore.QByteArray] = None
+        self._ftir_indexer_dialog: Optional["FtirReferenceIndexerDialog"] = None
         build_menus(self)
         self._refresh_recent_menu()
         self._collect_actions()
@@ -947,6 +953,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status.showMessage("Settings updated.", 5000)
         self._refresh_recent_menu()
+
+    def on_open_ftir_indexer(self):
+        if self._ftir_indexer_dialog is None:
+            from spectro_app.ui.dialogs.ftir_reference_indexer import (
+                FtirReferenceIndexerDialog,
+            )
+
+            self._ftir_indexer_dialog = FtirReferenceIndexerDialog(self)
+
+        self._ftir_indexer_dialog.show()
+        self._ftir_indexer_dialog.raise_()
+        self._ftir_indexer_dialog.activateWindow()
 
     def on_check_updates(self):
         QtWidgets.QMessageBox.information(
