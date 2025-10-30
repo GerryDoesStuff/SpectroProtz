@@ -43,8 +43,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     STAGE_LABELS: Dict[str, str] = {
         "raw": "Raw",
-        "joined": "Joined",
         "stitched": "Stitched",
+        "joined": "Joined",
         "despiked": "Despiked",
         "blanked": "Blanked",
         "baseline_corrected": "Baseline",
@@ -53,11 +53,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     DEFAULT_STAGE_PRIORITY: Sequence[str] = (
         "smoothed",
+        "baseline_corrected",
+        "blanked",
         "despiked",
         "joined",
         "stitched",
-        "baseline_corrected",
-        "blanked",
         "raw",
     )
 
