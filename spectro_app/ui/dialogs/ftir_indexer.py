@@ -5,7 +5,10 @@ import ast
 import json
 import traceback
 from types import SimpleNamespace
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+import random
+
+import numpy as np
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -33,6 +36,11 @@ from PyQt6.QtWidgets import (
 from spectro_app.app_context import AppContext
 
 from scripts.jdxIndexBuilder import (
+    convert_y_for_processing,
+    fit_peak,
+    parse_jcamp_multispec,
+    preprocess,
+    sanitize_xy,
     build_file_consensus,
     build_global_consensus,
     index_file,
@@ -40,6 +48,13 @@ from scripts.jdxIndexBuilder import (
     persist_consensus,
     UnsupportedSpectrumError,
 )
+
+from scipy.signal import find_peaks
+
+try:  # pragma: no cover - optional dependency
+    import pyqtgraph as pg
+except Exception:  # pragma: no cover - dependency missing or misconfigured
+    pg = None  # type: ignore[assignment]
 
 
 def _load_cli_defaults() -> Dict[str, Any]:
@@ -234,6 +249,27 @@ class FtirIndexerDialog(QDialog):
         self._appctx = appctx
         self._settings = appctx.settings
 
+        self._preview_plot_help = (
+            "Visualises how the current preprocessing and peak-detection parameters shape a single spectrum. "
+            "The blue curve is the sanitised input trace, the orange curve is the normalised output after baseline "
+            "correction and smoothing, circular markers denote fitted peak centres, and translucent bands mark "
+            "the estimated full width at half maximum (FWHM)."
+        )
+        self._preview_plot: Optional["pg.PlotWidget"] = None
+        self._preview_raw_curve = None
+        self._preview_processed_curve = None
+        self._preview_peak_scatter = None
+        self._preview_peak_regions: List[Any] = []
+        self._preview_button: Optional[QPushButton] = None
+        self._preview_update_button: Optional[QPushButton] = None
+        self._preview_fallback_label: Optional[QLabel] = None
+        self._preview_cached_file: Optional[Path] = None
+        self._preview_cached_x: Optional[np.ndarray] = None
+        self._preview_cached_y_display: Optional[np.ndarray] = None
+        self._preview_cached_y_base: Optional[np.ndarray] = None
+        self._preview_cached_headers: Optional[Dict[str, Any]] = None
+        self._preview_cached_spectrum_index: Optional[int] = None
+
         self._source_dir_edit = QLineEdit()
         self._source_dir_edit.setPlaceholderText("Select JCAMP-DX source folder")
         self._source_dir_edit.setToolTip("Folder containing JCAMP-DX spectra to index.")
@@ -406,6 +442,8 @@ class FtirIndexerDialog(QDialog):
         clustering_tab = QWidget()
         clustering_tab.setLayout(clustering_form)
 
+        preview_tab = self._build_preview_tab()
+
         # Options ------------------------------------------------------------
         self._strict_check = QCheckBox("Strict error handling")
         self._strict_check.setToolTip(
@@ -427,6 +465,7 @@ class FtirIndexerDialog(QDialog):
         tabs.addTab(detection_tab, "Peaks")
         tabs.addTab(baseline_tab, "Baseline")
         tabs.addTab(clustering_tab, "Consensus")
+        tabs.addTab(preview_tab, "Preview")
         self._tabs = tabs
 
         restore_btn = QPushButton("Restore defaults")
@@ -506,6 +545,83 @@ class FtirIndexerDialog(QDialog):
         self._load_saved_preferences()
 
     # ------------------------------------------------------------------
+    def _build_preview_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "Sample a random JCAMP-DX spectrum from the selected source directory to inspect the current preprocessing "
+            "settings before running a full index build."
+        )
+        intro.setWordWrap(True)
+        intro.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        intro.setToolTip(self._preview_plot_help)
+        intro.setWhatsThis(self._preview_plot_help)
+        layout.addWidget(intro)
+
+        if pg is None:
+            fallback = QLabel(
+                "Plot previews require the optional PyQtGraph dependency. Install 'pyqtgraph' to enable live spectrum previews."
+            )
+            fallback.setWordWrap(True)
+            fallback.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            fallback.setToolTip(
+                "PyQtGraph is not available in this environment, so the preview plot cannot be displayed."
+            )
+            fallback.setWhatsThis(
+                "The live preview uses PyQtGraph for interactive plotting. Install the package and restart the application to enable it."
+            )
+            layout.addWidget(fallback, 1)
+            self._preview_fallback_label = fallback
+        else:
+            plot = pg.PlotWidget(background="w")
+            plot.setLabel("bottom", "Wavenumber", units="cm⁻¹")
+            plot.setLabel("left", "Intensity", units="a.u.")
+            plot.showGrid(x=True, y=True, alpha=0.2)
+            plot.setMenuEnabled(False)
+            plot.setToolTip(self._preview_plot_help)
+            plot.setWhatsThis(self._preview_plot_help)
+            layout.addWidget(plot, 1)
+            self._preview_plot = plot
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        preview_btn = QPushButton("Preview")
+        preview_btn.setToolTip(
+            "Select a random JCAMP-DX file from the chosen source directory, process it with the current parameters, and display the fit."
+        )
+        preview_btn.setWhatsThis(
+            "Loads a random spectrum so you can inspect how prominence, smoothing, and fitting options affect peak detection before indexing everything."
+        )
+        preview_btn.clicked.connect(self._on_preview_clicked)
+        button_row.addWidget(preview_btn)
+
+        update_btn = QPushButton("Update")
+        update_btn.setEnabled(False)
+        update_btn.setToolTip(
+            "Re-run the preview fit using the cached spectrum and the latest parameter values."
+        )
+        update_btn.setWhatsThis(
+            "Keeps the current previewed spectrum but reapplies preprocessing and peak fitting after tweaking parameters such as prominence or smoothing."
+        )
+        update_btn.clicked.connect(self._on_update_preview_clicked)
+        button_row.addWidget(update_btn)
+
+        layout.addLayout(button_row)
+
+        if pg is None:
+            preview_btn.setEnabled(False)
+            update_btn.setEnabled(False)
+
+        self._preview_button = preview_btn
+        self._preview_update_button = update_btn
+
+        return tab
+
+    # ------------------------------------------------------------------
     def _build_path_row(self, editor: QLineEdit, picker) -> QWidget:
         button = QToolButton()
         button.setText("...")
@@ -522,6 +638,309 @@ class FtirIndexerDialog(QDialog):
     def _set_numeric_help(self, widget: QWidget, text: str) -> None:
         widget.setToolTip(text)
         widget.setWhatsThis(text)
+
+    def _set_preview_update_enabled(self, enabled: bool) -> None:
+        if self._preview_update_button is not None:
+            self._preview_update_button.setEnabled(bool(enabled) and pg is not None)
+
+    def _clear_preview_plot(self) -> None:
+        if self._preview_plot is not None:
+            try:
+                self._preview_plot.clear()
+            except Exception:  # pragma: no cover - defensive guard
+                pass
+        self._preview_raw_curve = None
+        self._preview_processed_curve = None
+        self._preview_peak_scatter = None
+        self._preview_peak_regions.clear()
+
+    def _clear_preview_cache(self) -> None:
+        self._preview_cached_file = None
+        self._preview_cached_x = None
+        self._preview_cached_y_display = None
+        self._preview_cached_y_base = None
+        self._preview_cached_headers = None
+        self._preview_cached_spectrum_index = None
+        self._set_preview_update_enabled(False)
+
+    def _preview_error(self, message: str, exc: Exception | None = None) -> None:
+        detail = message if exc is None else f"{message}: {exc}"
+        self._append_log(detail)
+        self._status_label.setText(detail)
+        if self._preview_fallback_label is not None:
+            self._preview_fallback_label.setToolTip(detail)
+        QMessageBox.warning(self, "Preview unavailable", detail)
+        self._set_preview_update_enabled(False)
+
+    def _on_preview_clicked(self) -> None:
+        if pg is None:
+            return
+
+        source_text = self._source_dir_edit.text().strip()
+        if not source_text:
+            self._preview_error("Select a JCAMP source folder before running a preview.")
+            return
+
+        source = Path(source_text)
+        if not source.exists() or not source.is_dir():
+            self._preview_error("The selected JCAMP source folder does not exist or is not a directory.")
+            return
+
+        self._clear_preview_plot()
+        self._clear_preview_cache()
+        self._status_label.setText("Scanning for preview spectrum…")
+
+        files = [
+            path
+            for path in source.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".jdx", ".dx"}
+        ]
+        if not files:
+            self._preview_error(f"No JCAMP-DX files were found under {source}.")
+            return
+
+        chosen = random.choice(files)
+        params = self.values()
+
+        try:
+            preview_data = self._prepare_preview_from_path(chosen, params)
+        except Exception as exc:
+            self._preview_error(f"Failed to generate preview for {chosen.name}", exc)
+            return
+
+        self._plot_preview_result(preview_data)
+        self._set_preview_cache(preview_data)
+        self._set_preview_update_enabled(True)
+
+        spectrum_idx = preview_data.get("spectrum_index", 0)
+        msg = f"Previewing {chosen.name} (spectrum {spectrum_idx + 1})"
+        self._status_label.setText(msg)
+        self._append_log(msg)
+
+    def _on_update_preview_clicked(self) -> None:
+        if pg is None:
+            return
+        if (
+            self._preview_cached_file is None
+            or self._preview_cached_x is None
+            or self._preview_cached_y_base is None
+        ):
+            self._preview_error("Load a preview before running an update.")
+            return
+
+        params = self.values()
+        try:
+            preview_data = self._run_preview_pipeline(
+                np.asarray(self._preview_cached_x, dtype=float),
+                np.asarray(self._preview_cached_y_base, dtype=float),
+                params,
+            )
+        except Exception as exc:
+            self._preview_error(
+                f"Failed to update preview for {self._preview_cached_file.name}", exc
+            )
+            return
+
+        preview_data["file_path"] = self._preview_cached_file
+        preview_data["spectrum_index"] = self._preview_cached_spectrum_index or 0
+        if self._preview_cached_headers is not None:
+            preview_data["headers"] = self._preview_cached_headers
+
+        self._plot_preview_result(preview_data)
+        self._set_preview_cache(preview_data)
+        self._set_preview_update_enabled(True)
+
+        msg = (
+            f"Updated preview for {self._preview_cached_file.name} "
+            f"(spectrum {preview_data['spectrum_index'] + 1})"
+        )
+        self._status_label.setText(msg)
+        self._append_log(msg)
+
+    def _prepare_preview_from_path(
+        self, path: Path, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        x, spectra, headers = parse_jcamp_multispec(str(path))
+        if not spectra:
+            raise ValueError("No spectra were parsed from the selected JCAMP file.")
+
+        spectrum_index = random.randrange(len(spectra))
+        y = np.asarray(spectra[spectrum_index], dtype=float)
+        x_clean, y_clean = sanitize_xy(x, y)
+        if x_clean.size == 0 or y_clean.size == 0:
+            raise ValueError("The selected spectrum contains no finite data points.")
+
+        y_units = headers.get("YUNITS", "")
+        y_base = convert_y_for_processing(y_clean, y_units)
+        if y_base.size == 0:
+            raise ValueError("The selected spectrum contains no usable intensity values after conversion.")
+
+        preview_data = self._run_preview_pipeline(x_clean, y_base, params)
+        preview_data["file_path"] = path
+        preview_data["headers"] = headers
+        preview_data["spectrum_index"] = spectrum_index
+        preview_data["y_units"] = y_units
+        return preview_data
+
+    def _run_preview_pipeline(
+        self, x: np.ndarray, y_base: np.ndarray, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        x_clean = np.asarray(x, dtype=float)
+        y_for_processing = np.asarray(y_base, dtype=float)
+        y_proc = preprocess(
+            y_for_processing,
+            int(params.get("sg_win", 9)),
+            int(params.get("sg_poly", 3)),
+            float(params.get("als_lam", 1e5)),
+            float(params.get("als_p", 0.01)),
+        )
+
+        diffs = np.diff(x_clean)
+        if diffs.size:
+            step = float(np.nanmedian(np.abs(diffs)))
+        else:
+            step = float("nan")
+        if not np.isfinite(step) or step <= 0:
+            span = (
+                float(np.nanmax(x_clean) - np.nanmin(x_clean))
+                if x_clean.size
+                else float("nan")
+            )
+            if np.isfinite(span) and span > 0 and len(x_clean) > 1:
+                step = span / (len(x_clean) - 1)
+            else:
+                min_distance = float(params.get("min_distance", 1))
+                step = min_distance if min_distance > 0 else 1.0
+        distance = max(
+            1,
+            int(
+                np.ceil(
+                    float(params.get("min_distance", 1)) / max(step, 1e-9)
+                )
+            ),
+        )
+
+        prominence = float(params.get("prominence", 0.02))
+        idxs, _ = find_peaks(y_proc, prominence=prominence, distance=distance)
+        model = params.get("model", "Gaussian") or "Gaussian"
+        fit_window = int(params.get("fit_window_pts", 50))
+        min_r2 = float(params.get("min_r2", 0.9))
+
+        peaks: List[Dict[str, Any]] = []
+        centers: List[float] = []
+        heights: List[float] = []
+        fwhm_values: List[float] = []
+        indices: List[int] = []
+
+        for idx in idxs:
+            fit = fit_peak(x_clean, y_proc, int(idx), model, fit_window)
+            if not fit or fit.get("r2", 0.0) < min_r2:
+                continue
+            peaks.append(fit)
+            centers.append(float(fit.get("center", x_clean[int(idx)])))
+            heights.append(float(y_proc[int(idx)]))
+            fwhm_values.append(float(fit.get("fwhm", 0.0)))
+            indices.append(int(idx))
+
+        result: Dict[str, Any] = {
+            "x": x_clean,
+            "y_raw": y_for_processing,
+            "y_processed": y_proc,
+            "peaks": peaks,
+            "peak_centers": np.asarray(centers, dtype=float),
+            "peak_heights": np.asarray(heights, dtype=float),
+            "peak_fwhm": np.asarray(fwhm_values, dtype=float),
+            "peak_indices": np.asarray(indices, dtype=int),
+        }
+        return result
+
+    def _plot_preview_result(self, data: Dict[str, Any]) -> None:
+        if self._preview_plot is None:
+            return
+
+        self._preview_plot.clear()
+        self._preview_peak_regions.clear()
+
+        x = np.asarray(data.get("x", []), dtype=float)
+        y_raw = np.asarray(data.get("y_raw", []), dtype=float)
+        y_proc = np.asarray(data.get("y_processed", []), dtype=float)
+
+        raw_pen = pg.mkPen(color="#1f77b4", width=1.5)
+        processed_pen = pg.mkPen(color="#ff7f0e", width=2.0)
+
+        if x.size and y_raw.size:
+            self._preview_raw_curve = self._preview_plot.plot(x, y_raw, pen=raw_pen)
+        if x.size and y_proc.size:
+            self._preview_processed_curve = self._preview_plot.plot(x, y_proc, pen=processed_pen)
+
+        centers = np.asarray(data.get("peak_centers", []), dtype=float)
+        heights = np.asarray(data.get("peak_heights", []), dtype=float)
+        fwhm_values = np.asarray(data.get("peak_fwhm", []), dtype=float)
+
+        if centers.size and heights.size:
+            scatter = pg.ScatterPlotItem(
+                x=centers,
+                y=heights,
+                brush=pg.mkBrush(255, 127, 14, 180),
+                pen=pg.mkPen("#ff7f0e"),
+                size=8,
+                symbol="o",
+            )
+            self._preview_plot.addItem(scatter)
+            self._preview_peak_scatter = scatter
+
+            for center, width in zip(centers, fwhm_values):
+                if not np.isfinite(center) or not np.isfinite(width):
+                    continue
+                half = max(width / 2.0, 0.0)
+                region = pg.LinearRegionItem(
+                    values=(center - half, center + half),
+                    brush=pg.mkBrush(255, 127, 14, 60),
+                    movable=False,
+                )
+                region.setZValue(-10)
+                self._preview_plot.addItem(region)
+                self._preview_peak_regions.append(region)
+
+        combined = np.concatenate([y_raw, y_proc]) if y_raw.size or y_proc.size else np.array([])
+        if x.size:
+            xmin = float(np.nanmin(x)) if np.size(x) else 0.0
+            xmax = float(np.nanmax(x)) if np.size(x) else 1.0
+            if np.isfinite(xmin) and np.isfinite(xmax):
+                self._preview_plot.setXRange(xmin, xmax, padding=0.02)
+        if combined.size:
+            ymin = float(np.nanmin(combined))
+            ymax = float(np.nanmax(combined))
+            if not np.isfinite(ymin) or not np.isfinite(ymax):
+                ymin, ymax = -1.0, 1.0
+            if ymin == ymax:
+                ymin -= 0.5
+                ymax += 0.5
+            self._preview_plot.setYRange(ymin, ymax, padding=0.05)
+
+    def _set_preview_cache(self, data: Dict[str, Any]) -> None:
+        file_path = data.get("file_path")
+        if isinstance(file_path, Path):
+            self._preview_cached_file = file_path
+        elif isinstance(file_path, str):
+            self._preview_cached_file = Path(file_path)
+        else:
+            self._preview_cached_file = None
+
+        x = np.asarray(data.get("x", []), dtype=float)
+        y_raw = np.asarray(data.get("y_raw", []), dtype=float)
+        self._preview_cached_x = x.copy() if x.size else None
+        self._preview_cached_y_display = y_raw.copy() if y_raw.size else None
+        self._preview_cached_y_base = y_raw.copy() if y_raw.size else None
+
+        headers = data.get("headers")
+        if isinstance(headers, dict):
+            self._preview_cached_headers = dict(headers)
+        else:
+            self._preview_cached_headers = None
+
+        spectrum_index = data.get("spectrum_index")
+        self._preview_cached_spectrum_index = int(spectrum_index) if spectrum_index is not None else None
 
     def _on_pick_source_dir(self) -> None:
         start = self._source_dir_edit.text().strip() or str(Path.home())
