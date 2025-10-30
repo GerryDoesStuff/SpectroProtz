@@ -18,6 +18,7 @@ Ensure your environment matches the expectations declared in
 - Scientific stack: **numpy >= 1.26**, **scipy >= 1.12**, **pandas >= 2.0**,
   **matplotlib >= 3.8**, **pyqtgraph >= 0.13**.
 - File/utility helpers: **openpyxl >= 3.1**, **pillow >= 10.0**, **PyYAML >= 6.0**.
+- FTIR indexer backend: **duckdb >= 0.8**.
 
 A typical workflow uses a virtual environment so the above packages can be
 installed without affecting system Python.
