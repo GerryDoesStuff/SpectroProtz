@@ -65,10 +65,10 @@ def test_indexer_persists_consensus(tmp_path, monkeypatch):
     duckdb = sys.modules["duckdb"]
     con = duckdb.connect(str(db_path))
     file_rows = con.execute(
-        "SELECT file_id, cluster_id, center, fwhm, support FROM file_consensus"
+        "SELECT file_id, cluster_id, polarity, center, fwhm, support FROM file_consensus"
     ).fetchall()
     global_rows = con.execute(
-        "SELECT cluster_id, center, support FROM global_consensus"
+        "SELECT cluster_id, polarity, center, support FROM global_consensus"
     ).fetchall()
     con.close()
 

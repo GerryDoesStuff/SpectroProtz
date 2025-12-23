@@ -787,7 +787,8 @@ class FtirIndexerDialog(QDialog):
         self._set_preview_update_enabled(True)
 
         spectrum_idx = preview_data.get("spectrum_index", 0)
-        msg = f"Previewing {chosen.name} (spectrum {spectrum_idx + 1})"
+        summary = self._format_peak_polarity_summary(preview_data)
+        msg = f"Previewing {chosen.name} (spectrum {spectrum_idx + 1}) | {summary}"
         self._status_label.setText(msg)
         self._append_log(msg)
 
@@ -824,9 +825,10 @@ class FtirIndexerDialog(QDialog):
         self._set_preview_cache(preview_data)
         self._set_preview_update_enabled(True)
 
+        summary = self._format_peak_polarity_summary(preview_data)
         msg = (
             f"Updated preview for {self._preview_cached_file.name} "
-            f"(spectrum {preview_data['spectrum_index'] + 1})"
+            f"(spectrum {preview_data['spectrum_index'] + 1}) | {summary}"
         )
         self._status_label.setText(msg)
         self._append_log(msg)
@@ -909,6 +911,7 @@ class FtirIndexerDialog(QDialog):
         heights: List[float] = []
         fwhm_values: List[float] = []
         indices: List[int] = []
+        polarities: List[str] = []
 
         for idx, polarity in candidates:
             fit_y = -y_proc if polarity < 0 else y_proc
@@ -919,11 +922,14 @@ class FtirIndexerDialog(QDialog):
                 fit = dict(fit)
                 fit["amplitude"] = float(fit.get("amplitude", 0.0)) * -1
                 fit["area"] = float(fit.get("area", 0.0)) * -1
+            polarity_label = "negative" if polarity < 0 else "positive"
+            fit["polarity"] = polarity_label
             peaks.append(fit)
             centers.append(float(fit.get("center", x_clean[int(idx)])))
             heights.append(float(y_proc[int(idx)]))
             fwhm_values.append(float(fit.get("fwhm", 0.0)))
             indices.append(int(idx))
+            polarities.append(polarity_label)
 
         result: Dict[str, Any] = {
             "x": x_clean,
@@ -934,8 +940,18 @@ class FtirIndexerDialog(QDialog):
             "peak_heights": np.asarray(heights, dtype=float),
             "peak_fwhm": np.asarray(fwhm_values, dtype=float),
             "peak_indices": np.asarray(indices, dtype=int),
+            "peak_polarities": polarities,
         }
         return result
+
+    def _format_peak_polarity_summary(self, data: Dict[str, Any]) -> str:
+        peaks = data.get("peaks", [])
+        if not peaks:
+            return "Peaks: 0"
+        pos = sum(1 for peak in peaks if peak.get("polarity") == "positive")
+        neg = sum(1 for peak in peaks if peak.get("polarity") == "negative")
+        total = len(peaks)
+        return f"Peaks: {total} (positive {pos}, negative {neg})"
 
     def _plot_preview_result(self, data: Dict[str, Any]) -> None:
         if self._preview_plot is None:

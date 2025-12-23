@@ -524,9 +524,12 @@ def init_db(outdir:str):
     );''')
     for column,sql_type in PROMOTED_COLUMN_TYPES.items():
         con.execute(f'ALTER TABLE spectra ADD COLUMN IF NOT EXISTS {column} {sql_type}')
-    con.execute('''CREATE TABLE IF NOT EXISTS peaks(file_id TEXT,spectrum_id INT,peak_id INT,center DOUBLE,fwhm DOUBLE,amplitude DOUBLE,area DOUBLE,r2 DOUBLE,PRIMARY KEY(file_id,spectrum_id,peak_id));''')
-    con.execute('''CREATE TABLE IF NOT EXISTS file_consensus(file_id TEXT,cluster_id INT,center DOUBLE,fwhm DOUBLE,support INT,PRIMARY KEY(file_id,cluster_id));''')
-    con.execute('''CREATE TABLE IF NOT EXISTS global_consensus(cluster_id INT PRIMARY KEY,center DOUBLE,support INT);''')
+    con.execute('''CREATE TABLE IF NOT EXISTS peaks(file_id TEXT,spectrum_id INT,peak_id INT,polarity INT,center DOUBLE,fwhm DOUBLE,amplitude DOUBLE,area DOUBLE,r2 DOUBLE,PRIMARY KEY(file_id,spectrum_id,peak_id));''')
+    con.execute('ALTER TABLE peaks ADD COLUMN IF NOT EXISTS polarity INT')
+    con.execute('''CREATE TABLE IF NOT EXISTS file_consensus(file_id TEXT,cluster_id INT,polarity INT,center DOUBLE,fwhm DOUBLE,support INT,PRIMARY KEY(file_id,cluster_id,polarity));''')
+    con.execute('ALTER TABLE file_consensus ADD COLUMN IF NOT EXISTS polarity INT')
+    con.execute('''CREATE TABLE IF NOT EXISTS global_consensus(cluster_id INT,polarity INT,center DOUBLE,support INT,PRIMARY KEY(cluster_id,polarity));''')
+    con.execute('ALTER TABLE global_consensus ADD COLUMN IF NOT EXISTS polarity INT')
     con.execute('''CREATE TABLE IF NOT EXISTS ingest_errors(
         file_path TEXT PRIMARY KEY,
         error TEXT,
@@ -654,7 +657,20 @@ def index_file(path:str,con,args,failed_files=None):
                     fit=dict(fit)
                     fit['amplitude']*=-1
                     fit['area']*=-1
-                con.execute('INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?)',[file_id,sid,pid,fit['center'],fit['fwhm'],fit['amplitude'],fit['area'],fit['r2']])
+                con.execute(
+                    'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
+                    [
+                        file_id,
+                        sid,
+                        pid,
+                        int(polarity),
+                        fit['center'],
+                        fit['fwhm'],
+                        fit['amplitude'],
+                        fit['area'],
+                        fit['r2'],
+                    ],
+                )
                 pid+=1
             total_peaks+=pid
         con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
@@ -669,11 +685,11 @@ def weighted_median(x,w):
     return x[min(np.searchsorted(c,0.5),len(x)-1)]
 
 def build_file_consensus(con,args):
-    df=con.execute('SELECT file_id,center,fwhm,area,r2 FROM peaks').fetch_df()
+    df=con.execute('SELECT file_id,COALESCE(polarity,1) AS polarity,center,fwhm,area,r2 FROM peaks').fetch_df()
     if df.empty: return pd.DataFrame()
     out=[]
-    for fid,g in df.groupby('file_id'):
-        c=g['center'].to_numpy();f=g['fwhm'].to_numpy();w=(g['area']*g['r2']).to_numpy()
+    for (fid, polarity), g in df.groupby(['file_id','polarity']):
+        c=g['center'].to_numpy();f=g['fwhm'].to_numpy();w=(np.abs(g['area'])*g['r2']).to_numpy()
         eps=max(args.file_eps_factor*np.nanmedian(f),args.file_eps_min)
         labels=DBSCAN(eps=eps,min_samples=args.file_min_samples).fit_predict(c.reshape(-1,1))
         for cl in set(labels):
@@ -691,6 +707,7 @@ def build_file_consensus(con,args):
             out.append(
                 dict(
                     file_id=fid,
+                    polarity=int(polarity),
                     center=weighted_median(cx,cw),
                     fwhm=np.nanmedian(cf),
                     support=int(np.sum(valid)),
@@ -699,24 +716,27 @@ def build_file_consensus(con,args):
     fc=pd.DataFrame(out)
     if fc.empty:
         return fc
-    fc=fc.sort_values(['file_id','center']).reset_index(drop=True)
-    fc['cluster_id']=fc.groupby('file_id').cumcount()
-    cols=['file_id','cluster_id','center','fwhm','support']
+    fc=fc.sort_values(['file_id','polarity','center']).reset_index(drop=True)
+    fc['cluster_id']=fc.groupby(['file_id']).cumcount()
+    cols=['file_id','cluster_id','polarity','center','fwhm','support']
     return fc[cols]
 
 def build_global_consensus(con,fc,args):
     if fc.empty: return pd.DataFrame()
-    c=fc['center'].to_numpy();labels=DBSCAN(eps=args.global_eps_abs,min_samples=args.global_min_samples).fit_predict(c.reshape(-1,1))
     out=[]
-    for cl in set(labels):
-        if cl==-1: continue
-        m=labels==cl;cx=c[m];out.append(dict(center=float(np.median(cx)),support=int(np.sum(m))))
+    for polarity, group in fc.groupby('polarity'):
+        c=group['center'].to_numpy()
+        labels=DBSCAN(eps=args.global_eps_abs,min_samples=args.global_min_samples).fit_predict(c.reshape(-1,1))
+        for cl in set(labels):
+            if cl==-1: continue
+            m=labels==cl;cx=c[m]
+            out.append(dict(polarity=int(polarity), center=float(np.median(cx)), support=int(np.sum(m))))
     gc=pd.DataFrame(out)
     if gc.empty:
         return gc
-    gc=gc.sort_values('center').reset_index(drop=True)
+    gc=gc.sort_values(['polarity','center']).reset_index(drop=True)
     gc['cluster_id']=np.arange(len(gc),dtype=int)
-    cols=['cluster_id','center','support']
+    cols=['cluster_id','polarity','center','support']
     return gc[cols]
 
 def persist_consensus(con,fc,gc):
@@ -724,13 +744,13 @@ def persist_consensus(con,fc,gc):
     con.execute('DELETE FROM global_consensus')
     if not fc.empty:
         con.executemany(
-            'INSERT INTO file_consensus (file_id,cluster_id,center,fwhm,support) VALUES (?,?,?,?,?)',
-            fc[['file_id','cluster_id','center','fwhm','support']].itertuples(index=False,name=None)
+            'INSERT INTO file_consensus (file_id,cluster_id,polarity,center,fwhm,support) VALUES (?,?,?,?,?,?)',
+            fc[['file_id','cluster_id','polarity','center','fwhm','support']].itertuples(index=False,name=None)
         )
     if not gc.empty:
         con.executemany(
-            'INSERT INTO global_consensus (cluster_id,center,support) VALUES (?,?,?)',
-            gc[['cluster_id','center','support']].itertuples(index=False,name=None)
+            'INSERT INTO global_consensus (cluster_id,polarity,center,support) VALUES (?,?,?,?)',
+            gc[['cluster_id','polarity','center','support']].itertuples(index=False,name=None)
         )
 
 def main():
