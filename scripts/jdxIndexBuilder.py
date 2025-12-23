@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging
+import os, re, json, math, argparse, hashlib, glob, logging, sys
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, savgol_filter
@@ -707,10 +707,14 @@ def main():
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
     args=ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
+    total_files=len(files)
+    print(f'Found {total_files} JCAMP file(s). Starting indexing...')
     total_specs=0;total_peaks=0
-    for p in files:
+    for idx,p in enumerate(files,1):
+        print(f'[{idx}/{total_files}] Indexing {p}', file=sys.stdout, flush=True)
         try:
             n_s,n_p=index_file(p,con,args)
         except UnsupportedSpectrumError:
@@ -718,7 +722,10 @@ def main():
                 raise
             n_s,n_p=0,0
         total_specs+=n_s;total_peaks+=n_p
-    fc=build_file_consensus(con,args);gc=build_global_consensus(con,fc,args)
+    print('Building file-level consensus clusters...', file=sys.stdout, flush=True)
+    fc=build_file_consensus(con,args)
+    print('Building global consensus clusters...', file=sys.stdout, flush=True)
+    gc=build_global_consensus(con,fc,args)
     persist_consensus(con,fc,gc)
     print(f'Indexed spectra: {total_specs} | Peaks: {total_peaks} | File clusters: {len(fc)} | Global: {len(gc)}')
     con.close()
