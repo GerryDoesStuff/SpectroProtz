@@ -717,11 +717,11 @@ def main():
         default=script_dir,
         help='Output directory for DuckDB/Parquet files (defaults to script location)',
     )
-    ap.add_argument('--prominence',type=float,default=0.02);ap.add_argument('--min-distance',type=float,default=5.0,dest='min_distance')
-    ap.add_argument('--sg-win',type=int,default=9,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
-    ap.add_argument('--als-lam',type=float,default=1e5,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
-    ap.add_argument('--model',choices=['Gaussian'],default='Gaussian');ap.add_argument('--min-r2',type=float,default=0.9,dest='min_r2')
-    ap.add_argument('--fit-window-pts',type=int,default=50,dest='fit_window_pts')
+    ap.add_argument('--prominence',type=float,default=0.01);ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
+    ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
+    ap.add_argument('--als-lam',type=float,default=5e4,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
+    ap.add_argument('--model',choices=['Gaussian'],default='Gaussian');ap.add_argument('--min-r2',type=float,default=0.85,dest='min_r2')
+    ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
