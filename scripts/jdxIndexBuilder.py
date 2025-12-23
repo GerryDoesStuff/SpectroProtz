@@ -534,13 +534,18 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
         values
     )
 
-def index_file(path:str,con,args):
+def index_file(path:str,con,args,failed_files=None):
+    def record_failure(message: str) -> None:
+        if failed_files is not None:
+            failed_files.append((path, message))
+
     headers=parse_jdx_headers(path)
     try:
         is_ftir_spectrum(headers)
     except UnsupportedSpectrumError as exc:
         message=f"Unsupported spectrum type: {exc.descriptor}"
         logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+        record_failure(message)
         try:
             con.execute(
                 """
@@ -561,6 +566,7 @@ def index_file(path:str,con,args):
         x,Y,headers=parse_jcamp_multispec(path)
     except Exception as exc:
         logger.error("Failed to parse JCAMP file %s: %s", path, exc)
+        record_failure(str(exc))
         try:
             con.execute(
                 """
