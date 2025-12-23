@@ -490,6 +490,28 @@ def fit_peak(x,y,idx,model,window):
         return dict(center=x0,fwhm=fwhm,amplitude=A,area=area,r2=r2)
     except: return None
 
+def merge_peak_indices(y_proc: np.ndarray, pos_idxs: np.ndarray, neg_idxs: np.ndarray, min_distance_pts: int) -> List[Tuple[int, int]]:
+    candidates: List[Tuple[int, int, float]] = []
+    if pos_idxs is not None:
+        for idx in np.asarray(pos_idxs, dtype=int):
+            if 0 <= idx < len(y_proc):
+                candidates.append((int(idx), 1, float(abs(y_proc[int(idx)]))))
+    if neg_idxs is not None:
+        for idx in np.asarray(neg_idxs, dtype=int):
+            if 0 <= idx < len(y_proc):
+                candidates.append((int(idx), -1, float(abs(y_proc[int(idx)]))))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    selected: List[Tuple[int, int, float]] = []
+    min_distance_pts = max(int(min_distance_pts), 0)
+    for idx, polarity, score in candidates:
+        if any(abs(idx - prev_idx) <= min_distance_pts for prev_idx, _, _ in selected):
+            continue
+        selected.append((idx, polarity, score))
+    selected.sort(key=lambda item: item[0])
+    return [(idx, polarity) for idx, polarity, _ in selected]
+
 def init_db(outdir:str):
     os.makedirs(outdir,exist_ok=True)
     con=duckdb.connect(os.path.join(outdir,'peaks.duckdb'))
@@ -618,11 +640,20 @@ def index_file(path:str,con,args,failed_files=None):
                 else:
                     step=float(args.min_distance) if args.min_distance>0 else 1.0
             dist_pts=max(1,int(np.ceil(float(args.min_distance)/max(step,1e-9))))
-            idxs,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
+            idxs_pos,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
+            idxs_neg=np.array([],dtype=int)
+            if getattr(args,'detect_negative_peaks',False):
+                idxs_neg,_=find_peaks(-y_proc,prominence=args.prominence,distance=dist_pts)
+            peak_candidates=merge_peak_indices(y_proc,idxs_pos,idxs_neg,dist_pts)
             pid=0
-            for i in idxs:
-                fit=fit_peak(x_clean,y_proc,i,args.model,args.fit_window_pts)
+            for i,polarity in peak_candidates:
+                fit_y=-y_proc if polarity<0 else y_proc
+                fit=fit_peak(x_clean,fit_y,i,args.model,args.fit_window_pts)
                 if not fit or fit['r2']<args.min_r2: continue
+                if polarity<0:
+                    fit=dict(fit)
+                    fit['amplitude']*=-1
+                    fit['area']*=-1
                 con.execute('INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?)',[file_id,sid,pid,fit['center'],fit['fwhm'],fit['amplitude'],fit['area'],fit['r2']])
                 pid+=1
             total_peaks+=pid
@@ -724,6 +755,7 @@ def main():
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
+    ap.add_argument('--detect-negative-peaks',action='store_true',dest='detect_negative_peaks',help='Also detect negative peaks by searching inverted spectra.')
     ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
     args=ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')

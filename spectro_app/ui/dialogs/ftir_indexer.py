@@ -40,6 +40,7 @@ from spectro_app.app_context import AppContext
 from scripts.jdxIndexBuilder import (
     convert_y_for_processing,
     fit_peak,
+    merge_peak_indices,
     parse_jcamp_multispec,
     preprocess,
     sanitize_xy,
@@ -413,6 +414,14 @@ class FtirIndexerDialog(QDialog):
             "Minimum coefficient of determination required to keep a fitted peak.",
         )
 
+        self._detect_negative_check = QCheckBox("Detect negative peaks")
+        self._detect_negative_check.setToolTip(
+            "Also search for negative peaks by scanning the inverted trace."
+        )
+        self._detect_negative_check.setWhatsThis(
+            "Enable to detect troughs by running find_peaks on the inverted processed spectrum."
+        )
+
         detection_form = QFormLayout()
         detection_form.addRow("Prominence", self._prominence_spin)
         detection_form.addRow("Min distance", self._min_distance_spin)
@@ -420,6 +429,7 @@ class FtirIndexerDialog(QDialog):
         detection_form.addRow("SG order", self._sg_poly_spin)
         detection_form.addRow("Fit window pts", self._fit_window_spin)
         detection_form.addRow("Minimum R²", self._min_r2_spin)
+        detection_form.addRow(self._detect_negative_check)
 
         detection_tab = QWidget()
         detection_tab.setLayout(detection_form)
@@ -885,7 +895,11 @@ class FtirIndexerDialog(QDialog):
         )
 
         prominence = float(params.get("prominence", 0.02))
-        idxs, _ = find_peaks(y_proc, prominence=prominence, distance=distance)
+        idxs_pos, _ = find_peaks(y_proc, prominence=prominence, distance=distance)
+        idxs_neg = np.array([], dtype=int)
+        if params.get("detect_negative_peaks", False):
+            idxs_neg, _ = find_peaks(-y_proc, prominence=prominence, distance=distance)
+        candidates = merge_peak_indices(y_proc, idxs_pos, idxs_neg, distance)
         model = params.get("model", "Gaussian") or "Gaussian"
         fit_window = int(params.get("fit_window_pts", 50))
         min_r2 = float(params.get("min_r2", 0.9))
@@ -896,10 +910,15 @@ class FtirIndexerDialog(QDialog):
         fwhm_values: List[float] = []
         indices: List[int] = []
 
-        for idx in idxs:
-            fit = fit_peak(x_clean, y_proc, int(idx), model, fit_window)
+        for idx, polarity in candidates:
+            fit_y = -y_proc if polarity < 0 else y_proc
+            fit = fit_peak(x_clean, fit_y, int(idx), model, fit_window)
             if not fit or fit.get("r2", 0.0) < min_r2:
                 continue
+            if polarity < 0:
+                fit = dict(fit)
+                fit["amplitude"] = float(fit.get("amplitude", 0.0)) * -1
+                fit["area"] = float(fit.get("area", 0.0)) * -1
             peaks.append(fit)
             centers.append(float(fit.get("center", x_clean[int(idx)])))
             heights.append(float(y_proc[int(idx)]))
@@ -1028,6 +1047,7 @@ class FtirIndexerDialog(QDialog):
         self._als_p_spin.setValue(float(defaults.get("als_p", 0.01)))
         self._fit_window_spin.setValue(int(defaults.get("fit_window_pts", 50)))
         self._min_r2_spin.setValue(float(defaults.get("min_r2", 0.9)))
+        self._detect_negative_check.setChecked(bool(defaults.get("detect_negative_peaks", False)))
         self._file_min_samples_spin.setValue(int(defaults.get("file_min_samples", 2)))
         self._file_eps_factor_spin.setValue(float(defaults.get("file_eps_factor", 0.5)))
         self._file_eps_min_spin.setValue(float(defaults.get("file_eps_min", 2.0)))
@@ -1067,6 +1087,7 @@ class FtirIndexerDialog(QDialog):
             "als_p": lambda value: self._als_p_spin.setValue(float(value)),
             "fit_window_pts": lambda value: self._fit_window_spin.setValue(int(value)),
             "min_r2": lambda value: self._min_r2_spin.setValue(float(value)),
+            "detect_negative_peaks": lambda value: self._detect_negative_check.setChecked(bool(value)),
             "file_min_samples": lambda value: self._file_min_samples_spin.setValue(int(value)),
             "file_eps_factor": lambda value: self._file_eps_factor_spin.setValue(float(value)),
             "file_eps_min": lambda value: self._file_eps_min_spin.setValue(float(value)),
@@ -1100,6 +1121,7 @@ class FtirIndexerDialog(QDialog):
             "als_p",
             "fit_window_pts",
             "min_r2",
+            "detect_negative_peaks",
             "file_min_samples",
             "file_eps_factor",
             "file_eps_min",
@@ -1149,6 +1171,7 @@ class FtirIndexerDialog(QDialog):
             "als_p": float(self._als_p_spin.value()),
             "fit_window_pts": int(self._fit_window_spin.value()),
             "min_r2": float(self._min_r2_spin.value()),
+            "detect_negative_peaks": bool(self._detect_negative_check.isChecked()),
             "file_min_samples": int(self._file_min_samples_spin.value()),
             "file_eps_factor": float(self._file_eps_factor_spin.value()),
             "file_eps_min": float(self._file_eps_min_spin.value()),
@@ -1216,6 +1239,7 @@ class FtirIndexerDialog(QDialog):
             self._als_p_spin,
             self._fit_window_spin,
             self._min_r2_spin,
+            self._detect_negative_check,
             self._file_min_samples_spin,
             self._file_eps_factor_spin,
             self._file_eps_min_spin,
