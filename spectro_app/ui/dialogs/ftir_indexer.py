@@ -161,6 +161,7 @@ class IndexerWorker(QObject):
         data_dir = Path(self._params["data_dir"]).resolve()
         index_dir = Path(self._params["index_dir"]).resolve()
         peaks_path = (index_dir / "peaks.duckdb").resolve()
+        failed_files_path = (index_dir / "failed_files.txt").resolve()
 
         con = None
         try:
@@ -182,7 +183,6 @@ class IndexerWorker(QObject):
                 )
 
             args = SimpleNamespace(**self._params)
-            setattr(args, "_collect_skips", True)
             if not hasattr(args, "model") or args.model is None:
                 args.model = "Gaussian"
 
@@ -192,6 +192,26 @@ class IndexerWorker(QObject):
             total_peaks = 0
             processed_files = 0
             skipped_non_ftir: List[Tuple[str, str]] = []
+            failed_files: List[Tuple[str, str]] = []
+
+            def write_failed_files() -> None:
+                if not failed_files:
+                    return
+                try:
+                    failed_files_path.parent.mkdir(parents=True, exist_ok=True)
+                    failed_files_path.write_text(
+                        "\n".join(
+                            f"{path}\t{reason}" for path, reason in failed_files
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.log_message.emit(
+                        f"Recorded {len(failed_files)} failed file(s) in {failed_files_path}."
+                    )
+                except Exception as exc:
+                    self.log_message.emit(
+                        f"Failed to write failed file list: {exc}"
+                    )
 
             for path in files:
                 if self._cancelled:
@@ -199,16 +219,34 @@ class IndexerWorker(QObject):
                 processed_files += 1
                 self.log_message.emit(f"Indexing {path}...")
                 try:
-                    n_specs, n_peaks = index_file(str(path), con, args)
+                    before_failures = len(failed_files)
+                    n_specs, n_peaks = index_file(
+                        str(path), con, args, failed_files=failed_files
+                    )
                 except UnsupportedSpectrumError as exc:
                     descriptor = getattr(exc, "descriptor", str(exc))
                     skipped_non_ftir.append((str(path), descriptor))
+                    failed_files.append(
+                        (str(path), f"Unsupported spectrum type: {descriptor}")
+                    )
                     self.log_message.emit(
                         f"Skipped non-FTIR spectrum: {path} ({descriptor})"
                     )
                     self.progress_update.emit(processed_files, total_files)
                     self.stats_update.emit(total_specs, total_peaks)
                     continue
+                except Exception as exc:
+                    failed_files.append((str(path), str(exc)))
+                    self.log_message.emit(
+                        f"Failed to index {path}: {exc}"
+                    )
+                    self.progress_update.emit(processed_files, total_files)
+                    self.stats_update.emit(total_specs, total_peaks)
+                    continue
+                for failed_path, reason in failed_files[before_failures:]:
+                    if reason.startswith("Unsupported spectrum type:"):
+                        descriptor = reason.split(":", 1)[1].strip()
+                        skipped_non_ftir.append((failed_path, descriptor))
                 total_specs += n_specs
                 total_peaks += n_peaks
                 self.log_message.emit(
@@ -218,6 +256,11 @@ class IndexerWorker(QObject):
                 self.stats_update.emit(total_specs, total_peaks)
 
             if self._cancelled:
+                write_failed_files()
+                if failed_files:
+                    self.log_message.emit(
+                        f"Failed files: {len(failed_files)} (see {failed_files_path})."
+                    )
                 if skipped_non_ftir:
                     self.non_ftir_detected.emit(skipped_non_ftir)
                 self.log_message.emit("Indexing cancelled by user.")
@@ -236,6 +279,11 @@ class IndexerWorker(QObject):
                 f"Indexed spectra: {total_specs} | Peaks: {total_peaks} | "
                 f"File clusters: {len(fc)} | Global: {len(gc)}"
             )
+            write_failed_files()
+            if failed_files:
+                self.log_message.emit(
+                    f"Failed files: {len(failed_files)} (see {failed_files_path})."
+                )
             if skipped_non_ftir:
                 self.non_ftir_detected.emit(skipped_non_ftir)
             self.log_message.emit(summary)
