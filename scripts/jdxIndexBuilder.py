@@ -697,7 +697,20 @@ def persist_consensus(con,fc,gc):
         )
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('data_dir');ap.add_argument('index_dir')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    ap=argparse.ArgumentParser()
+    ap.add_argument(
+        'data_dir',
+        nargs='?',
+        default=script_dir,
+        help='Directory containing JCAMP-DX files (defaults to script location)',
+    )
+    ap.add_argument(
+        'index_dir',
+        nargs='?',
+        default=script_dir,
+        help='Output directory for DuckDB/Parquet files (defaults to script location)',
+    )
     ap.add_argument('--prominence',type=float,default=0.02);ap.add_argument('--min-distance',type=float,default=5.0,dest='min_distance')
     ap.add_argument('--sg-win',type=int,default=9,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
     ap.add_argument('--als-lam',type=float,default=1e5,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
