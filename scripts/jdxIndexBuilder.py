@@ -578,7 +578,96 @@ def _baseline_piecewise(
     return baseline
 
 
-def preprocess(
+MAD_SCALE = 1.4826
+
+
+def _estimate_spacing(x: np.ndarray) -> float:
+    diffs = np.diff(np.asarray(x, dtype=float))
+    if diffs.size == 0:
+        return float("nan")
+    spacing = float(np.nanmedian(np.abs(diffs)))
+    return spacing if np.isfinite(spacing) and spacing > 0 else float("nan")
+
+
+def _resolve_sg_window_points(
+    x: np.ndarray,
+    sg_win: int | None,
+    sg_window_cm: float | None,
+    n: int,
+) -> int | None:
+    window: int | None = None
+    if sg_window_cm is not None and sg_window_cm > 0:
+        spacing = _estimate_spacing(x)
+        if np.isfinite(spacing) and spacing > 0:
+            points = int(np.round(float(sg_window_cm) / spacing)) + 1
+            if points < 3:
+                points = 3
+            if points % 2 == 0:
+                points += 1
+            window = points
+    if window is None and sg_win:
+        window = int(sg_win)
+        if window % 2 == 0:
+            window += 1
+    if window is None:
+        return None
+    if n < 3:
+        return None
+    max_window = n if n % 2 == 1 else n - 1
+    return min(window, max_window) if max_window >= 3 else None
+
+
+def _coerce_sg_polyorder(value: int) -> int:
+    poly = int(value)
+    if poly < 2:
+        return 2
+    if poly > 3:
+        return 3
+    return poly
+
+
+def _apply_sg_smoothing(
+    x: np.ndarray,
+    y: np.ndarray,
+    sg_win: int,
+    sg_poly: int,
+    sg_window_cm: float | None,
+) -> np.ndarray:
+    y2 = np.asarray(y, dtype=float).copy()
+    n = y2.size
+    if n < 3:
+        return y2
+    window = _resolve_sg_window_points(x, sg_win, sg_window_cm, n)
+    if window is None or window < 3:
+        return y2
+    poly = _coerce_sg_polyorder(sg_poly)
+    if window <= poly:
+        poly = max(1, window - 1)
+    if window <= poly or poly < 1:
+        return y2
+    return savgol_filter(y2, window, poly)
+
+
+def estimate_noise_sigma(
+    x: np.ndarray,
+    y: np.ndarray,
+    sg_win: int,
+    sg_poly: int,
+    sg_window_cm: float | None = None,
+) -> float:
+    y_arr = np.asarray(y, dtype=float)
+    if y_arr.size < 3:
+        return float("nan")
+    smooth = _apply_sg_smoothing(x, y_arr, sg_win, sg_poly, sg_window_cm)
+    residual = y_arr - smooth
+    median = float(np.nanmedian(residual))
+    mad = float(np.nanmedian(np.abs(residual - median)))
+    if not np.isfinite(mad):
+        return float("nan")
+    return MAD_SCALE * mad
+
+
+def preprocess_with_noise(
     x: np.ndarray,
     y: np.ndarray,
     sg_win: int,
@@ -586,19 +675,16 @@ def preprocess(
     als_lam: float,
     als_p: float,
     *,
+    sg_window_cm: float | None = None,
     baseline_method: str = "airpls",
     baseline_niter: int = 20,
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     y2 = np.asarray(y, dtype=float).copy()
     n = len(y2)
-    if sg_win and sg_win % 2 == 1 and sg_win > 2 and n >= 3:
-        win = min(sg_win, n if n % 2 == 1 else n - 1)
-        if win >= 3:
-            poly = min(max(sg_poly, 0), win - 1)
-            if win > poly:
-                y2 = savgol_filter(y2, win, poly)
+    noise_sigma = estimate_noise_sigma(x, y2, sg_win, sg_poly, sg_window_cm)
+    y2 = _apply_sg_smoothing(x, y2, sg_win, sg_poly, sg_window_cm)
     if als_lam > 0:
         if n >= 3:
             ranges = _parse_piecewise_ranges(baseline_ranges)
@@ -620,6 +706,38 @@ def preprocess(
     m = np.max(np.abs(y2))
     if m > 0:
         y2 /= m
+        if np.isfinite(noise_sigma):
+            noise_sigma /= m
+    return y2, noise_sigma
+
+
+def preprocess(
+    x: np.ndarray,
+    y: np.ndarray,
+    sg_win: int,
+    sg_poly: int,
+    als_lam: float,
+    als_p: float,
+    *,
+    sg_window_cm: float | None = None,
+    baseline_method: str = "airpls",
+    baseline_niter: int = 20,
+    baseline_piecewise: bool = False,
+    baseline_ranges: str | None = None,
+) -> np.ndarray:
+    y2, _ = preprocess_with_noise(
+        x,
+        y,
+        sg_win,
+        sg_poly,
+        als_lam,
+        als_p,
+        sg_window_cm=sg_window_cm,
+        baseline_method=baseline_method,
+        baseline_niter=baseline_niter,
+        baseline_piecewise=baseline_piecewise,
+        baseline_ranges=baseline_ranges,
+    )
     return y2
 
 def gaussian(x,A,x0,s,C): return A*np.exp(-0.5*((x-x0)/s)**2)+C
@@ -780,13 +898,14 @@ def index_file(path:str,con,args,failed_files=None):
             max_points=max(max_points,len(x_clean))
 
             y_for_processing=convert_y_for_processing(y_clean,y_units)
-            y_proc=preprocess(
+            y_proc, noise_sigma = preprocess_with_noise(
                 x_clean,
                 y_for_processing,
                 args.sg_win,
                 args.sg_poly,
                 args.als_lam,
                 args.als_p,
+                sg_window_cm=args.sg_window_cm,
                 baseline_method=args.baseline_method,
                 baseline_niter=args.baseline_niter,
                 baseline_piecewise=args.baseline_piecewise,
@@ -804,10 +923,15 @@ def index_file(path:str,con,args,failed_files=None):
                 else:
                     step=float(args.min_distance) if args.min_distance>0 else 1.0
             dist_pts=max(1,int(np.ceil(float(args.min_distance)/max(step,1e-9))))
-            idxs_pos,_=find_peaks(y_proc,prominence=args.prominence,distance=dist_pts)
+            effective_prominence=float(args.prominence)
+            if np.isfinite(noise_sigma):
+                adaptive = float(args.noise_sigma_multiplier) * float(noise_sigma)
+                if adaptive > effective_prominence:
+                    effective_prominence = adaptive
+            idxs_pos,_=find_peaks(y_proc,prominence=effective_prominence,distance=dist_pts)
             idxs_neg=np.array([],dtype=int)
             if getattr(args,'detect_negative_peaks',False):
-                idxs_neg,_=find_peaks(-y_proc,prominence=args.prominence,distance=dist_pts)
+                idxs_neg,_=find_peaks(-y_proc,prominence=effective_prominence,distance=dist_pts)
             peak_candidates=merge_peak_indices(y_proc,idxs_pos,idxs_neg,dist_pts)
             pid=0
             for i,polarity in peak_candidates:
@@ -930,7 +1054,9 @@ def main():
         help='Output directory for DuckDB/Parquet files (defaults to script location)',
     )
     ap.add_argument('--prominence',type=float,default=0.01);ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
+    ap.add_argument('--noise-sigma-multiplier',type=float,default=3.0,dest='noise_sigma_multiplier')
     ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
+    ap.add_argument('--sg-window-cm',type=float,default=0.0,dest='sg_window_cm')
     ap.add_argument('--als-lam',type=float,default=5e4,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
     ap.add_argument('--baseline-method',choices=['arpls','asls','airpls'],default='airpls',dest='baseline_method')
     ap.add_argument('--baseline-niter',type=int,default=20,dest='baseline_niter')
