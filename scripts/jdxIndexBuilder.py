@@ -27,6 +27,8 @@ from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, find_peaks_cwt, savgol_filter
 from scipy.optimize import curve_fit
+from scipy.interpolate import UnivariateSpline
+from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
@@ -740,46 +742,290 @@ def preprocess(
     )
     return y2
 
-def gaussian(x,A,x0,s,C): return A*np.exp(-0.5*((x-x0)/s)**2)+C
+def gaussian(x, A, x0, s, C):
+    return A * np.exp(-0.5 * ((x - x0) / s) ** 2) + C
 
-def fit_peak(x,y,idx,model,window):
-    n=len(x);i0=max(0,idx-window);i1=min(n,idx+window);xs=x[i0:i1];ys=y[i0:i1]
-    if len(xs)<5: return None
-    x0_guess = float(x[idx])
-    if len(xs) >= 5:
-        step = np.median(np.abs(np.diff(xs))) if len(xs) > 1 else 0.0
-        if np.isfinite(step) and step > 0:
-            max_delta = step * window * 0.5
-            local_mask = np.abs(xs - x0_guess) <= max_delta
-            if np.count_nonzero(local_mask) >= 5:
-                xs = xs[local_mask]
-                ys = ys[local_mask]
+
+def lorentzian(x, A, x0, gamma, C):
+    return A / (1.0 + ((x - x0) / gamma) ** 2) + C
+
+
+def voigt_profile(x, A, x0, sigma, gamma, C):
+    z = ((x - x0) + 1j * gamma) / (sigma * np.sqrt(2.0))
+    profile = np.real(wofz(z)) / (sigma * np.sqrt(2.0 * np.pi))
+    return A * profile + C
+
+
+def _ensure_odd_window(window: int, max_len: int) -> int:
+    window = max(3, int(window))
+    if window % 2 == 0:
+        window += 1
+    if window > max_len:
+        window = max_len if max_len % 2 == 1 else max_len - 1
+    return max(window, 3)
+
+
+def _resolve_step_from_x(xs: np.ndarray) -> float:
+    step = np.median(np.abs(np.diff(xs))) if xs.size > 1 else 0.0
+    if not np.isfinite(step) or step <= 0:
+        step = 1.0
+    return float(step)
+
+
+def _compute_second_derivative(xs: np.ndarray, ys: np.ndarray, distance_pts: int) -> np.ndarray:
+    if ys.size < 5:
+        return np.zeros_like(ys)
+    window = _ensure_odd_window(max(7, distance_pts * 2 + 1), ys.size)
+    poly = 3 if window >= 5 else 2
+    step = _resolve_step_from_x(xs)
     try:
-        local_idx = int(np.argmin(np.abs(xs - x0_guess)))
-        C=np.median(ys);sig=3*np.median(np.abs(np.diff(xs)))
-        A=max(float(ys[local_idx] - C), 1e-6)
-        order=np.argsort(xs)
-        xs_sorted=xs[order]
-        ys_sorted=ys[order]
-        x0=float(x[idx])
-        bounds=(
-            [0.0, float(np.min(xs_sorted)), 1e-9, -np.inf],
+        return savgol_filter(ys, window_length=window, polyorder=poly, deriv=2, delta=step)
+    except Exception:
+        first = np.gradient(ys, step)
+        return np.gradient(first, step)
+
+
+def _fit_peak_spline(xs: np.ndarray, ys: np.ndarray, x0_guess: float) -> Optional[Dict[str, float]]:
+    if xs.size < 5:
+        return None
+    order = np.argsort(xs)
+    xs_sorted = xs[order]
+    ys_sorted = ys[order]
+    smoothing = max(0.0, 0.001 * np.nanvar(ys_sorted) * xs_sorted.size)
+    spline = UnivariateSpline(xs_sorted, ys_sorted, k=3, s=smoothing)
+    dense_x = np.linspace(xs_sorted[0], xs_sorted[-1], xs_sorted.size * 8)
+    dense_y = spline(dense_x)
+    local_mask = np.abs(dense_x - x0_guess) <= (xs_sorted[-1] - xs_sorted[0]) * 0.5
+    if not np.any(local_mask):
+        local_mask = np.ones_like(dense_x, dtype=bool)
+    local_idx = int(np.argmax(dense_y[local_mask]))
+    local_x = dense_x[local_mask][local_idx]
+    peak_y = float(dense_y[local_mask][local_idx])
+    baseline = float(np.median(ys_sorted))
+    half_height = baseline + (peak_y - baseline) * 0.5
+    left_candidates = np.where(dense_x <= local_x)[0]
+    right_candidates = np.where(dense_x >= local_x)[0]
+    left_idx = left_candidates[np.where(dense_y[left_candidates] <= half_height)[0]]
+    right_idx = right_candidates[np.where(dense_y[right_candidates] <= half_height)[0]]
+    if left_idx.size == 0 or right_idx.size == 0:
+        return None
+    left_x = float(dense_x[left_idx[-1]])
+    right_x = float(dense_x[right_idx[0]])
+    fwhm = float(abs(right_x - left_x))
+    if hasattr(np, "trapezoid"):
+        area = float(np.trapezoid(np.maximum(dense_y - baseline, 0.0), dense_x))
+    else:
+        area = float(np.trapz(np.maximum(dense_y - baseline, 0.0), dense_x))
+    return dict(center=float(local_x), fwhm=fwhm, amplitude=float(peak_y - baseline), area=area, r2=1.0)
+
+
+def _fit_peak_single(xs: np.ndarray, ys: np.ndarray, x0_guess: float, model: str) -> Optional[Dict[str, float]]:
+    if xs.size < 5:
+        return None
+    model = model.lower()
+    if model == "spline":
+        return _fit_peak_spline(xs, ys, x0_guess)
+    local_idx = int(np.argmin(np.abs(xs - x0_guess)))
+    step = _resolve_step_from_x(xs)
+    C = float(np.median(ys))
+    A = max(float(ys[local_idx] - C), 1e-6)
+    width_guess = max(step * 2.0, np.abs(xs[-1] - xs[0]) / 6.0)
+    order = np.argsort(xs)
+    xs_sorted = xs[order]
+    ys_sorted = ys[order]
+    x0 = float(x0_guess)
+    if model == "lorentzian":
+        bounds = (
+            [0.0, float(np.min(xs_sorted)), step * 0.25, -np.inf],
             [np.inf, float(np.max(xs_sorted)), np.inf, np.inf],
         )
-        try:
-            popt,_=curve_fit(gaussian,xs_sorted,ys_sorted,p0=[A,x0,sig,C],maxfev=6000,bounds=bounds)
-        except Exception:
-            popt,_=curve_fit(gaussian,xs_sorted,ys_sorted,p0=[A,x0,sig,C],maxfev=20000,bounds=bounds)
-        A,x0,sig,C=popt;yfit=gaussian(xs_sorted,*popt)
-        fwhm=2.3548*abs(sig)
-        r2=1-np.sum((ys_sorted-yfit)**2)/(np.sum((ys_sorted-np.mean(ys_sorted))**2)+1e-12)
-        y_sorted=yfit
-        if hasattr(np, "trapezoid"):
-            area=float(np.trapezoid(y_sorted-C,xs_sorted))
+        popt, _ = curve_fit(
+            lorentzian,
+            xs_sorted,
+            ys_sorted,
+            p0=[A, x0, width_guess, C],
+            maxfev=12000,
+            bounds=bounds,
+        )
+        A, x0, gamma, C = popt
+        yfit = lorentzian(xs_sorted, *popt)
+        fwhm = 2.0 * abs(gamma)
+        component = lorentzian(xs_sorted, A, x0, gamma, 0.0)
+    elif model == "voigt":
+        bounds = (
+            [0.0, float(np.min(xs_sorted)), step * 0.25, step * 0.25, -np.inf],
+            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf, np.inf],
+        )
+        popt, _ = curve_fit(
+            voigt_profile,
+            xs_sorted,
+            ys_sorted,
+            p0=[A, x0, width_guess, width_guess, C],
+            maxfev=20000,
+            bounds=bounds,
+        )
+        A, x0, sigma, gamma, C = popt
+        yfit = voigt_profile(xs_sorted, *popt)
+        fwhm = 0.5346 * (2.0 * abs(gamma)) + math.sqrt(
+            0.2166 * (2.0 * abs(gamma)) ** 2 + (2.3548 * abs(sigma)) ** 2
+        )
+        component = voigt_profile(xs_sorted, A, x0, sigma, gamma, 0.0)
+    else:
+        bounds = (
+            [0.0, float(np.min(xs_sorted)), step * 0.25, -np.inf],
+            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf],
+        )
+        popt, _ = curve_fit(
+            gaussian,
+            xs_sorted,
+            ys_sorted,
+            p0=[A, x0, width_guess, C],
+            maxfev=12000,
+            bounds=bounds,
+        )
+        A, x0, sigma, C = popt
+        yfit = gaussian(xs_sorted, *popt)
+        fwhm = 2.3548 * abs(sigma)
+        component = gaussian(xs_sorted, A, x0, sigma, 0.0)
+    r2 = 1 - np.sum((ys_sorted - yfit) ** 2) / (np.sum((ys_sorted - np.mean(ys_sorted)) ** 2) + 1e-12)
+    if hasattr(np, "trapezoid"):
+        area = float(np.trapezoid(component, xs_sorted))
+    else:
+        area = float(np.trapz(component, xs_sorted))
+    return dict(center=float(x0), fwhm=float(fwhm), amplitude=float(A), area=area, r2=float(r2))
+
+
+def _fit_multi_peak(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    centers: List[float],
+    model: str,
+) -> Optional[Tuple[List[Dict[str, float]], float]]:
+    if xs.size < 5 or not centers:
+        return None
+    model = model.lower()
+    if model not in {"gaussian", "lorentzian", "voigt"}:
+        return None
+    order = np.argsort(xs)
+    xs_sorted = xs[order]
+    ys_sorted = ys[order]
+    step = _resolve_step_from_x(xs_sorted)
+    C0 = float(np.median(ys_sorted))
+    span = float(np.abs(xs_sorted[-1] - xs_sorted[0]))
+    width_guess = max(step * 2.0, span / max(len(centers) * 3.0, 3.0))
+    params = []
+    lower = []
+    upper = []
+    for center in centers:
+        local_idx = int(np.argmin(np.abs(xs_sorted - center)))
+        A0 = max(float(ys_sorted[local_idx] - C0), 1e-6)
+        params.append(A0)
+        params.append(float(center))
+        params.append(width_guess)
+        if model == "voigt":
+            params.append(width_guess)
+            lower.extend([0.0, float(np.min(xs_sorted)), step * 0.25, step * 0.25])
+            upper.extend([np.inf, float(np.max(xs_sorted)), np.inf, np.inf])
         else:
-            area=float(np.trapz(y_sorted-C,xs_sorted))
-        return dict(center=x0,fwhm=fwhm,amplitude=A,area=area,r2=r2)
-    except: return None
+            lower.extend([0.0, float(np.min(xs_sorted)), step * 0.25])
+            upper.extend([np.inf, float(np.max(xs_sorted)), np.inf])
+    params.append(C0)
+    lower.append(-np.inf)
+    upper.append(np.inf)
+
+    def _sum_gaussian(x, *p):
+        total = np.zeros_like(x, dtype=float)
+        idx = 0
+        for _ in centers:
+            total += gaussian(x, p[idx], p[idx + 1], p[idx + 2], 0.0)
+            idx += 3
+        total += p[-1]
+        return total
+
+    def _sum_lorentzian(x, *p):
+        total = np.zeros_like(x, dtype=float)
+        idx = 0
+        for _ in centers:
+            total += lorentzian(x, p[idx], p[idx + 1], p[idx + 2], 0.0)
+            idx += 3
+        total += p[-1]
+        return total
+
+    def _sum_voigt(x, *p):
+        total = np.zeros_like(x, dtype=float)
+        idx = 0
+        for _ in centers:
+            total += voigt_profile(x, p[idx], p[idx + 1], p[idx + 2], p[idx + 3], 0.0)
+            idx += 4
+        total += p[-1]
+        return total
+
+    fit_fn = _sum_gaussian if model == "gaussian" else _sum_lorentzian if model == "lorentzian" else _sum_voigt
+    popt, _ = curve_fit(
+        fit_fn,
+        xs_sorted,
+        ys_sorted,
+        p0=params,
+        bounds=(lower, upper),
+        maxfev=40000,
+    )
+    yfit = fit_fn(xs_sorted, *popt)
+    r2 = 1 - np.sum((ys_sorted - yfit) ** 2) / (np.sum((ys_sorted - np.mean(ys_sorted)) ** 2) + 1e-12)
+    results: List[Dict[str, float]] = []
+    idx = 0
+    for _ in centers:
+        A = float(popt[idx])
+        x0 = float(popt[idx + 1])
+        if model == "voigt":
+            sigma = float(popt[idx + 2])
+            gamma = float(popt[idx + 3])
+            fwhm = 0.5346 * (2.0 * abs(gamma)) + math.sqrt(
+                0.2166 * (2.0 * abs(gamma)) ** 2 + (2.3548 * abs(sigma)) ** 2
+            )
+            component = voigt_profile(xs_sorted, A, x0, sigma, gamma, 0.0)
+            idx += 4
+        elif model == "lorentzian":
+            gamma = float(popt[idx + 2])
+            fwhm = 2.0 * abs(gamma)
+            component = lorentzian(xs_sorted, A, x0, gamma, 0.0)
+            idx += 3
+        else:
+            sigma = float(popt[idx + 2])
+            fwhm = 2.3548 * abs(sigma)
+            component = gaussian(xs_sorted, A, x0, sigma, 0.0)
+            idx += 3
+        if hasattr(np, "trapezoid"):
+            area = float(np.trapezoid(component, xs_sorted))
+        else:
+            area = float(np.trapz(component, xs_sorted))
+        results.append(
+            dict(center=x0, fwhm=float(fwhm), amplitude=A, area=area, r2=float(r2))
+        )
+    return results, float(r2)
+
+
+def _fit_peak_window(x: np.ndarray, y: np.ndarray, idx: int, window: int) -> Tuple[np.ndarray, np.ndarray]:
+    n = len(x)
+    i0 = max(0, idx - window)
+    i1 = min(n, idx + window)
+    return x[i0:i1], y[i0:i1]
+
+
+def fit_peak(x, y, idx, model, window):
+    xs, ys = _fit_peak_window(x, y, idx, window)
+    if len(xs) < 5:
+        return None
+    x0_guess = float(x[idx])
+    step = _resolve_step_from_x(xs)
+    max_delta = step * window * 0.5
+    local_mask = np.abs(xs - x0_guess) <= max_delta
+    if np.count_nonzero(local_mask) >= 5:
+        xs = xs[local_mask]
+        ys = ys[local_mask]
+    try:
+        return _fit_peak_single(xs, ys, x0_guess, model)
+    except Exception:
+        return None
 
 def merge_peak_indices(y_proc: np.ndarray, pos_idxs: np.ndarray, neg_idxs: np.ndarray, min_distance_pts: int) -> List[Tuple[int, int]]:
     candidates: List[Tuple[int, int, float]] = []
@@ -1022,7 +1268,130 @@ def detect_peak_candidates(
             match["score"] = float(candidate["score"])
 
     merged.sort(key=lambda c: c["index"])
+    for candidate_id, candidate in enumerate(merged):
+        candidate["candidate_id"] = int(candidate_id)
     return merged
+
+
+def _cluster_candidates_by_window(
+    candidates: List[Dict[str, object]],
+    *,
+    window: int,
+) -> List[List[Dict[str, object]]]:
+    if not candidates:
+        return []
+    sorted_candidates = sorted(candidates, key=lambda c: int(c["index"]))
+    clusters: List[List[Dict[str, object]]] = []
+    current: List[Dict[str, object]] = [sorted_candidates[0]]
+    for candidate in sorted_candidates[1:]:
+        if int(candidate["index"]) - int(current[-1]["index"]) <= window:
+            current.append(candidate)
+        else:
+            clusters.append(current)
+            current = [candidate]
+    clusters.append(current)
+    return clusters
+
+
+def _curvature_seed_centers(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    distance_pts: int,
+    max_peaks: int,
+) -> List[float]:
+    curvature = -_compute_second_derivative(xs, ys, distance_pts)
+    if curvature.size == 0:
+        return []
+    prominence = np.nanmedian(np.abs(curvature))
+    if not np.isfinite(prominence) or prominence <= 0:
+        prominence = np.nanmax(np.abs(curvature)) * 0.1 if curvature.size else 0.0
+    prominence = max(prominence, 1e-9)
+    idxs, _ = find_peaks(curvature, prominence=prominence, distance=max(1, distance_pts))
+    if idxs.size == 0:
+        return []
+    scores = curvature[idxs]
+    order = np.argsort(scores)[::-1]
+    idxs = idxs[order][:max_peaks]
+    return [float(xs[int(idx)]) for idx in idxs]
+
+
+def refine_peak_candidates(
+    x: np.ndarray,
+    y_proc: np.ndarray,
+    candidates: List[Dict[str, object]],
+    args: object,
+) -> List[Dict[str, object]]:
+    if not candidates:
+        return []
+    model = str(_get_param(args, "model", "Gaussian") or "Gaussian")
+    fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
+    min_r2 = float(_get_param(args, "min_r2", 0.85))
+    results: List[Dict[str, object]] = []
+
+    for polarity in (1, -1):
+        group = [c for c in candidates if int(c["polarity"]) == polarity]
+        if not group:
+            continue
+        fit_y = -y_proc if polarity < 0 else y_proc
+        clusters = _cluster_candidates_by_window(group, window=fit_window)
+        for cluster in clusters:
+            cluster_indices = [int(c["index"]) for c in cluster]
+            span_start = max(min(cluster_indices) - fit_window, 0)
+            span_end = min(max(cluster_indices) + fit_window, len(x))
+            xs_cluster = x[span_start:span_end]
+            ys_cluster = fit_y[span_start:span_end]
+            if len(cluster) > 1 and model.lower() in {"gaussian", "lorentzian", "voigt"}:
+                candidate_centers = [float(x[int(c["index"])]) for c in cluster]
+                curvature_centers = _curvature_seed_centers(
+                    xs_cluster,
+                    ys_cluster,
+                    distance_pts=max(1, int(fit_window / max(len(cluster), 1))),
+                    max_peaks=max(len(cluster), 2),
+                )
+                step = _resolve_step_from_x(xs_cluster)
+                extra_centers = [
+                    c
+                    for c in curvature_centers
+                    if all(abs(c - base) > step * 0.75 for base in candidate_centers)
+                ]
+                centers = candidate_centers + extra_centers
+                try:
+                    fitted = _fit_multi_peak(xs_cluster, ys_cluster, centers, model)
+                except Exception:
+                    fitted = None
+                if fitted is not None:
+                    fitted_peaks, _ = fitted
+                    for candidate, fit_result in zip(cluster, fitted_peaks[: len(candidate_centers)]):
+                        if not fit_result or fit_result.get("r2", 0.0) < min_r2:
+                            continue
+                        result = dict(fit_result)
+                        result["candidate_id"] = int(candidate["candidate_id"])
+                        result["index"] = int(candidate["index"])
+                        result["polarity"] = int(polarity)
+                        result["sources"] = list(candidate.get("sources", []))
+                        if polarity < 0:
+                            result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
+                            result["area"] = float(result.get("area", 0.0)) * -1
+                        results.append(result)
+                    continue
+            for candidate in cluster:
+                idx = int(candidate["index"])
+                fit = fit_peak(x, fit_y, idx, model, fit_window)
+                if not fit or fit.get("r2", 0.0) < min_r2:
+                    continue
+                result = dict(fit)
+                result["candidate_id"] = int(candidate["candidate_id"])
+                result["index"] = int(candidate["index"])
+                result["polarity"] = int(polarity)
+                result["sources"] = list(candidate.get("sources", []))
+                if polarity < 0:
+                    result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
+                    result["area"] = float(result.get("area", 0.0)) * -1
+                results.append(result)
+
+    results.sort(key=lambda r: (int(r.get("index", 0)), int(r.get("candidate_id", 0))))
+    return results
 
 def init_db(outdir:str):
     os.makedirs(outdir,exist_ok=True)
@@ -1163,33 +1532,25 @@ def index_file(path:str,con,args,failed_files=None):
                 args,
                 resolution_cm=resolution_cm,
             )
-            pid=0
-            for candidate in peak_candidates:
-                i=int(candidate["index"])
-                polarity=int(candidate["polarity"])
-                fit_y=-y_proc if polarity<0 else y_proc
-                fit=fit_peak(x_clean,fit_y,i,args.model,args.fit_window_pts)
-                if not fit or fit['r2']<args.min_r2: continue
-                if polarity<0:
-                    fit=dict(fit)
-                    fit['amplitude']*=-1
-                    fit['area']*=-1
+            refined = refine_peak_candidates(x_clean, y_proc, peak_candidates, args)
+            pid = 0
+            for fit in refined:
                 con.execute(
                     'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
                     [
                         file_id,
                         sid,
-                        pid,
-                        int(polarity),
-                        fit['center'],
-                        fit['fwhm'],
-                        fit['amplitude'],
-                        fit['area'],
-                        fit['r2'],
+                        int(fit.get("candidate_id", pid)),
+                        int(fit.get("polarity", 1)),
+                        fit["center"],
+                        fit["fwhm"],
+                        fit["amplitude"],
+                        fit["area"],
+                        fit["r2"],
                     ],
                 )
-                pid+=1
-            total_peaks+=pid
+                pid += 1
+            total_peaks += pid
         con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
         con.execute('COMMIT')
     except Exception:
@@ -1308,7 +1669,12 @@ def main():
         dest='baseline_ranges',
         help='Comma-separated wavenumber ranges for piecewise baseline (e.g. 4000-2500,2500-1800).',
     )
-    ap.add_argument('--model',choices=['Gaussian'],default='Gaussian');ap.add_argument('--min-r2',type=float,default=0.85,dest='min_r2')
+    ap.add_argument(
+        '--model',
+        choices=['Gaussian', 'Lorentzian', 'Voigt', 'Spline'],
+        default='Gaussian',
+    )
+    ap.add_argument('--min-r2',type=float,default=0.85,dest='min_r2')
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
