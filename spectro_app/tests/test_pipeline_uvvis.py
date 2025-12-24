@@ -2120,6 +2120,50 @@ def test_compute_peak_metrics_uses_quadratic_refinement():
     assert abs(peak["fwhm"] - peak["raw_fwhm"]) > 0
 
 
+def test_compute_peak_metrics_uses_plateau_center_for_saturation():
+    wl = np.linspace(400.0, 500.0, 101)
+    transmittance = np.full_like(wl, 100.0)
+    plateau_mask = (wl >= 445.0) & (wl <= 455.0)
+    transmittance[plateau_mask] = 1.0
+    absorbance = -np.log10(transmittance / 100.0)
+
+    plugin = UvVisPlugin()
+    peaks = plugin._compute_peak_metrics(
+        wl,
+        absorbance,
+        {"max_peaks": 1, "prominence": 0.5},
+        channels={"raw_transmittance": transmittance},
+    )
+
+    assert len(peaks) == 1
+    peak = peaks[0]
+    assert peak["plateau_detected"] is True
+    assert peak["wavelength"] == pytest.approx(450.0, abs=0.5)
+    assert peak["raw_wavelength"] == pytest.approx(450.0, abs=0.5)
+
+
+def test_compute_peak_metrics_plateau_center_with_truncated_absorbance():
+    wl = np.linspace(400.0, 500.0, 101)
+    transmittance = np.full_like(wl, 100.0)
+    plateau_mask = (wl >= 442.0) & (wl <= 458.0)
+    transmittance[plateau_mask] = 0.5
+    absorbance = -np.log10(transmittance / 100.0)
+    absorbance[plateau_mask] = np.nan
+
+    plugin = UvVisPlugin()
+    peaks = plugin._compute_peak_metrics(
+        wl,
+        absorbance,
+        {"max_peaks": 1, "prominence": 0.5},
+        channels={"raw_transmittance": transmittance},
+    )
+
+    assert len(peaks) == 1
+    peak = peaks[0]
+    assert peak["plateau_detected"] is True
+    assert peak["wavelength"] == pytest.approx(450.0, abs=0.5)
+
+
 def test_analyze_skips_disabled_peaks():
     wl = np.linspace(400.0, 500.0, 201)
     peak_center = 450.0
