@@ -39,8 +39,8 @@ from spectro_app.app_context import AppContext
 
 from scripts.jdxIndexBuilder import (
     convert_y_for_processing,
+    detect_peak_candidates,
     fit_peak,
-    merge_peak_indices,
     parse_jcamp_multispec,
     preprocess_with_noise,
     sanitize_xy,
@@ -51,8 +51,6 @@ from scripts.jdxIndexBuilder import (
     persist_consensus,
     UnsupportedSpectrumError,
 )
-
-from scipy.signal import find_peaks
 
 try:  # pragma: no cover - optional dependency
     import pyqtgraph as pg
@@ -896,43 +894,13 @@ class FtirIndexerDialog(QDialog):
             sg_window_cm=float(params.get("sg_window_cm", 0.0) or 0.0),
         )
 
-        diffs = np.diff(x_clean)
-        if diffs.size:
-            step = float(np.nanmedian(np.abs(diffs)))
-        else:
-            step = float("nan")
-        if not np.isfinite(step) or step <= 0:
-            span = (
-                float(np.nanmax(x_clean) - np.nanmin(x_clean))
-                if x_clean.size
-                else float("nan")
-            )
-            if np.isfinite(span) and span > 0 and len(x_clean) > 1:
-                step = span / (len(x_clean) - 1)
-            else:
-                min_distance = float(params.get("min_distance", 1))
-                step = min_distance if min_distance > 0 else 1.0
-        distance = max(
-            1,
-            int(
-                np.ceil(
-                    float(params.get("min_distance", 1)) / max(step, 1e-9)
-                )
-            ),
+        candidates = detect_peak_candidates(
+            x_clean,
+            y_proc,
+            noise_sigma,
+            params,
+            resolution_cm=None,
         )
-
-        prominence = float(params.get("prominence", 0.02))
-        sigma_multiplier = float(params.get("noise_sigma_multiplier", 3.0))
-        effective_prominence = prominence
-        if np.isfinite(noise_sigma):
-            adaptive = sigma_multiplier * float(noise_sigma)
-            if adaptive > effective_prominence:
-                effective_prominence = adaptive
-        idxs_pos, _ = find_peaks(y_proc, prominence=effective_prominence, distance=distance)
-        idxs_neg = np.array([], dtype=int)
-        if params.get("detect_negative_peaks", False):
-            idxs_neg, _ = find_peaks(-y_proc, prominence=effective_prominence, distance=distance)
-        candidates = merge_peak_indices(y_proc, idxs_pos, idxs_neg, distance)
         model = params.get("model", "Gaussian") or "Gaussian"
         fit_window = int(params.get("fit_window_pts", 50))
         min_r2 = float(params.get("min_r2", 0.9))
@@ -944,9 +912,11 @@ class FtirIndexerDialog(QDialog):
         indices: List[int] = []
         polarities: List[str] = []
 
-        for idx, polarity in candidates:
+        for candidate in candidates:
+            idx = int(candidate["index"])
+            polarity = int(candidate["polarity"])
             fit_y = -y_proc if polarity < 0 else y_proc
-            fit = fit_peak(x_clean, fit_y, int(idx), model, fit_window)
+            fit = fit_peak(x_clean, fit_y, idx, model, fit_window)
             if not fit or fit.get("r2", 0.0) < min_r2:
                 continue
             if polarity < 0:
@@ -1228,6 +1198,14 @@ class FtirIndexerDialog(QDialog):
             "fit_window_pts": int(self._fit_window_spin.value()),
             "min_r2": float(self._min_r2_spin.value()),
             "detect_negative_peaks": bool(self._detect_negative_check.isChecked()),
+            "peak_width_min": float(self._defaults.get("peak_width_min", 0.0)),
+            "peak_width_max": float(self._defaults.get("peak_width_max", 0.0)),
+            "cwt_enabled": bool(self._defaults.get("cwt_enabled", False)),
+            "cwt_width_min": float(self._defaults.get("cwt_width_min", 0.0)),
+            "cwt_width_max": float(self._defaults.get("cwt_width_max", 0.0)),
+            "cwt_width_step": float(self._defaults.get("cwt_width_step", 0.0)),
+            "cwt_cluster_tolerance": float(self._defaults.get("cwt_cluster_tolerance", 8.0)),
+            "merge_tolerance": float(self._defaults.get("merge_tolerance", 8.0)),
             "file_min_samples": int(self._file_min_samples_spin.value()),
             "file_eps_factor": float(self._file_eps_factor_spin.value()),
             "file_eps_min": float(self._file_eps_min_spin.value()),
