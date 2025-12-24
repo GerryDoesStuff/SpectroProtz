@@ -2944,27 +2944,35 @@ class UvVisPlugin(SpectroscopyPlugin):
         wl: np.ndarray,
         intensity: np.ndarray,
         peak_cfg: Dict[str, object],
-    ) -> List[Dict[str, float]]:
+        *,
+        channels: Mapping[str, object] | None = None,
+    ) -> List[Dict[str, object]]:
         if not bool(peak_cfg.get("enabled", True)):
             return []
         if intensity.size < 3:
             return []
+        safe_intensity = self._nan_safe(intensity)
         prominence = float(peak_cfg.get("prominence", 0.01))
         min_distance = max(1, int(peak_cfg.get("min_distance", peak_cfg.get("distance", 5))))
         height = peak_cfg.get("height")
         if height is not None:
             height = float(height)
         peaks, properties = find_peaks(
-            intensity,
+            safe_intensity,
             prominence=prominence if prominence > 0 else None,
             distance=min_distance,
             height=height,
         )
+        transmittance_like = self._extract_transmittance_like(intensity, channels)
+        plateaus = self._detect_flat_plateaus(wl, transmittance_like)
         if peaks.size == 0:
-            return []
+            if not plateaus:
+                return []
+            peaks = np.array([plateau["center_idx"] for plateau in plateaus], dtype=int)
+            properties = {"prominences": np.full(peaks.size, np.nan)}
         max_peaks = int(peak_cfg.get("max_peaks", peak_cfg.get("num_peaks", 5)))
         prominences = properties.get("prominences")
-        if prominences is not None:
+        if prominences is not None and np.any(np.isfinite(prominences)):
             order = np.argsort(prominences)[::-1]
             prominences = prominences[order]
             peaks = peaks[order]
@@ -2972,22 +2980,64 @@ class UvVisPlugin(SpectroscopyPlugin):
             peaks = peaks[:max_peaks]
             if prominences is not None:
                 prominences = prominences[:max_peaks]
-        widths, width_heights, left_ips, right_ips = peak_widths(intensity, peaks, rel_height=0.5)
+        widths, width_heights, left_ips, right_ips = peak_widths(
+            safe_intensity,
+            peaks,
+            rel_height=0.5,
+        )
         x_indices = np.arange(wl.size)
+        plateau_map: Dict[int, Dict[str, object]] = {}
+        for plateau in plateaus:
+            start_idx = int(plateau["start_idx"])
+            end_idx = int(plateau["end_idx"])
+            center_idx = int(plateau["center_idx"])
+            matching = [int(val) for val in peaks if start_idx <= val <= end_idx]
+            if matching:
+                plateau_peak = min(
+                    matching,
+                    key=lambda idx: abs(float(wl[idx]) - float(plateau["center_nm"])),
+                )
+            else:
+                plateau_peak = center_idx
+            existing = plateau_map.get(plateau_peak)
+            if existing is None or plateau["points"] > existing["points"]:
+                plateau_map[plateau_peak] = plateau
         peak_rows: List[Dict[str, float]] = []
         for idx, peak in enumerate(peaks):
-            raw_peak_wl = float(wl[peak])
-            raw_peak_height = float(intensity[peak])
+            plateau = plateau_map.get(int(peak))
+            if plateau:
+                raw_peak_wl = float(plateau["center_nm"])
+                raw_peak_height = float(np.interp(raw_peak_wl, wl, intensity, left=np.nan, right=np.nan))
+                if not np.isfinite(raw_peak_height):
+                    raw_peak_height = float(np.interp(raw_peak_wl, wl, safe_intensity, left=np.nan, right=np.nan))
+            else:
+                raw_peak_wl = float(wl[peak])
+                raw_peak_height = float(intensity[peak])
             left_wl = float(np.interp(left_ips[idx], x_indices, wl))
             right_wl = float(np.interp(right_ips[idx], x_indices, wl))
             raw_fwhm = max(right_wl - left_wl, 0.0)
 
-            refinement = self._fit_peak_quadratic(
-                wl,
-                intensity,
-                peak,
-                float(width_heights[idx]) if width_heights is not None else None,
-            )
+            if plateau:
+                start_idx = int(plateau["start_idx"])
+                end_idx = int(plateau["end_idx"])
+                fit_start = max(start_idx - 2, 0)
+                fit_stop = min(end_idx + 2, wl.size - 1)
+                window_indices = np.arange(fit_start, fit_stop + 1)
+                refinement = self._fit_peak_quadratic(
+                    wl,
+                    intensity,
+                    peak,
+                    float(width_heights[idx]) if width_heights is not None else None,
+                    window_indices=window_indices,
+                    constraint=(float(wl[start_idx]), float(wl[end_idx])),
+                )
+            else:
+                refinement = self._fit_peak_quadratic(
+                    wl,
+                    intensity,
+                    peak,
+                    float(width_heights[idx]) if width_heights is not None else None,
+                )
 
             if refinement is not None:
                 refined_wl = refinement["wavelength"]
@@ -3017,6 +3067,11 @@ class UvVisPlugin(SpectroscopyPlugin):
                 "quadratic_half_height": refinement.get("half_height") if refinement is not None else None,
                 "quadratic_left_half_max": left_half,
                 "quadratic_right_half_max": right_half,
+                "plateau_detected": bool(plateau),
+                "plateau_start_nm": plateau.get("start_nm") if plateau else None,
+                "plateau_end_nm": plateau.get("end_nm") if plateau else None,
+                "plateau_center_nm": plateau.get("center_nm") if plateau else None,
+                "plateau_points": plateau.get("points") if plateau else None,
             })
         return peak_rows
 
@@ -3026,6 +3081,9 @@ class UvVisPlugin(SpectroscopyPlugin):
         intensity: np.ndarray,
         peak_idx: int,
         half_height: float | None,
+        *,
+        window_indices: np.ndarray | None = None,
+        constraint: Tuple[float, float] | None = None,
     ) -> Optional[Dict[str, object]]:
         """Refine peak characteristics using a local quadratic fit.
 
@@ -3037,22 +3095,33 @@ class UvVisPlugin(SpectroscopyPlugin):
         if wl.size < 3 or intensity.size < 3:
             return None
 
-        # Select a symmetric window (up to +/-2 neighbours) while remaining in
-        # bounds to capture the local curvature of the peak.
-        start = max(peak_idx - 2, 0)
-        stop = min(peak_idx + 3, wl.size)
-        if stop - start < 3:
-            # Expand window if near the boundaries.
-            deficit = 3 - (stop - start)
-            start = max(start - deficit, 0)
-            stop = min(start + 3, wl.size)
-        indices = np.arange(start, stop)
+        if window_indices is None:
+            # Select a symmetric window (up to +/-2 neighbours) while remaining in
+            # bounds to capture the local curvature of the peak.
+            start = max(peak_idx - 2, 0)
+            stop = min(peak_idx + 3, wl.size)
+            if stop - start < 3:
+                # Expand window if near the boundaries.
+                deficit = 3 - (stop - start)
+                start = max(start - deficit, 0)
+                stop = min(start + 3, wl.size)
+            indices = np.arange(start, stop)
+        else:
+            indices = np.asarray(window_indices, dtype=int)
+            indices = indices[(indices >= 0) & (indices < wl.size)]
+            if indices.size:
+                indices = np.unique(indices)
         if indices.size < 3:
             return None
 
         x = wl[indices].astype(float)
         y = intensity[indices].astype(float)
-        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        finite_mask = np.isfinite(x) & np.isfinite(y)
+        if np.count_nonzero(finite_mask) < 3:
+            return None
+        x = x[finite_mask]
+        y = y[finite_mask]
+        if np.unique(x).size < 3:
             return None
 
         try:
@@ -3069,6 +3138,10 @@ class UvVisPlugin(SpectroscopyPlugin):
         # extrapolation that could degrade the estimate.
         if vertex_x < x[0] - 1e-9 or vertex_x > x[-1] + 1e-9:
             return None
+        if constraint is not None:
+            min_bound, max_bound = constraint
+            if vertex_x < min_bound - 1e-9 or vertex_x > max_bound + 1e-9:
+                return None
 
         vertex_y = np.polyval(coeffs, vertex_x)
         if not np.isfinite(vertex_y):
@@ -3100,6 +3173,96 @@ class UvVisPlugin(SpectroscopyPlugin):
             "window_wavelengths": [float(val) for val in x],
             "half_height": float(half_height) if half_height is not None and np.isfinite(half_height) else None,
         }
+
+    @staticmethod
+    def _nan_safe(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        if np.all(np.isfinite(arr)):
+            return arr
+        x = np.arange(arr.size)
+        mask = np.isfinite(arr)
+        if not np.any(mask):
+            return np.zeros_like(arr)
+        filled = arr.copy()
+        filled[~mask] = np.interp(x[~mask], x[mask], arr[mask])
+        return filled
+
+    @staticmethod
+    def _extract_transmittance_like(
+        intensity: np.ndarray,
+        channels: Mapping[str, object] | None,
+    ) -> np.ndarray | None:
+        if channels and "raw_transmittance" in channels:
+            raw = np.asarray(channels["raw_transmittance"], dtype=float)
+            if raw.size == intensity.size:
+                return raw
+        if channels and "raw_reflectance" in channels:
+            raw = np.asarray(channels["raw_reflectance"], dtype=float)
+            if raw.size == intensity.size:
+                return raw
+        arr = np.asarray(intensity, dtype=float)
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.power(10.0, -arr)
+
+    @staticmethod
+    def _detect_flat_plateaus(
+        wl: np.ndarray,
+        signal: np.ndarray | None,
+        *,
+        min_points: int = 3,
+    ) -> List[Dict[str, object]]:
+        if signal is None:
+            return []
+        x = np.asarray(wl, dtype=float)
+        y = np.asarray(signal, dtype=float)
+        finite_mask = np.isfinite(x) & np.isfinite(y)
+        if not np.any(finite_mask):
+            return []
+        finite_vals = y[finite_mask]
+        min_val = float(np.nanmin(finite_vals))
+        max_val = float(np.nanmax(finite_vals))
+        span = max_val - min_val
+        diffs = np.diff(finite_vals)
+        diff_scale = float(np.nanmedian(np.abs(diffs))) if diffs.size else 0.0
+        if not np.isfinite(diff_scale) or diff_scale <= 0:
+            diff_scale = span * 0.01 if span > 0 else 0.0
+        value_tol = max(diff_scale * 3.0, span * 0.01, 1e-8)
+        variance_tol = max(diff_scale * 2.0, value_tol * 0.5, 1e-8)
+        near_min = finite_mask & (y <= min_val + value_tol)
+        indices = np.flatnonzero(near_min)
+        if indices.size == 0:
+            return []
+        splits = np.where(np.diff(indices) > 1)[0]
+        segment_starts = np.concatenate(([0], splits + 1))
+        segment_stops = np.concatenate((splits + 1, [indices.size]))
+        plateaus: List[Dict[str, object]] = []
+        for start, stop in zip(segment_starts, segment_stops):
+            segment_idx = indices[start:stop]
+            if segment_idx.size < max(3, min_points):
+                continue
+            segment_vals = y[segment_idx]
+            seg_std = float(np.nanstd(segment_vals))
+            seg_min = float(np.nanmin(segment_vals))
+            seg_max = float(np.nanmax(segment_vals))
+            if not np.isfinite(seg_std) or not np.isfinite(seg_min) or not np.isfinite(seg_max):
+                continue
+            if seg_std > variance_tol or (seg_max - seg_min) > value_tol * 1.5:
+                continue
+            start_idx = int(segment_idx[0])
+            end_idx = int(segment_idx[-1])
+            center_nm = float((x[start_idx] + x[end_idx]) / 2.0)
+            center_idx = int(np.argmin(np.abs(x - center_nm)))
+            plateaus.append({
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "start_nm": float(x[start_idx]),
+                "end_nm": float(x[end_idx]),
+                "center_nm": center_nm,
+                "center_idx": center_idx,
+                "points": int(segment_idx.size),
+                "std": seg_std,
+            })
+        return plateaus
 
     def _compute_isosbestic_checks(
         self,
@@ -3976,7 +4139,12 @@ class UvVisPlugin(SpectroscopyPlugin):
             )
             band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
             integrals = self._compute_integrals(wl, intensity, integral_cfg)
-            peaks = self._compute_peak_metrics(wl, intensity, peak_cfg)
+            peaks = self._compute_peak_metrics(
+                wl,
+                intensity,
+                peak_cfg,
+                channels=spec.meta.get("channels") if isinstance(spec.meta, Mapping) else None,
+            )
             isosbestic_checks = self._compute_isosbestic_checks(wl, intensity, isosbestic_cfg)
             timestamp = self._parse_timestamp(spec.meta)
             if kinetics_time_field:
