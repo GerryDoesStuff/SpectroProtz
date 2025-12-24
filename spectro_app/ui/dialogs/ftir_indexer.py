@@ -40,7 +40,7 @@ from spectro_app.app_context import AppContext
 from scripts.jdxIndexBuilder import (
     convert_y_for_processing,
     detect_peak_candidates,
-    fit_peak,
+    refine_peak_candidates,
     parse_jcamp_multispec,
     preprocess_with_noise,
     sanitize_xy,
@@ -901,9 +901,7 @@ class FtirIndexerDialog(QDialog):
             params,
             resolution_cm=None,
         )
-        model = params.get("model", "Gaussian") or "Gaussian"
-        fit_window = int(params.get("fit_window_pts", 50))
-        min_r2 = float(params.get("min_r2", 0.9))
+        refined = refine_peak_candidates(x_clean, y_proc, candidates, params)
 
         peaks: List[Dict[str, Any]] = []
         centers: List[float] = []
@@ -912,24 +910,17 @@ class FtirIndexerDialog(QDialog):
         indices: List[int] = []
         polarities: List[str] = []
 
-        for candidate in candidates:
-            idx = int(candidate["index"])
-            polarity = int(candidate["polarity"])
-            fit_y = -y_proc if polarity < 0 else y_proc
-            fit = fit_peak(x_clean, fit_y, idx, model, fit_window)
-            if not fit or fit.get("r2", 0.0) < min_r2:
-                continue
-            if polarity < 0:
-                fit = dict(fit)
-                fit["amplitude"] = float(fit.get("amplitude", 0.0)) * -1
-                fit["area"] = float(fit.get("area", 0.0)) * -1
+        for fit in refined:
+            polarity = int(fit.get("polarity", 1))
             polarity_label = "negative" if polarity < 0 else "positive"
+            fit = dict(fit)
             fit["polarity"] = polarity_label
             peaks.append(fit)
-            centers.append(float(fit.get("center", x_clean[int(idx)])))
-            heights.append(float(y_proc[int(idx)]))
+            idx = int(fit.get("index", 0))
+            centers.append(float(fit.get("center", x_clean[idx])))
+            heights.append(float(y_proc[idx]))
             fwhm_values.append(float(fit.get("fwhm", 0.0)))
-            indices.append(int(idx))
+            indices.append(idx)
             polarities.append(polarity_label)
 
         result: Dict[str, Any] = {

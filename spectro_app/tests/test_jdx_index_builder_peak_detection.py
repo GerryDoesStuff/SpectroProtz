@@ -99,3 +99,45 @@ def test_distance_width_limits_reduce_ripple(monkeypatch):
     assert len(strict) < len(loose)
     strict_positions = _peak_positions(strict, x)
     assert np.any(np.abs(strict_positions - 3800.0) <= 6.0)
+
+
+def test_refines_crowded_mid_ir_peaks(monkeypatch):
+    mod = _load_module(monkeypatch)
+    x = np.linspace(1800.0, 1500.0, 1201)
+    peak_a = 1.2 * np.exp(-0.5 * ((x - 1605.0) / 6.0) ** 2)
+    peak_b = 0.9 * np.exp(-0.5 * ((x - 1622.0) / 8.0) ** 2)
+    rng = np.random.default_rng(42)
+    y = peak_a + peak_b + rng.normal(0.0, 0.01, size=x.size)
+
+    y_proc, noise_sigma = mod.preprocess_with_noise(
+        x,
+        y,
+        sg_win=0,
+        sg_poly=3,
+        als_lam=0.0,
+        als_p=0.01,
+    )
+
+    args = _build_args(
+        min_distance=4.0,
+        peak_width_min=3.0,
+        peak_width_max=30.0,
+        noise_sigma_multiplier=2.0,
+        cwt_enabled=True,
+        cwt_width_min=4.0,
+        cwt_width_max=30.0,
+        cwt_width_step=4.0,
+    )
+    args.model = "Voigt"
+    args.fit_window_pts = 60
+    args.min_r2 = 0.7
+
+    candidates = mod.detect_peak_candidates(x, y_proc, noise_sigma, args, resolution_cm=4.0)
+    refined = mod.refine_peak_candidates(x, y_proc, candidates, args)
+
+    centers = np.asarray([float(p["center"]) for p in refined], dtype=float)
+    assert np.any(np.abs(centers - 1605.0) <= 4.0)
+    assert np.any(np.abs(centers - 1622.0) <= 5.0)
+
+    fwhm = np.asarray([float(p["fwhm"]) for p in refined], dtype=float)
+    assert np.all(fwhm > 4.0)
