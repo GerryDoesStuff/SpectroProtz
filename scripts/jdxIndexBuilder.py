@@ -25,7 +25,7 @@ from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
-from scipy.signal import find_peaks, savgol_filter
+from scipy.signal import find_peaks, find_peaks_cwt, savgol_filter
 from scipy.optimize import curve_fit
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
@@ -745,16 +745,39 @@ def gaussian(x,A,x0,s,C): return A*np.exp(-0.5*((x-x0)/s)**2)+C
 def fit_peak(x,y,idx,model,window):
     n=len(x);i0=max(0,idx-window);i1=min(n,idx+window);xs=x[i0:i1];ys=y[i0:i1]
     if len(xs)<5: return None
+    x0_guess = float(x[idx])
+    if len(xs) >= 5:
+        step = np.median(np.abs(np.diff(xs))) if len(xs) > 1 else 0.0
+        if np.isfinite(step) and step > 0:
+            max_delta = step * window * 0.5
+            local_mask = np.abs(xs - x0_guess) <= max_delta
+            if np.count_nonzero(local_mask) >= 5:
+                xs = xs[local_mask]
+                ys = ys[local_mask]
     try:
-        A=np.max(ys)-np.median(ys);x0=x[idx];C=np.median(ys);sig=3*np.median(np.diff(xs))
-        popt,_=curve_fit(gaussian,xs,ys,p0=[A,x0,sig,C],maxfev=6000)
-        A,x0,sig,C=popt;yfit=gaussian(xs,*popt)
-        fwhm=2.3548*abs(sig)
-        r2=1-np.sum((ys-yfit)**2)/(np.sum((ys-np.mean(ys))**2)+1e-12)
+        local_idx = int(np.argmin(np.abs(xs - x0_guess)))
+        C=np.median(ys);sig=3*np.median(np.abs(np.diff(xs)))
+        A=max(float(ys[local_idx] - C), 1e-6)
         order=np.argsort(xs)
         xs_sorted=xs[order]
-        y_sorted=yfit[order]
-        area=float(np.trapz(y_sorted-C,xs_sorted))
+        ys_sorted=ys[order]
+        x0=float(x[idx])
+        bounds=(
+            [0.0, float(np.min(xs_sorted)), 1e-9, -np.inf],
+            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf],
+        )
+        try:
+            popt,_=curve_fit(gaussian,xs_sorted,ys_sorted,p0=[A,x0,sig,C],maxfev=6000,bounds=bounds)
+        except Exception:
+            popt,_=curve_fit(gaussian,xs_sorted,ys_sorted,p0=[A,x0,sig,C],maxfev=20000,bounds=bounds)
+        A,x0,sig,C=popt;yfit=gaussian(xs_sorted,*popt)
+        fwhm=2.3548*abs(sig)
+        r2=1-np.sum((ys_sorted-yfit)**2)/(np.sum((ys_sorted-np.mean(ys_sorted))**2)+1e-12)
+        y_sorted=yfit
+        if hasattr(np, "trapezoid"):
+            area=float(np.trapezoid(y_sorted-C,xs_sorted))
+        else:
+            area=float(np.trapz(y_sorted-C,xs_sorted))
         return dict(center=x0,fwhm=fwhm,amplitude=A,area=area,r2=r2)
     except: return None
 
@@ -779,6 +802,227 @@ def merge_peak_indices(y_proc: np.ndarray, pos_idxs: np.ndarray, neg_idxs: np.nd
         selected.append((idx, polarity, score))
     selected.sort(key=lambda item: item[0])
     return [(idx, polarity) for idx, polarity, _ in selected]
+
+
+def _get_param(args: object, name: str, default):
+    if isinstance(args, dict):
+        return args.get(name, default)
+    return getattr(args, name, default)
+
+
+def _resolve_step(x: np.ndarray, fallback: float) -> float:
+    diffs = np.diff(x)
+    if diffs.size:
+        step = float(np.nanmedian(np.abs(diffs)))
+    else:
+        step = float("nan")
+    if not np.isfinite(step) or step <= 0:
+        span = float(np.nanmax(x) - np.nanmin(x)) if x.size else float("nan")
+        if np.isfinite(span) and span > 0 and len(x) > 1:
+            step = span / (len(x) - 1)
+        else:
+            step = fallback if fallback > 0 else 1.0
+    return step
+
+
+def _resolve_width_bounds_cm(
+    width_min_cm: float,
+    width_max_cm: float,
+    *,
+    step_cm: float,
+    resolution_cm: float | None,
+) -> tuple[float, float]:
+    width_min_cm = float(width_min_cm)
+    width_max_cm = float(width_max_cm)
+    if width_min_cm <= 0:
+        if resolution_cm is not None and resolution_cm > 0:
+            width_min_cm = max(float(resolution_cm), step_cm)
+        else:
+            width_min_cm = step_cm
+    if width_max_cm <= 0:
+        width_max_cm = max(width_min_cm * 6.0, width_min_cm + step_cm * 4.0)
+    if width_max_cm < width_min_cm:
+        width_max_cm = width_min_cm
+    return width_min_cm, width_max_cm
+
+
+def _cluster_indices_by_tolerance(
+    indices: np.ndarray,
+    *,
+    x: np.ndarray,
+    scores: np.ndarray,
+    tolerance_cm: float,
+) -> List[int]:
+    if indices.size == 0:
+        return []
+    order = np.argsort(x[indices])
+    indices = indices[order]
+    scores = scores[order]
+    groups: List[List[int]] = []
+    current: List[int] = [int(indices[0])]
+    for idx in indices[1:]:
+        if abs(float(x[int(idx)]) - float(x[current[-1]])) <= tolerance_cm:
+            current.append(int(idx))
+        else:
+            groups.append(current)
+            current = [int(idx)]
+    groups.append(current)
+    representatives: List[int] = []
+    for group in groups:
+        group_scores = [scores[np.where(indices == g)[0][0]] for g in group]
+        best_idx = group[int(np.argmax(group_scores))]
+        representatives.append(best_idx)
+    return representatives
+
+
+def _build_cwt_widths(
+    *,
+    width_min_cm: float,
+    width_max_cm: float,
+    width_step_cm: float,
+    step_cm: float,
+) -> np.ndarray:
+    if width_step_cm <= 0:
+        width_step_cm = max(step_cm, (width_max_cm - width_min_cm) / 8.0 if width_max_cm > width_min_cm else step_cm)
+    widths_cm = np.arange(width_min_cm, width_max_cm + width_step_cm * 0.5, width_step_cm)
+    widths_pts = np.unique(np.clip(np.round(widths_cm / step_cm), 1, None)).astype(int)
+    return widths_pts
+
+
+def detect_peak_candidates(
+    x: np.ndarray,
+    y_proc: np.ndarray,
+    noise_sigma: float,
+    args: object,
+    *,
+    resolution_cm: float | None = None,
+) -> List[Dict[str, object]]:
+    min_distance_cm = float(_get_param(args, "min_distance", 1.0))
+    step_cm = _resolve_step(x, min_distance_cm)
+    distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
+
+    prominence_floor = float(_get_param(args, "prominence", 0.01))
+    sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 3.0))
+    if np.isfinite(noise_sigma) and noise_sigma > 0:
+        effective_prominence = sigma_multiplier * float(noise_sigma)
+    else:
+        effective_prominence = prominence_floor
+
+    width_min_cm, width_max_cm = _resolve_width_bounds_cm(
+        float(_get_param(args, "peak_width_min", 0.0)),
+        float(_get_param(args, "peak_width_max", 0.0)),
+        step_cm=step_cm,
+        resolution_cm=resolution_cm,
+    )
+    width_min_pts = max(1, int(np.ceil(width_min_cm / max(step_cm, 1e-9))))
+    width_max_pts = max(width_min_pts, int(np.ceil(width_max_cm / max(step_cm, 1e-9))))
+    width_bounds = (width_min_pts, width_max_pts)
+
+    detect_negative = bool(_get_param(args, "detect_negative_peaks", False))
+    cwt_enabled = bool(_get_param(args, "cwt_enabled", False))
+    cwt_width_min_cm = float(_get_param(args, "cwt_width_min", 0.0))
+    cwt_width_max_cm = float(_get_param(args, "cwt_width_max", 0.0))
+    cwt_width_step_cm = float(_get_param(args, "cwt_width_step", 0.0))
+    cwt_cluster_tolerance_cm = float(_get_param(args, "cwt_cluster_tolerance", 8.0))
+    merge_tolerance_cm = float(_get_param(args, "merge_tolerance", 8.0))
+    if min_distance_cm > 0:
+        merge_tolerance_cm = min(merge_tolerance_cm, min_distance_cm)
+
+    candidates: List[Dict[str, object]] = []
+
+    def _add_candidate(index: int, polarity: int, source: str, metadata: Dict[str, object]):
+        candidates.append(
+            {
+                "index": int(index),
+                "polarity": int(polarity),
+                "score": float(abs(y_proc[int(index)])),
+                "detections": [metadata | {"source": source}],
+                "sources": {source},
+            }
+        )
+
+    idxs_pos, _ = find_peaks(
+        y_proc, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+    )
+    for idx in np.asarray(idxs_pos, dtype=int):
+        if 0 <= idx < len(y_proc):
+            _add_candidate(idx, 1, "prominence", {"prominence": effective_prominence, "width_pts": width_bounds})
+
+    if detect_negative:
+        idxs_neg, _ = find_peaks(
+            -y_proc, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+        )
+        for idx in np.asarray(idxs_neg, dtype=int):
+            if 0 <= idx < len(y_proc):
+                _add_candidate(idx, -1, "prominence", {"prominence": effective_prominence, "width_pts": width_bounds})
+
+    if cwt_enabled:
+        cwt_width_min_cm, cwt_width_max_cm = _resolve_width_bounds_cm(
+            cwt_width_min_cm or width_min_cm,
+            cwt_width_max_cm or width_max_cm,
+            step_cm=step_cm,
+            resolution_cm=resolution_cm,
+        )
+        widths_pts = _build_cwt_widths(
+            width_min_cm=cwt_width_min_cm,
+            width_max_cm=cwt_width_max_cm,
+            width_step_cm=cwt_width_step_cm,
+            step_cm=step_cm,
+        )
+        cwt_pos = np.asarray(find_peaks_cwt(y_proc, widths_pts), dtype=int)
+        if cwt_pos.size:
+            scores = np.abs(y_proc[cwt_pos])
+            clustered = _cluster_indices_by_tolerance(
+                cwt_pos, x=x, scores=scores, tolerance_cm=cwt_cluster_tolerance_cm
+            )
+            for idx in clustered:
+                _add_candidate(
+                    idx,
+                    1,
+                    "cwt",
+                    {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
+                )
+        if detect_negative:
+            cwt_neg = np.asarray(find_peaks_cwt(-y_proc, widths_pts), dtype=int)
+            if cwt_neg.size:
+                scores = np.abs(y_proc[cwt_neg])
+                clustered = _cluster_indices_by_tolerance(
+                    cwt_neg, x=x, scores=scores, tolerance_cm=cwt_cluster_tolerance_cm
+                )
+                for idx in clustered:
+                    _add_candidate(
+                        idx,
+                        -1,
+                        "cwt",
+                        {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
+                    )
+
+    if not candidates:
+        return []
+
+    merged: List[Dict[str, object]] = []
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    for candidate in candidates:
+        idx = int(candidate["index"])
+        polarity = int(candidate["polarity"])
+        match = None
+        for existing in merged:
+            if int(existing["polarity"]) != polarity:
+                continue
+            if abs(float(x[idx]) - float(x[int(existing["index"])])) <= merge_tolerance_cm:
+                match = existing
+                break
+        if match is None:
+            merged.append(candidate)
+            continue
+        match["sources"] = set(match["sources"]) | set(candidate["sources"])
+        match["detections"] = list(match["detections"]) + list(candidate["detections"])
+        if float(candidate["score"]) > float(match["score"]):
+            match["index"] = idx
+            match["score"] = float(candidate["score"])
+
+    merged.sort(key=lambda c: c["index"])
+    return merged
 
 def init_db(outdir:str):
     os.makedirs(outdir,exist_ok=True)
@@ -881,6 +1125,7 @@ def index_file(path:str,con,args,failed_files=None):
     processed_spectra=0
     max_points=0
     y_units=headers.get('YUNITS','')
+    resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
 
     con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
 
@@ -911,30 +1156,17 @@ def index_file(path:str,con,args,failed_files=None):
                 baseline_piecewise=args.baseline_piecewise,
                 baseline_ranges=args.baseline_ranges,
             )
-            diffs=np.diff(x_clean)
-            if diffs.size:
-                step=np.nanmedian(np.abs(diffs))
-            else:
-                step=np.nan
-            if not np.isfinite(step) or step<=0:
-                span=np.nanmax(x_clean)-np.nanmin(x_clean) if x_clean.size else np.nan
-                if np.isfinite(span) and span>0 and len(x_clean)>1:
-                    step=span/(len(x_clean)-1)
-                else:
-                    step=float(args.min_distance) if args.min_distance>0 else 1.0
-            dist_pts=max(1,int(np.ceil(float(args.min_distance)/max(step,1e-9))))
-            effective_prominence=float(args.prominence)
-            if np.isfinite(noise_sigma):
-                adaptive = float(args.noise_sigma_multiplier) * float(noise_sigma)
-                if adaptive > effective_prominence:
-                    effective_prominence = adaptive
-            idxs_pos,_=find_peaks(y_proc,prominence=effective_prominence,distance=dist_pts)
-            idxs_neg=np.array([],dtype=int)
-            if getattr(args,'detect_negative_peaks',False):
-                idxs_neg,_=find_peaks(-y_proc,prominence=effective_prominence,distance=dist_pts)
-            peak_candidates=merge_peak_indices(y_proc,idxs_pos,idxs_neg,dist_pts)
+            peak_candidates=detect_peak_candidates(
+                x_clean,
+                y_proc,
+                noise_sigma,
+                args,
+                resolution_cm=resolution_cm,
+            )
             pid=0
-            for i,polarity in peak_candidates:
+            for candidate in peak_candidates:
+                i=int(candidate["index"])
+                polarity=int(candidate["polarity"])
                 fit_y=-y_proc if polarity<0 else y_proc
                 fit=fit_peak(x_clean,fit_y,i,args.model,args.fit_window_pts)
                 if not fit or fit['r2']<args.min_r2: continue
@@ -1053,8 +1285,17 @@ def main():
         default=script_dir,
         help='Output directory for DuckDB/Parquet files (defaults to script location)',
     )
-    ap.add_argument('--prominence',type=float,default=0.01);ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
+    ap.add_argument('--prominence',type=float,default=0.01)
+    ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
     ap.add_argument('--noise-sigma-multiplier',type=float,default=3.0,dest='noise_sigma_multiplier')
+    ap.add_argument('--peak-width-min',type=float,default=0.0,dest='peak_width_min')
+    ap.add_argument('--peak-width-max',type=float,default=0.0,dest='peak_width_max')
+    ap.add_argument('--cwt-enabled',action='store_true',dest='cwt_enabled')
+    ap.add_argument('--cwt-width-min',type=float,default=0.0,dest='cwt_width_min')
+    ap.add_argument('--cwt-width-max',type=float,default=0.0,dest='cwt_width_max')
+    ap.add_argument('--cwt-width-step',type=float,default=0.0,dest='cwt_width_step')
+    ap.add_argument('--cwt-cluster-tolerance',type=float,default=8.0,dest='cwt_cluster_tolerance')
+    ap.add_argument('--merge-tolerance',type=float,default=8.0,dest='merge_tolerance')
     ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
     ap.add_argument('--sg-window-cm',type=float,default=0.0,dest='sg_window_cm')
     ap.add_argument('--als-lam',type=float,default=5e4,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
