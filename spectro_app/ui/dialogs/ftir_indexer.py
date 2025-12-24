@@ -42,7 +42,7 @@ from scripts.jdxIndexBuilder import (
     fit_peak,
     merge_peak_indices,
     parse_jcamp_multispec,
-    preprocess,
+    preprocess_with_noise,
     sanitize_xy,
     build_file_consensus,
     build_global_consensus,
@@ -371,6 +371,15 @@ class FtirIndexerDialog(QDialog):
             "Minimum peak prominence (absorbance units) passed to scipy.signal.find_peaks.",
         )
 
+        self._noise_sigma_multiplier_spin = QDoubleSpinBox()
+        self._noise_sigma_multiplier_spin.setDecimals(2)
+        self._noise_sigma_multiplier_spin.setSingleStep(0.5)
+        self._noise_sigma_multiplier_spin.setRange(0.0, 50.0)
+        self._set_numeric_help(
+            self._noise_sigma_multiplier_spin,
+            "Multiplier applied to robust noise σ to set a minimum prominence floor.",
+        )
+
         self._min_distance_spin = QSpinBox()
         self._min_distance_spin.setRange(1, 10000)
         self._min_distance_spin.setSingleStep(1)
@@ -387,6 +396,18 @@ class FtirIndexerDialog(QDialog):
         )
         self._sg_window_spin.setWhatsThis(
             "Number of points in the Savitzky–Golay smoothing window applied before peak finding."
+        )
+
+        self._sg_window_cm_spin = QDoubleSpinBox()
+        self._sg_window_cm_spin.setRange(0.0, 1000.0)
+        self._sg_window_cm_spin.setSingleStep(1.0)
+        self._sg_window_cm_spin.setDecimals(1)
+        self._sg_window_cm_spin.setToolTip(
+            "Optional Savitzky–Golay window span in cm⁻¹. Set to 0 to use the window in points."
+        )
+        self._sg_window_cm_spin.setWhatsThis(
+            "If non-zero, the Savitzky–Golay window length is derived from the sampling resolution "
+            "(median wavenumber spacing) rather than the point count."
         )
 
         self._sg_poly_spin = QSpinBox()
@@ -424,8 +445,10 @@ class FtirIndexerDialog(QDialog):
 
         detection_form = QFormLayout()
         detection_form.addRow("Prominence", self._prominence_spin)
+        detection_form.addRow("Noise σ multiplier", self._noise_sigma_multiplier_spin)
         detection_form.addRow("Min distance", self._min_distance_spin)
         detection_form.addRow("SG window", self._sg_window_spin)
+        detection_form.addRow("SG window (cm⁻¹)", self._sg_window_cm_spin)
         detection_form.addRow("SG order", self._sg_poly_spin)
         detection_form.addRow("Fit window pts", self._fit_window_spin)
         detection_form.addRow("Minimum R²", self._min_r2_spin)
@@ -863,12 +886,14 @@ class FtirIndexerDialog(QDialog):
     ) -> Dict[str, Any]:
         x_clean = np.asarray(x, dtype=float)
         y_for_processing = np.asarray(y_base, dtype=float)
-        y_proc = preprocess(
+        y_proc, noise_sigma = preprocess_with_noise(
+            x_clean,
             y_for_processing,
             int(params.get("sg_win", 9)),
             int(params.get("sg_poly", 3)),
             float(params.get("als_lam", 1e5)),
             float(params.get("als_p", 0.01)),
+            sg_window_cm=float(params.get("sg_window_cm", 0.0) or 0.0),
         )
 
         diffs = np.diff(x_clean)
@@ -897,10 +922,16 @@ class FtirIndexerDialog(QDialog):
         )
 
         prominence = float(params.get("prominence", 0.02))
-        idxs_pos, _ = find_peaks(y_proc, prominence=prominence, distance=distance)
+        sigma_multiplier = float(params.get("noise_sigma_multiplier", 3.0))
+        effective_prominence = prominence
+        if np.isfinite(noise_sigma):
+            adaptive = sigma_multiplier * float(noise_sigma)
+            if adaptive > effective_prominence:
+                effective_prominence = adaptive
+        idxs_pos, _ = find_peaks(y_proc, prominence=effective_prominence, distance=distance)
         idxs_neg = np.array([], dtype=int)
         if params.get("detect_negative_peaks", False):
-            idxs_neg, _ = find_peaks(-y_proc, prominence=prominence, distance=distance)
+            idxs_neg, _ = find_peaks(-y_proc, prominence=effective_prominence, distance=distance)
         candidates = merge_peak_indices(y_proc, idxs_pos, idxs_neg, distance)
         model = params.get("model", "Gaussian") or "Gaussian"
         fit_window = int(params.get("fit_window_pts", 50))
@@ -935,6 +966,7 @@ class FtirIndexerDialog(QDialog):
             "x": x_clean,
             "y_raw": y_for_processing,
             "y_processed": y_proc,
+            "noise_sigma": float(noise_sigma),
             "peaks": peaks,
             "peak_centers": np.asarray(centers, dtype=float),
             "peak_heights": np.asarray(heights, dtype=float),
@@ -1056,8 +1088,10 @@ class FtirIndexerDialog(QDialog):
     def _apply_defaults(self) -> None:
         defaults = self._defaults
         self._prominence_spin.setValue(float(defaults.get("prominence", 0.02)))
+        self._noise_sigma_multiplier_spin.setValue(float(defaults.get("noise_sigma_multiplier", 3.0)))
         self._min_distance_spin.setValue(int(defaults.get("min_distance", 5)))
         self._sg_window_spin.setValue(int(defaults.get("sg_win", 9)))
+        self._sg_window_cm_spin.setValue(float(defaults.get("sg_window_cm", 0.0)))
         self._sg_poly_spin.setValue(int(defaults.get("sg_poly", 3)))
         self._als_lambda_spin.setValue(float(defaults.get("als_lam", 1e5)))
         self._als_p_spin.setValue(float(defaults.get("als_p", 0.01)))
@@ -1096,8 +1130,10 @@ class FtirIndexerDialog(QDialog):
     def _apply_saved_params(self, params: Dict[str, Any]) -> None:
         setters: Dict[str, Any] = {
             "prominence": lambda value: self._prominence_spin.setValue(float(value)),
+            "noise_sigma_multiplier": lambda value: self._noise_sigma_multiplier_spin.setValue(float(value)),
             "min_distance": lambda value: self._min_distance_spin.setValue(int(value)),
             "sg_win": lambda value: self._sg_window_spin.setValue(int(value)),
+            "sg_window_cm": lambda value: self._sg_window_cm_spin.setValue(float(value)),
             "sg_poly": lambda value: self._sg_poly_spin.setValue(int(value)),
             "als_lam": lambda value: self._als_lambda_spin.setValue(float(value)),
             "als_p": lambda value: self._als_p_spin.setValue(float(value)),
@@ -1130,8 +1166,10 @@ class FtirIndexerDialog(QDialog):
 
         advanced_keys = {
             "prominence",
+            "noise_sigma_multiplier",
             "min_distance",
             "sg_win",
+            "sg_window_cm",
             "sg_poly",
             "als_lam",
             "als_p",
@@ -1180,8 +1218,10 @@ class FtirIndexerDialog(QDialog):
             "data_dir": self._source_dir_edit.text().strip(),
             "index_dir": self._index_dir_edit.text().strip(),
             "prominence": float(self._prominence_spin.value()),
+            "noise_sigma_multiplier": float(self._noise_sigma_multiplier_spin.value()),
             "min_distance": int(self._min_distance_spin.value()),
             "sg_win": int(self._sg_window_spin.value()),
+            "sg_window_cm": float(self._sg_window_cm_spin.value()),
             "sg_poly": int(self._sg_poly_spin.value()),
             "als_lam": float(self._als_lambda_spin.value()),
             "als_p": float(self._als_p_spin.value()),
@@ -1248,8 +1288,10 @@ class FtirIndexerDialog(QDialog):
             self._source_dir_edit,
             self._index_dir_edit,
             self._prominence_spin,
+            self._noise_sigma_multiplier_spin,
             self._min_distance_spin,
             self._sg_window_spin,
+            self._sg_window_cm_spin,
             self._sg_poly_spin,
             self._als_lambda_spin,
             self._als_p_spin,
