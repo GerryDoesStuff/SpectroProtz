@@ -447,29 +447,179 @@ def sanitize_xy(x:np.ndarray,y:np.ndarray)->Tuple[np.ndarray,np.ndarray]:
 
     return x_arr,y_arr
 
-def als_baseline(y:np.ndarray,lam=1e5,p=0.01,niter=10)->np.ndarray:
-    L=len(y);D=sparse.diags([1,-2,1],[0,-1,-2],shape=(L,L-2));w=np.ones(L)
-    for _ in range(niter):
-        W=sparse.spdiags(w,0,L,L);Z=W+lam*(D@D.T);z=spsolve(Z,w*y)
-        w=p*(y>z)+(1-p)*(y<z)
+def _nan_safe(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if np.all(np.isfinite(values)):
+        return values
+    idx = np.arange(values.size)
+    mask = np.isfinite(values)
+    if not np.any(mask):
+        return np.zeros_like(values)
+    filled = values.copy()
+    filled[~mask] = np.interp(idx[~mask], idx[mask], values[mask])
+    return filled
+
+
+def als_baseline(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
+    y = _nan_safe(y)
+    L = len(y)
+    if L < 3:
+        return np.zeros_like(y)
+    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(L - 2, L), format="csc")
+    laplacian = (D.T @ D).tocsc()
+    w = np.ones(L)
+    for _ in range(max(1, int(niter))):
+        W = sparse.diags(w, 0, shape=(L, L), format="csc")
+        Z = W + lam * laplacian
+        z = spsolve(Z, w * y)
+        w = p * (y > z) + (1 - p) * (y <= z)
     return z
 
-def preprocess(y:np.ndarray,sg_win:int,sg_poly:int,als_lam:float,als_p:float)->np.ndarray:
-    y2=np.asarray(y,dtype=float).copy()
-    n=len(y2)
-    if sg_win and sg_win%2==1 and sg_win>2 and n>=3:
-        win=min(sg_win,n if n%2==1 else n-1)
-        if win>=3:
-            poly=min(max(sg_poly,0),win-1)
-            if win>poly:
-                y2=savgol_filter(y2,win,poly)
-    if als_lam>0:
-        if n>=3:
-            y2=y2-als_baseline(y2,lam=als_lam,p=als_p)
+
+def airpls_baseline(
+    y: np.ndarray,
+    lam: float = 1e5,
+    niter: int = 20,
+    tol: float = 1e-6,
+    weight_floor: float = 1e-3,
+) -> np.ndarray:
+    y = _nan_safe(y)
+    L = len(y)
+    if L < 3:
+        return np.zeros_like(y)
+    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(L - 2, L), format="csc")
+    H = lam * (D.T @ D).tocsc()
+    w = np.ones(L)
+    for idx in range(1, max(1, int(niter)) + 1):
+        W = sparse.diags(w, 0, shape=(L, L), format="csc")
+        Z = W + H
+        z = spsolve(Z, w * y)
+        d = y - z
+        neg = d[d < 0]
+        if neg.size == 0:
+            break
+        mean = float(np.mean(neg))
+        std = float(np.std(neg))
+        if std <= 1e-12:
+            break
+        if abs(mean) / std < tol:
+            break
+        scaled = np.clip((idx * d) / (abs(mean) + 1e-12), -50.0, 50.0)
+        weights = np.exp(scaled)
+        w = np.where(d >= 0, weight_floor, weights)
+        w[0] = weight_floor
+        w[-1] = weight_floor
+    return z
+
+
+def arpls_baseline(y: np.ndarray, lam: float = 1e5, niter: int = 20, tol: float = 1e-6) -> np.ndarray:
+    return airpls_baseline(y, lam=lam, niter=niter, tol=tol)
+
+
+def _parse_piecewise_ranges(ranges: str | None) -> List[Tuple[float, float]]:
+    if not ranges:
+        return []
+    parsed: List[Tuple[float, float]] = []
+    for block in ranges.split(","):
+        parts = block.replace("–", "-").split("-")
+        if len(parts) != 2:
+            continue
+        try:
+            start = float(parts[0])
+            stop = float(parts[1])
+        except ValueError:
+            continue
+        parsed.append((start, stop))
+    return parsed
+
+
+def _apply_baseline(
+    y: np.ndarray,
+    method: str,
+    lam: float,
+    p: float,
+    niter: int,
+) -> np.ndarray:
+    method = (method or "").lower()
+    if method == "asls":
+        return als_baseline(y, lam=lam, p=p, niter=niter)
+    if method == "arpls":
+        return arpls_baseline(y, lam=lam, niter=niter)
+    if method == "airpls":
+        return airpls_baseline(y, lam=lam, niter=niter)
+    raise ValueError(f"Unsupported baseline method: {method}")
+
+
+def _baseline_piecewise(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    method: str,
+    lam: float,
+    p: float,
+    niter: int,
+    ranges: List[Tuple[float, float]],
+) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    baseline = np.zeros_like(y)
+    covered = np.zeros_like(y, dtype=bool)
+    for start, stop in ranges:
+        low = min(start, stop)
+        high = max(start, stop)
+        mask = (x >= low) & (x <= high)
+        if not np.any(mask):
+            continue
+        baseline[mask] = _apply_baseline(y[mask], method, lam, p, niter)
+        covered |= mask
+    if not np.all(covered):
+        fallback = _apply_baseline(y, method, lam, p, niter)
+        baseline[~covered] = fallback[~covered]
+    return baseline
+
+
+def preprocess(
+    x: np.ndarray,
+    y: np.ndarray,
+    sg_win: int,
+    sg_poly: int,
+    als_lam: float,
+    als_p: float,
+    *,
+    baseline_method: str = "airpls",
+    baseline_niter: int = 20,
+    baseline_piecewise: bool = False,
+    baseline_ranges: str | None = None,
+) -> np.ndarray:
+    y2 = np.asarray(y, dtype=float).copy()
+    n = len(y2)
+    if sg_win and sg_win % 2 == 1 and sg_win > 2 and n >= 3:
+        win = min(sg_win, n if n % 2 == 1 else n - 1)
+        if win >= 3:
+            poly = min(max(sg_poly, 0), win - 1)
+            if win > poly:
+                y2 = savgol_filter(y2, win, poly)
+    if als_lam > 0:
+        if n >= 3:
+            ranges = _parse_piecewise_ranges(baseline_ranges)
+            if baseline_piecewise and ranges:
+                baseline = _baseline_piecewise(
+                    x,
+                    y2,
+                    method=baseline_method,
+                    lam=als_lam,
+                    p=als_p,
+                    niter=baseline_niter,
+                    ranges=ranges,
+                )
+            else:
+                baseline = _apply_baseline(y2, baseline_method, als_lam, als_p, baseline_niter)
+            y2 = y2 - baseline
         elif n:
-            y2=y2-np.mean(y2)
-    m=np.max(np.abs(y2))
-    if m>0: y2/=m
+            y2 = y2 - np.mean(y2)
+    m = np.max(np.abs(y2))
+    if m > 0:
+        y2 /= m
     return y2
 
 def gaussian(x,A,x0,s,C): return A*np.exp(-0.5*((x-x0)/s)**2)+C
@@ -630,7 +780,18 @@ def index_file(path:str,con,args,failed_files=None):
             max_points=max(max_points,len(x_clean))
 
             y_for_processing=convert_y_for_processing(y_clean,y_units)
-            y_proc=preprocess(y_for_processing,args.sg_win,args.sg_poly,args.als_lam,args.als_p)
+            y_proc=preprocess(
+                x_clean,
+                y_for_processing,
+                args.sg_win,
+                args.sg_poly,
+                args.als_lam,
+                args.als_p,
+                baseline_method=args.baseline_method,
+                baseline_niter=args.baseline_niter,
+                baseline_piecewise=args.baseline_piecewise,
+                baseline_ranges=args.baseline_ranges,
+            )
             diffs=np.diff(x_clean)
             if diffs.size:
                 step=np.nanmedian(np.abs(diffs))
@@ -771,6 +932,15 @@ def main():
     ap.add_argument('--prominence',type=float,default=0.01);ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
     ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
     ap.add_argument('--als-lam',type=float,default=5e4,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
+    ap.add_argument('--baseline-method',choices=['arpls','asls','airpls'],default='airpls',dest='baseline_method')
+    ap.add_argument('--baseline-niter',type=int,default=20,dest='baseline_niter')
+    ap.add_argument('--baseline-piecewise',action='store_true',dest='baseline_piecewise')
+    ap.add_argument(
+        '--baseline-ranges',
+        default='4000-2500,2500-1800,1800-900,900-450',
+        dest='baseline_ranges',
+        help='Comma-separated wavenumber ranges for piecewise baseline (e.g. 4000-2500,2500-1800).',
+    )
     ap.add_argument('--model',choices=['Gaussian'],default='Gaussian');ap.add_argument('--min-r2',type=float,default=0.85,dest='min_r2')
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
