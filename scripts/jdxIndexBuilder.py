@@ -830,6 +830,7 @@ def _build_peak_marker_series(
 def export_spectrum_steps_to_xlsx(
     step_registry: List[Dict[str, object]],
     output_path: str,
+    plot_max_points: int = 0,
 ) -> None:
     if not step_registry:
         return
@@ -871,6 +872,13 @@ def export_spectrum_steps_to_xlsx(
                     data["candidates"] = _build_peak_marker_series(x, y, candidates)
                 if refined_peaks:
                     data["refined"] = _build_peak_marker_series(x, y, refined_peaks)
+            if plot_max_points and plot_max_points > 0:
+                base_len = len(next(iter(data.values())))
+                if base_len > plot_max_points:
+                    indices = np.unique(
+                        np.linspace(0, base_len - 1, plot_max_points, dtype=int)
+                    )
+                    data = {name: series[indices] for name, series in data.items()}
             df = pd.DataFrame(data)
             sheet_name = _sanitize_sheet_name(label, used_names)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -2075,6 +2083,17 @@ def main():
         dest='export_step_plots_dir',
         help='Output directory for step XLSX exports (defaults to {index_dir}/debug_plots).',
     )
+    ap.add_argument(
+        '--plot-max-points',
+        type=int,
+        default=0,
+        dest='plot_max_points',
+        help=(
+            'Maximum points to keep per step when exporting XLSX plots. '
+            'Use 0 to disable downsampling; lower values shrink file size '
+            'and speed up Excel plots at the cost of spectral precision.'
+        ),
+    )
     args=ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
@@ -2101,7 +2120,11 @@ def main():
             if file_id is None or spectrum_id is None:
                 continue
             output_path = os.path.join(export_dir, f"{file_id}_{spectrum_id}.xlsx")
-            export_spectrum_steps_to_xlsx(steps, output_path)
+            export_spectrum_steps_to_xlsx(
+                steps,
+                output_path,
+                plot_max_points=args.plot_max_points,
+            )
     print('Building file-level consensus clusters...', file=sys.stdout, flush=True)
     fc=build_file_consensus(con,args)
     print('Building global consensus clusters...', file=sys.stdout, flush=True)
