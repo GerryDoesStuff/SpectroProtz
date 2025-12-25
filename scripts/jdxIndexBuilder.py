@@ -780,6 +780,109 @@ def preprocess(
     )
     return y2
 
+
+def _sanitize_sheet_name(name: str, used_names: set[str]) -> str:
+    cleaned = re.sub(r'[:\\/?*\[\]]+', '_', name).strip() or "step"
+    cleaned = cleaned[:31]
+    candidate = cleaned
+    counter = 1
+    while candidate in used_names:
+        suffix = f"_{counter}"
+        candidate = (cleaned[: 31 - len(suffix)] + suffix).rstrip()
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _build_peak_marker_series(
+    x: np.ndarray,
+    y: np.ndarray,
+    candidates: List[Dict[str, object]] | None,
+) -> np.ndarray:
+    marker = np.full_like(y, np.nan, dtype=float)
+    if not candidates:
+        return marker
+    for candidate in candidates:
+        try:
+            idx = int(candidate.get("index"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(marker):
+            marker[idx] = y[idx]
+    return marker
+
+
+def export_spectrum_steps_to_xlsx(
+    step_registry: List[Dict[str, object]],
+    output_path: str,
+) -> None:
+    if not step_registry:
+        return
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    step_by_label = {step["label"]: step for step in step_registry}
+    baseline_step = step_by_label.get("baseline_estimate")
+    smoothed_step = step_by_label.get("smoothed")
+    candidates = None
+    candidate_step = step_by_label.get("candidate_peaks_overlay")
+    if candidate_step:
+        metadata = candidate_step.get("metadata") or {}
+        candidates = metadata.get("candidates")
+    used_names: set[str] = set()
+    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        for step in step_registry:
+            x = np.asarray(step["x"], dtype=float)
+            y = np.asarray(step["y"], dtype=float)
+            label = str(step["label"])
+            data: Dict[str, np.ndarray] = {
+                "x (cm^-1)": x,
+                "y (absorbance)": y,
+            }
+            if baseline_step is not None:
+                baseline_y = np.asarray(baseline_step["y"], dtype=float)
+                if len(baseline_y) == len(x):
+                    data["baseline"] = baseline_y
+            if smoothed_step is not None:
+                smoothed_y = np.asarray(smoothed_step["y"], dtype=float)
+                if len(smoothed_y) == len(x):
+                    data["smoothed"] = smoothed_y
+            if candidates:
+                data["peak_marker"] = _build_peak_marker_series(x, y, candidates)
+            df = pd.DataFrame(data)
+            sheet_name = _sanitize_sheet_name(label, used_names)
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            if df.empty:
+                continue
+            worksheet = writer.sheets[sheet_name]
+            max_row = len(df)
+            chart = workbook.add_chart({"type": "scatter", "subtype": "straight"})
+
+            def add_series(col_name: str, options: Dict[str, object] | None = None) -> None:
+                col_idx = df.columns.get_loc(col_name)
+                series = {
+                    "name": [sheet_name, 0, col_idx],
+                    "categories": [sheet_name, 1, 0, max_row, 0],
+                    "values": [sheet_name, 1, col_idx, max_row, col_idx],
+                }
+                if options:
+                    series.update(options)
+                chart.add_series(series)
+
+            add_series("y (absorbance)")
+            if "baseline" in df.columns:
+                add_series("baseline", {"line": {"dash_type": "dash"}})
+            if "smoothed" in df.columns:
+                add_series("smoothed", {"line": {"dash_type": "dot"}})
+            if "peak_marker" in df.columns:
+                add_series(
+                    "peak_marker",
+                    {"line": {"none": True}, "marker": {"type": "circle", "size": 5}},
+                )
+            chart.set_title({"name": label})
+            chart.set_x_axis({"name": "cm^-1"})
+            chart.set_y_axis({"name": "absorbance"})
+            worksheet.insert_chart("H2", chart)
+
 def gaussian(x, A, x0, s, C):
     return A * np.exp(-0.5 * ((x - x0) / s) ** 2) + C
 
@@ -1905,6 +2008,18 @@ def main():
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--detect-negative-peaks',action='store_true',dest='detect_negative_peaks',help='Also detect negative peaks by searching inverted spectra.')
     ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
+    ap.add_argument(
+        '--export-step-plots',
+        action='store_true',
+        dest='export_step_plots',
+        help='Export per-step spectra to XLSX workbooks.',
+    )
+    ap.add_argument(
+        '--export-step-plots-dir',
+        default=None,
+        dest='export_step_plots_dir',
+        help='Output directory for step XLSX exports (defaults to {index_dir}/debug_plots).',
+    )
     args=ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
@@ -1922,6 +2037,16 @@ def main():
                 raise
             n_s,n_p=0,0
         total_specs+=n_s;total_peaks+=n_p
+    if args.export_step_plots and step_registry_collector:
+        export_dir = args.export_step_plots_dir or os.path.join(args.index_dir, "debug_plots")
+        for entry in step_registry_collector:
+            file_id = entry.get("file_id")
+            spectrum_id = entry.get("spectrum_id")
+            steps = entry.get("steps") or []
+            if file_id is None or spectrum_id is None:
+                continue
+            output_path = os.path.join(export_dir, f"{file_id}_{spectrum_id}.xlsx")
+            export_spectrum_steps_to_xlsx(steps, output_path)
     print('Building file-level consensus clusters...', file=sys.stdout, flush=True)
     fc=build_file_consensus(con,args)
     print('Building global consensus clusters...', file=sys.stdout, flush=True)
