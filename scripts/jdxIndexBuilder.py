@@ -797,15 +797,30 @@ def _sanitize_sheet_name(name: str, used_names: set[str]) -> str:
 def _build_peak_marker_series(
     x: np.ndarray,
     y: np.ndarray,
-    candidates: List[Dict[str, object]] | None,
+    peaks: List[Dict[str, object]] | None,
 ) -> np.ndarray:
     marker = np.full_like(y, np.nan, dtype=float)
-    if not candidates:
+    if not peaks:
         return marker
-    for candidate in candidates:
+    for peak in peaks:
+        idx = None
         try:
-            idx = int(candidate.get("index"))  # type: ignore[arg-type]
+            idx = int(peak.get("index"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
+            idx = None
+        if idx is None:
+            center = peak.get("wavenumber")
+            if center is None:
+                center = peak.get("x") or peak.get("center")
+            if center is None:
+                continue
+            try:
+                center_val = float(center)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if x.size:
+                idx = int(np.argmin(np.abs(x - center_val)))
+        if idx is None:
             continue
         if 0 <= idx < len(marker):
             marker[idx] = y[idx]
@@ -823,10 +838,15 @@ def export_spectrum_steps_to_xlsx(
     baseline_step = step_by_label.get("baseline_estimate")
     smoothed_step = step_by_label.get("smoothed")
     candidates = None
+    refined_peaks = None
     candidate_step = step_by_label.get("candidate_peaks_overlay")
     if candidate_step:
         metadata = candidate_step.get("metadata") or {}
         candidates = metadata.get("candidates")
+    refined_step = step_by_label.get("refined_peaks_overlay")
+    if refined_step:
+        metadata = refined_step.get("metadata") or {}
+        refined_peaks = metadata.get("peaks")
     used_names: set[str] = set()
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         workbook = writer.book
@@ -846,8 +866,11 @@ def export_spectrum_steps_to_xlsx(
                 smoothed_y = np.asarray(smoothed_step["y"], dtype=float)
                 if len(smoothed_y) == len(x):
                     data["smoothed"] = smoothed_y
-            if candidates:
-                data["peak_marker"] = _build_peak_marker_series(x, y, candidates)
+            if label in {"baseline_corrected", "smoothed"}:
+                if candidates:
+                    data["candidates"] = _build_peak_marker_series(x, y, candidates)
+                if refined_peaks:
+                    data["refined"] = _build_peak_marker_series(x, y, refined_peaks)
             df = pd.DataFrame(data)
             sheet_name = _sanitize_sheet_name(label, used_names)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -873,10 +896,23 @@ def export_spectrum_steps_to_xlsx(
                 add_series("baseline", {"line": {"dash_type": "dash"}})
             if "smoothed" in df.columns:
                 add_series("smoothed", {"line": {"dash_type": "dot"}})
-            if "peak_marker" in df.columns:
+            if "candidates" in df.columns:
                 add_series(
-                    "peak_marker",
-                    {"line": {"none": True}, "marker": {"type": "circle", "size": 5}},
+                    "candidates",
+                    {
+                        "name": "candidates",
+                        "line": {"none": True},
+                        "marker": {"type": "circle", "size": 5},
+                    },
+                )
+            if "refined" in df.columns:
+                add_series(
+                    "refined",
+                    {
+                        "name": "refined",
+                        "line": {"none": True},
+                        "marker": {"type": "diamond", "size": 6},
+                    },
                 )
             chart.set_title({"name": label})
             chart.set_x_axis({"name": "cm^-1"})
@@ -1828,6 +1864,7 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                 {
                     "index": int(candidate["index"]),
                     "x": float(x_clean[int(candidate["index"])]),
+                    "wavenumber": float(x_clean[int(candidate["index"])]),
                     "y": float(y_proc[int(candidate["index"])]),
                     "polarity": int(candidate.get("polarity", 1)),
                     "score": float(candidate.get("score", 0.0)),
@@ -1850,6 +1887,24 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                 peak_candidates,
                 args,
                 y_abs=y_for_processing,
+            )
+            refined_overlay = [
+                {
+                    "index": int(fit.get("index", -1)),
+                    "wavenumber": float(fit.get("center", float("nan"))),
+                    "center": float(fit.get("center", float("nan"))),
+                    "polarity": int(fit.get("polarity", 1)),
+                    "r2": float(fit.get("r2", float("nan"))),
+                }
+                for fit in refined
+            ]
+            _append_processing_step(
+                step_registry,
+                "refined_peaks_overlay",
+                x_clean,
+                y_proc,
+                step_metadata,
+                extra_metadata={"peaks": refined_overlay},
             )
             pid = 0
             for fit in refined:
