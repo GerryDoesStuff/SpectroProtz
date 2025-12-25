@@ -901,7 +901,13 @@ class FtirIndexerDialog(QDialog):
             params,
             resolution_cm=None,
         )
-        refined = refine_peak_candidates(x_clean, y_proc, candidates, params)
+        refined = refine_peak_candidates(
+            x_clean,
+            y_proc,
+            candidates,
+            params,
+            y_abs=y_for_processing,
+        )
 
         peaks: List[Dict[str, Any]] = []
         centers: List[float] = []

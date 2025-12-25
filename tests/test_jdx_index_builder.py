@@ -128,6 +128,31 @@ def _write_non_ftir_jdx(path):
     )
 
 
+def _write_saturated_transmittance_jdx(path):
+    lines = [
+        "##TITLE=Saturated Band",
+        "##JCAMP-DX=5.00",
+        "##DATA TYPE=INFRARED SPECTRUM",
+        "##XUNITS=1/CM",
+        "##YUNITS=%T",
+        "##NPOINTS=11",
+        "##XYDATA=(X,Y)",
+        "1000 100",
+        "1001 90",
+        "1002 50",
+        "1003 1",
+        "1004 1",
+        "1005 1",
+        "1006 50",
+        "1007 90",
+        "1008 100",
+        "1009 100",
+        "1010 100",
+        "##END=",
+    ]
+    path.write_text("\n".join(lines))
+
+
 def test_is_ftir_spectrum_detects_ir_variants():
     assert idx.is_ftir_spectrum({"DATA TYPE": "Infrared spectrum"})
     assert idx.is_ftir_spectrum({"CLASS": "FT-IR"})
@@ -302,5 +327,33 @@ def test_descending_axis_consensus_matches(tmp_path):
         assert asc_centers
         assert desc_centers
         assert asc_centers == pytest.approx(desc_centers)
+    finally:
+        con.close()
+
+
+def test_index_file_plateau_center_is_midpoint(tmp_path):
+    data_path = tmp_path / "saturated.jdx"
+    _write_saturated_transmittance_jdx(data_path)
+
+    index_dir = tmp_path / "index"
+    con = idx.init_db(str(index_dir))
+
+    args = _build_args(prominence=0.05)
+    args.min_r2 = 0.0
+
+    try:
+        processed, peaks = idx.index_file(str(data_path), con, args)
+
+        assert processed == 1
+        assert peaks == 1
+
+        file_id = idx.file_sha1(str(data_path))
+        center = con.execute(
+            "SELECT center FROM peaks WHERE file_id = ?",
+            [file_id],
+        ).fetchone()[0]
+
+        expected_center = (1003 + 1005) / 2.0
+        assert center == pytest.approx(expected_center, abs=0.5)
     finally:
         con.close()
