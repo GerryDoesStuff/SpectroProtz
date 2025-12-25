@@ -13,6 +13,7 @@ import pytest
 
 from importlib import metadata
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import column_index_from_string
 
 from scipy.signal import savgol_filter
 
@@ -191,6 +192,61 @@ def test_uvvis_export_creates_workbook_with_derivatives(tmp_path):
     assert result.report_text, "Narrative report text should be populated"
     for heading in ("Ingestion", "Pre-processing", "Analysis", "Results"):
         assert heading in result.report_text
+
+
+def test_uvvis_export_writes_workbook_with_step_registry(tmp_path):
+    plugin = UvVisPlugin()
+    wl = np.linspace(250.0, 260.0, 6)
+    intensity = np.linspace(0.05, 0.2, wl.size)
+    spec = Spectrum(
+        wavelength=wl,
+        intensity=intensity,
+        meta={"sample_id": "Mini-1", "role": "sample", "mode": "absorbance"},
+    )
+    recipe = {"export": {"path": str(tmp_path / "uvvis_step_registry.xlsx")}}
+
+    processed, qc_rows = plugin.analyze([spec], recipe)
+    plugin.export(processed, qc_rows, recipe)
+
+    workbook_path = Path(recipe["export"]["path"])
+    assert workbook_path.exists(), "Workbook should be written to disk"
+
+    wb = load_workbook(workbook_path)
+    step_registry = [
+        "Processed_Spectra",
+        "Metadata",
+        "QC_Flags",
+        "Calibration",
+        "Audit_Log",
+    ]
+    assert wb.sheetnames == step_registry
+
+    ws_processed = wb["Processed_Spectra"]
+    header = [cell.value for cell in next(ws_processed.iter_rows(min_row=1, max_row=1))]
+    assert header[0] == "wavelength"
+
+    charts = [chart for ws in wb.worksheets for chart in getattr(ws, "_charts", [])]
+    if charts:
+        header_columns = {
+            idx + 1: value for idx, value in enumerate(header) if value is not None
+        }
+        for chart in charts:
+            for series in chart.series:
+                values = getattr(series, "values", None)
+                formula = getattr(values, "formula", None) if values is not None else None
+                if not formula or "Processed_Spectra" not in formula:
+                    continue
+                column_letters = [
+                    segment[0]
+                    for segment in str(formula).split("$")
+                    if segment and segment[0].isalpha()
+                ]
+                if not column_letters:
+                    continue
+                column_index = column_index_from_string(column_letters[0])
+                assert (
+                    header_columns.get(column_index) in header
+                ), "Chart series should map to a header column"
 
 
 def test_write_workbook_includes_blank_sheet(tmp_path):
