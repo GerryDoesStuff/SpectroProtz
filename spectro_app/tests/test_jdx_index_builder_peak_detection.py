@@ -133,7 +133,7 @@ def test_refines_crowded_mid_ir_peaks(monkeypatch):
     args.min_r2 = 0.7
 
     candidates = mod.detect_peak_candidates(x, y_proc, noise_sigma, args, resolution_cm=4.0)
-    refined = mod.refine_peak_candidates(x, y_proc, candidates, args)
+    refined = mod.refine_peak_candidates(x, y_proc, candidates, args, y_abs=y)
 
     centers = np.asarray([float(p["center"]) for p in refined], dtype=float)
     assert np.any(np.abs(centers - 1605.0) <= 4.0)
@@ -141,3 +141,37 @@ def test_refines_crowded_mid_ir_peaks(monkeypatch):
 
     fwhm = np.asarray([float(p["fwhm"]) for p in refined], dtype=float)
     assert np.all(fwhm > 4.0)
+
+
+def test_plateau_midpoint_center(monkeypatch):
+    mod = _load_module(monkeypatch)
+    x = np.linspace(1200.0, 1100.0, 201)
+    peak = 2.0 * np.exp(-0.5 * ((x - 1150.0) / 4.0) ** 2)
+    y = np.minimum(peak, 1.0)
+
+    y_proc, noise_sigma = mod.preprocess_with_noise(
+        x,
+        y,
+        sg_win=0,
+        sg_poly=3,
+        als_lam=0.0,
+        als_p=0.01,
+    )
+
+    args = _build_args(min_distance=2.0, noise_sigma_multiplier=0.5)
+    args.fit_window_pts = 8
+    args.min_r2 = 0.0
+
+    candidates = mod.detect_peak_candidates(x, y_proc, noise_sigma, args, resolution_cm=4.0)
+    refined = mod.refine_peak_candidates(x, y_proc, candidates, args, y_abs=y)
+
+    assert refined
+    centers = np.asarray([float(p["center"]) for p in refined], dtype=float)
+
+    plateau_mask = y >= (np.max(y) - 1e-6)
+    plateau_indices = np.flatnonzero(plateau_mask)
+    expected_center = float((x[plateau_indices[0]] + x[plateau_indices[-1]]) / 2.0)
+
+    closest = centers[np.argmin(np.abs(centers - expected_center))]
+    step = float(np.median(np.abs(np.diff(x))))
+    assert abs(closest - expected_center) <= step * 1.5

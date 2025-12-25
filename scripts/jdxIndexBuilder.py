@@ -819,7 +819,14 @@ def _fit_peak_spline(xs: np.ndarray, ys: np.ndarray, x0_guess: float) -> Optiona
     return dict(center=float(local_x), fwhm=fwhm, amplitude=float(peak_y - baseline), area=area, r2=1.0)
 
 
-def _fit_peak_single(xs: np.ndarray, ys: np.ndarray, x0_guess: float, model: str) -> Optional[Dict[str, float]]:
+def _fit_peak_single(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    x0_guess: float,
+    model: str,
+    *,
+    center_bounds: tuple[float, float] | None = None,
+) -> Optional[Dict[str, float]]:
     if xs.size < 5:
         return None
     model = model.lower()
@@ -834,10 +841,20 @@ def _fit_peak_single(xs: np.ndarray, ys: np.ndarray, x0_guess: float, model: str
     xs_sorted = xs[order]
     ys_sorted = ys[order]
     x0 = float(x0_guess)
+    x0_min = float(np.min(xs_sorted))
+    x0_max = float(np.max(xs_sorted))
+    if center_bounds is not None:
+        bound_min = float(min(center_bounds))
+        bound_max = float(max(center_bounds))
+        x0_min = max(x0_min, bound_min)
+        x0_max = min(x0_max, bound_max)
+        if x0_min >= x0_max:
+            x0_min = float(np.min(xs_sorted))
+            x0_max = float(np.max(xs_sorted))
     if model == "lorentzian":
         bounds = (
-            [0.0, float(np.min(xs_sorted)), step * 0.25, -np.inf],
-            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf],
+            [0.0, x0_min, step * 0.25, -np.inf],
+            [np.inf, x0_max, np.inf, np.inf],
         )
         popt, _ = curve_fit(
             lorentzian,
@@ -853,8 +870,8 @@ def _fit_peak_single(xs: np.ndarray, ys: np.ndarray, x0_guess: float, model: str
         component = lorentzian(xs_sorted, A, x0, gamma, 0.0)
     elif model == "voigt":
         bounds = (
-            [0.0, float(np.min(xs_sorted)), step * 0.25, step * 0.25, -np.inf],
-            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf, np.inf],
+            [0.0, x0_min, step * 0.25, step * 0.25, -np.inf],
+            [np.inf, x0_max, np.inf, np.inf, np.inf],
         )
         popt, _ = curve_fit(
             voigt_profile,
@@ -872,8 +889,8 @@ def _fit_peak_single(xs: np.ndarray, ys: np.ndarray, x0_guess: float, model: str
         component = voigt_profile(xs_sorted, A, x0, sigma, gamma, 0.0)
     else:
         bounds = (
-            [0.0, float(np.min(xs_sorted)), step * 0.25, -np.inf],
-            [np.inf, float(np.max(xs_sorted)), np.inf, np.inf],
+            [0.0, x0_min, step * 0.25, -np.inf],
+            [np.inf, x0_max, np.inf, np.inf],
         )
         popt, _ = curve_fit(
             gaussian,
@@ -1011,11 +1028,21 @@ def _fit_peak_window(x: np.ndarray, y: np.ndarray, idx: int, window: int) -> Tup
     return x[i0:i1], y[i0:i1]
 
 
-def fit_peak(x, y, idx, model, window):
+def fit_peak(
+    x,
+    y,
+    idx,
+    model,
+    window,
+    *,
+    center_bounds: tuple[float, float] | None = None,
+    x0_guess: float | None = None,
+):
     xs, ys = _fit_peak_window(x, y, idx, window)
     if len(xs) < 5:
         return None
-    x0_guess = float(x[idx])
+    if x0_guess is None:
+        x0_guess = float(x[idx])
     step = _resolve_step_from_x(xs)
     max_delta = step * window * 0.5
     local_mask = np.abs(xs - x0_guess) <= max_delta
@@ -1023,7 +1050,7 @@ def fit_peak(x, y, idx, model, window):
         xs = xs[local_mask]
         ys = ys[local_mask]
     try:
-        return _fit_peak_single(xs, ys, x0_guess, model)
+        return _fit_peak_single(xs, ys, x0_guess, model, center_bounds=center_bounds)
     except Exception:
         return None
 
@@ -1194,6 +1221,37 @@ def detect_peak_candidates(
         if 0 <= idx < len(y_proc):
             _add_candidate(idx, 1, "prominence", {"prominence": effective_prominence, "width_pts": width_bounds})
 
+    plateau_min_points = max(2, int(_get_param(args, "plateau_min_points", 3)))
+    plateau_prominence_factor = float(_get_param(args, "plateau_prominence_factor", 1.0))
+    plateau_prominence = max(effective_prominence * plateau_prominence_factor, 0.0)
+    if plateau_min_points >= 2:
+        plateau_idxs, plateau_props = find_peaks(
+            y_proc,
+            prominence=plateau_prominence,
+            distance=distance_pts,
+            plateau_size=plateau_min_points,
+        )
+        if plateau_idxs.size:
+            left_edges = plateau_props.get("left_edges", [])
+            right_edges = plateau_props.get("right_edges", [])
+            sizes = plateau_props.get("plateau_sizes", [])
+            for idx, left, right, size in zip(plateau_idxs, left_edges, right_edges, sizes):
+                left = int(left)
+                right = int(right)
+                center = int(round((left + right) / 2))
+                if 0 <= center < len(y_proc):
+                    _add_candidate(
+                        center,
+                        1,
+                        "plateau",
+                        {
+                            "plateau_left": left,
+                            "plateau_right": right,
+                            "plateau_size": int(size),
+                            "prominence": plateau_prominence,
+                        },
+                    )
+
     if detect_negative:
         idxs_neg, _ = find_peaks(
             -y_proc, prominence=effective_prominence, distance=distance_pts, width=width_bounds
@@ -1246,6 +1304,22 @@ def detect_peak_candidates(
     if not candidates:
         return []
 
+    def _extract_plateau_bounds(detections: List[Dict[str, object]]):
+        lefts = []
+        rights = []
+        for detection in detections:
+            if detection.get("source") != "plateau":
+                continue
+            left = detection.get("plateau_left")
+            right = detection.get("plateau_right")
+            if left is None or right is None:
+                continue
+            lefts.append(int(left))
+            rights.append(int(right))
+        if not lefts or not rights:
+            return None
+        return min(lefts), max(rights)
+
     merged: List[Dict[str, object]] = []
     candidates.sort(key=lambda c: c["score"], reverse=True)
     for candidate in candidates:
@@ -1270,6 +1344,9 @@ def detect_peak_candidates(
     merged.sort(key=lambda c: c["index"])
     for candidate_id, candidate in enumerate(merged):
         candidate["candidate_id"] = int(candidate_id)
+        plateau_bounds = _extract_plateau_bounds(candidate.get("detections", []))
+        if plateau_bounds is not None:
+            candidate["plateau_bounds"] = plateau_bounds
     return merged
 
 
@@ -1321,6 +1398,8 @@ def refine_peak_candidates(
     y_proc: np.ndarray,
     candidates: List[Dict[str, object]],
     args: object,
+    *,
+    y_abs: np.ndarray | None = None,
 ) -> List[Dict[str, object]]:
     if not candidates:
         return []
@@ -1334,14 +1413,18 @@ def refine_peak_candidates(
         if not group:
             continue
         fit_y = -y_proc if polarity < 0 else y_proc
+        fit_y_abs = None
+        if y_abs is not None and polarity > 0:
+            fit_y_abs = np.asarray(y_abs, dtype=float)
         clusters = _cluster_candidates_by_window(group, window=fit_window)
         for cluster in clusters:
+            has_plateau = any(c.get("plateau_bounds") is not None for c in cluster)
             cluster_indices = [int(c["index"]) for c in cluster]
             span_start = max(min(cluster_indices) - fit_window, 0)
             span_end = min(max(cluster_indices) + fit_window, len(x))
             xs_cluster = x[span_start:span_end]
             ys_cluster = fit_y[span_start:span_end]
-            if len(cluster) > 1 and model.lower() in {"gaussian", "lorentzian", "voigt"}:
+            if len(cluster) > 1 and model.lower() in {"gaussian", "lorentzian", "voigt"} and not has_plateau:
                 candidate_centers = [float(x[int(c["index"])]) for c in cluster]
                 curvature_centers = _curvature_seed_centers(
                     xs_cluster,
@@ -1377,8 +1460,49 @@ def refine_peak_candidates(
                     continue
             for candidate in cluster:
                 idx = int(candidate["index"])
-                fit = fit_peak(x, fit_y, idx, model, fit_window)
-                if not fit or fit.get("r2", 0.0) < min_r2:
+                plateau_bounds = candidate.get("plateau_bounds")
+                x0_guess = float(x[idx])
+                center_bounds = None
+                use_absorbance = fit_y_abs is not None and plateau_bounds is not None
+                if plateau_bounds is not None:
+                    left_idx, right_idx = plateau_bounds
+                    left_x = float(x[left_idx])
+                    right_x = float(x[right_idx])
+                    center_bounds = (min(left_x, right_x), max(left_x, right_x))
+                    x0_guess = (center_bounds[0] + center_bounds[1]) / 2.0
+                fit_source = fit_y_abs if use_absorbance else fit_y
+                fit = fit_peak(
+                    x,
+                    fit_source,
+                    idx,
+                    model,
+                    fit_window,
+                    center_bounds=center_bounds,
+                    x0_guess=x0_guess,
+                )
+                if not fit:
+                    if plateau_bounds is None:
+                        continue
+                    xs, ys = _fit_peak_window(x, fit_source, idx, fit_window)
+                    if xs.size < 3:
+                        continue
+                    local_idx = int(np.argmin(np.abs(xs - float(x[idx]))))
+                    baseline = float(np.median(ys))
+                    peak_y = float(ys[local_idx])
+                    plateau_width = abs(float(x[plateau_bounds[1]]) - float(x[plateau_bounds[0]]))
+                    fwhm = max(plateau_width, _resolve_step_from_x(xs) * 2.0)
+                    if hasattr(np, "trapezoid"):
+                        area = float(np.trapezoid(np.maximum(ys - baseline, 0.0), xs))
+                    else:
+                        area = float(np.trapz(np.maximum(ys - baseline, 0.0), xs))
+                    fit = dict(
+                        center=float(x0_guess),
+                        fwhm=float(fwhm),
+                        amplitude=float(max(peak_y - baseline, 0.0)),
+                        area=area,
+                        r2=float(min_r2),
+                    )
+                if plateau_bounds is None and fit.get("r2", 0.0) < min_r2:
                     continue
                 result = dict(fit)
                 result["candidate_id"] = int(candidate["candidate_id"])
@@ -1532,7 +1656,13 @@ def index_file(path:str,con,args,failed_files=None):
                 args,
                 resolution_cm=resolution_cm,
             )
-            refined = refine_peak_candidates(x_clean, y_proc, peak_candidates, args)
+            refined = refine_peak_candidates(
+                x_clean,
+                y_proc,
+                peak_candidates,
+                args,
+                y_abs=y_for_processing,
+            )
             pid = 0
             for fit in refined:
                 con.execute(
@@ -1656,6 +1786,8 @@ def main():
     ap.add_argument('--cwt-width-max',type=float,default=0.0,dest='cwt_width_max')
     ap.add_argument('--cwt-width-step',type=float,default=0.0,dest='cwt_width_step')
     ap.add_argument('--cwt-cluster-tolerance',type=float,default=8.0,dest='cwt_cluster_tolerance')
+    ap.add_argument('--plateau-min-points',type=int,default=3,dest='plateau_min_points')
+    ap.add_argument('--plateau-prominence-factor',type=float,default=1.0,dest='plateau_prominence_factor')
     ap.add_argument('--merge-tolerance',type=float,default=8.0,dest='merge_tolerance')
     ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
     ap.add_argument('--sg-window-cm',type=float,default=0.0,dest='sg_window_cm')
