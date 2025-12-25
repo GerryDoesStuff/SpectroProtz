@@ -669,6 +669,29 @@ def estimate_noise_sigma(
     return MAD_SCALE * mad
 
 
+def _append_processing_step(
+    registry: List[Dict[str, object]] | None,
+    label: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    metadata: Optional[Dict[str, object]] = None,
+    extra_metadata: Optional[Dict[str, object]] = None,
+) -> None:
+    if registry is None:
+        return
+    step_metadata = dict(metadata or {})
+    if extra_metadata:
+        step_metadata.update(extra_metadata)
+    registry.append(
+        {
+            "label": label,
+            "x": np.asarray(x, dtype=float).copy(),
+            "y": np.asarray(y, dtype=float).copy(),
+            "metadata": step_metadata,
+        }
+    )
+
+
 def preprocess_with_noise(
     x: np.ndarray,
     y: np.ndarray,
@@ -682,11 +705,15 @@ def preprocess_with_noise(
     baseline_niter: int = 20,
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
+    step_registry: Optional[List[Dict[str, object]]] = None,
+    step_metadata: Optional[Dict[str, object]] = None,
 ) -> tuple[np.ndarray, float]:
     y2 = np.asarray(y, dtype=float).copy()
     n = len(y2)
     noise_sigma = estimate_noise_sigma(x, y2, sg_win, sg_poly, sg_window_cm)
     y2 = _apply_sg_smoothing(x, y2, sg_win, sg_poly, sg_window_cm)
+    _append_processing_step(step_registry, "smoothed", x, y2, step_metadata)
+    baseline = np.zeros_like(y2)
     if als_lam > 0:
         if n >= 3:
             ranges = _parse_piecewise_ranges(baseline_ranges)
@@ -704,12 +731,23 @@ def preprocess_with_noise(
                 baseline = _apply_baseline(y2, baseline_method, als_lam, als_p, baseline_niter)
             y2 = y2 - baseline
         elif n:
-            y2 = y2 - np.mean(y2)
+            baseline = np.full_like(y2, float(np.mean(y2)))
+            y2 = y2 - baseline
+    _append_processing_step(step_registry, "baseline_estimate", x, baseline, step_metadata)
+    _append_processing_step(step_registry, "baseline_corrected", x, y2, step_metadata)
     m = np.max(np.abs(y2))
     if m > 0:
         y2 /= m
         if np.isfinite(noise_sigma):
             noise_sigma /= m
+    _append_processing_step(
+        step_registry,
+        "preprocessed",
+        x,
+        y2,
+        step_metadata,
+        extra_metadata={"normalization_factor": float(m) if np.isfinite(m) else float("nan")},
+    )
     return y2, noise_sigma
 
 
@@ -1564,7 +1602,7 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
         values
     )
 
-def index_file(path:str,con,args,failed_files=None):
+def index_file(path:str,con,args,failed_files=None,step_registry_collector: Optional[List[Dict[str, object]]] = None):
     def record_failure(message: str) -> None:
         if failed_files is not None:
             failed_files.append((path, message))
@@ -1636,6 +1674,31 @@ def index_file(path:str,con,args,failed_files=None):
             max_points=max(max_points,len(x_clean))
 
             y_for_processing=convert_y_for_processing(y_clean,y_units)
+            step_metadata = {
+                "file_id": file_id,
+                "spectrum_id": sid,
+                "y_units": y_units,
+                "processing": {
+                    "sg_win": int(args.sg_win),
+                    "sg_poly": int(args.sg_poly),
+                    "sg_window_cm": float(args.sg_window_cm or 0.0),
+                    "als_lam": float(args.als_lam),
+                    "als_p": float(args.als_p),
+                    "baseline_method": str(args.baseline_method),
+                    "baseline_niter": int(args.baseline_niter),
+                    "baseline_piecewise": bool(args.baseline_piecewise),
+                    "baseline_ranges": args.baseline_ranges,
+                },
+            }
+            step_registry: List[Dict[str, object]] = []
+            _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
+            _append_processing_step(
+                step_registry,
+                "absorbance_converted",
+                x_clean,
+                y_for_processing,
+                step_metadata,
+            )
             y_proc, noise_sigma = preprocess_with_noise(
                 x_clean,
                 y_for_processing,
@@ -1648,6 +1711,8 @@ def index_file(path:str,con,args,failed_files=None):
                 baseline_niter=args.baseline_niter,
                 baseline_piecewise=args.baseline_piecewise,
                 baseline_ranges=args.baseline_ranges,
+                step_registry=step_registry,
+                step_metadata=step_metadata,
             )
             peak_candidates=detect_peak_candidates(
                 x_clean,
@@ -1655,6 +1720,26 @@ def index_file(path:str,con,args,failed_files=None):
                 noise_sigma,
                 args,
                 resolution_cm=resolution_cm,
+            )
+            peak_overlay = [
+                {
+                    "index": int(candidate["index"]),
+                    "x": float(x_clean[int(candidate["index"])]),
+                    "y": float(y_proc[int(candidate["index"])]),
+                    "polarity": int(candidate.get("polarity", 1)),
+                    "score": float(candidate.get("score", 0.0)),
+                    "sources": sorted(candidate.get("sources", [])),
+                }
+                for candidate in peak_candidates
+                if 0 <= int(candidate["index"]) < len(x_clean)
+            ]
+            _append_processing_step(
+                step_registry,
+                "candidate_peaks_overlay",
+                x_clean,
+                y_proc,
+                step_metadata,
+                extra_metadata={"candidates": peak_overlay},
             )
             refined = refine_peak_candidates(
                 x_clean,
@@ -1681,6 +1766,14 @@ def index_file(path:str,con,args,failed_files=None):
                 )
                 pid += 1
             total_peaks += pid
+            if step_registry_collector is not None:
+                step_registry_collector.append(
+                    {
+                        "file_id": file_id,
+                        "spectrum_id": sid,
+                        "steps": step_registry,
+                    }
+                )
         con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
         con.execute('COMMIT')
     except Exception:
@@ -1819,10 +1912,11 @@ def main():
     total_files=len(files)
     print(f'Found {total_files} JCAMP file(s). Starting indexing...')
     total_specs=0;total_peaks=0
+    step_registry_collector: List[Dict[str, object]] = []
     for idx,p in enumerate(files,1):
         print(f'[{idx}/{total_files}] Indexing {p}', file=sys.stdout, flush=True)
         try:
-            n_s,n_p=index_file(p,con,args)
+            n_s,n_p=index_file(p,con,args,step_registry_collector=step_registry_collector)
         except UnsupportedSpectrumError:
             if getattr(args,'strict',False):
                 raise
