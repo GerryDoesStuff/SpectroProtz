@@ -480,6 +480,46 @@ def _nan_safe(values: np.ndarray) -> np.ndarray:
     return filled
 
 
+def rubberband_baseline(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = _nan_safe(y)
+    if x_arr.size == 0 or y_arr.size == 0:
+        return np.zeros_like(y_arr)
+    mask = np.isfinite(x_arr)
+    if not np.any(mask):
+        return np.zeros_like(y_arr)
+    x_valid = x_arr[mask]
+    y_valid = y_arr[mask]
+    if x_valid.size == 1:
+        baseline = np.zeros_like(y_arr)
+        baseline[mask] = y_valid
+        return baseline
+    order = np.argsort(x_valid)
+    xs = x_valid[order]
+    ys = y_valid[order]
+    points = list(zip(xs, ys))
+
+    def cross(o, a, b) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: List[Tuple[float, float]] = []
+    for pt in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], pt) <= 0:
+            lower.pop()
+        lower.append(pt)
+    hull_x = np.array([pt[0] for pt in lower], dtype=float)
+    hull_y = np.array([pt[1] for pt in lower], dtype=float)
+    baseline_sorted = np.interp(xs, hull_x, hull_y)
+    baseline_valid = np.empty_like(xs)
+    baseline_valid[order.argsort()] = baseline_sorted
+    baseline = np.zeros_like(y_arr)
+    baseline[mask] = baseline_valid
+    if not np.all(mask):
+        idx = np.arange(y_arr.size)
+        baseline[~mask] = np.interp(idx[~mask], idx[mask], baseline[mask])
+    return baseline
+
+
 def als_baseline(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
     y = _nan_safe(y)
     L = len(y)
@@ -559,6 +599,7 @@ def _apply_baseline(
     lam: float,
     p: float,
     niter: int,
+    x: np.ndarray | None = None,
 ) -> np.ndarray:
     method = (method or "").lower()
     if method == "asls":
@@ -567,6 +608,10 @@ def _apply_baseline(
         return arpls_baseline(y, lam=lam, niter=niter)
     if method == "airpls":
         return airpls_baseline(y, lam=lam, niter=niter)
+    if method == "rubberband":
+        if x is None:
+            x = np.arange(len(y), dtype=float)
+        return rubberband_baseline(x, y)
     raise ValueError(f"Unsupported baseline method: {method}")
 
 
@@ -590,10 +635,10 @@ def _baseline_piecewise(
         mask = (x >= low) & (x <= high)
         if not np.any(mask):
             continue
-        baseline[mask] = _apply_baseline(y[mask], method, lam, p, niter)
+        baseline[mask] = _apply_baseline(y[mask], method, lam, p, niter, x=x[mask])
         covered |= mask
     if not np.all(covered):
-        fallback = _apply_baseline(y, method, lam, p, niter)
+        fallback = _apply_baseline(y, method, lam, p, niter, x=x)
         baseline[~covered] = fallback[~covered]
     return baseline
 
@@ -819,7 +864,7 @@ def preprocess_with_noise(
     als_p: float,
     *,
     sg_window_cm: float | None = None,
-    baseline_method: str = "airpls",
+    baseline_method: str = "rubberband",
     baseline_niter: int = 20,
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
@@ -846,7 +891,14 @@ def preprocess_with_noise(
                     ranges=ranges,
                 )
             else:
-                baseline = _apply_baseline(y2, baseline_method, als_lam, als_p, baseline_niter)
+                baseline = _apply_baseline(
+                    y2,
+                    baseline_method,
+                    als_lam,
+                    als_p,
+                    baseline_niter,
+                    x=x,
+                )
             y2 = y2 - baseline
         elif n:
             baseline = np.full_like(y2, float(np.mean(y2)))
@@ -878,7 +930,7 @@ def preprocess(
     als_p: float,
     *,
     sg_window_cm: float | None = None,
-    baseline_method: str = "airpls",
+    baseline_method: str = "rubberband",
     baseline_niter: int = 20,
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
@@ -967,8 +1019,23 @@ def export_spectrum_steps_to_xlsx(
         metadata = refined_step.get("metadata") or {}
         refined_peaks = metadata.get("peaks")
     used_names: set[str] = set()
+    metadata_rows: List[Tuple[str, str]] = []
+    if step_registry:
+        metadata = step_registry[0].get("metadata") or {}
+        for key, value in metadata.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    metadata_rows.append(
+                        (f"{key}.{sub_key}", json.dumps(sub_value, default=str))
+                    )
+            else:
+                metadata_rows.append((str(key), json.dumps(value, default=str)))
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         workbook = writer.book
+        if metadata_rows:
+            metadata_df = pd.DataFrame(metadata_rows, columns=["key", "value"])
+            metadata_sheet = _sanitize_sheet_name("metadata", used_names)
+            metadata_df.to_excel(writer, sheet_name=metadata_sheet, index=False)
         for step in step_registry:
             x = np.asarray(step["x"], dtype=float)
             y = np.asarray(step["y"], dtype=float)
@@ -2409,7 +2476,12 @@ def main():
     ap.add_argument('--sg-win',type=int,default=7,dest='sg_win');ap.add_argument('--sg-poly',type=int,default=3,dest='sg_poly')
     ap.add_argument('--sg-window-cm',type=float,default=0.0,dest='sg_window_cm')
     ap.add_argument('--als-lam',type=float,default=5e4,dest='als_lam');ap.add_argument('--als-p',type=float,default=0.01,dest='als_p')
-    ap.add_argument('--baseline-method',choices=['arpls','asls','airpls'],default='airpls',dest='baseline_method')
+    ap.add_argument(
+        '--baseline-method',
+        choices=['arpls', 'asls', 'airpls', 'rubberband'],
+        default='rubberband',
+        dest='baseline_method',
+    )
     ap.add_argument('--baseline-niter',type=int,default=20,dest='baseline_niter')
     ap.add_argument('--baseline-piecewise',action='store_true',dest='baseline_piecewise')
     ap.add_argument(
