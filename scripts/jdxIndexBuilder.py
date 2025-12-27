@@ -2147,7 +2147,7 @@ def main():
         '--export-step-plots',
         action='store_true',
         dest='export_step_plots',
-        help='Export per-step spectra to XLSX workbooks (only when enabled).',
+        help='Export per-step spectra to XLSX workbooks (overrides prompt default).',
     )
     ap.add_argument(
         '--export-step-plots-dir',
@@ -2159,7 +2159,13 @@ def main():
         '--prompt-export',
         action='store_true',
         dest='prompt_export',
-        help='Prompt at startup to decide whether to export step XLSX workbooks.',
+        help='(Deprecated) Prompt at startup to decide whether to export step XLSX workbooks.',
+    )
+    ap.add_argument(
+        '--no-prompt-export',
+        action='store_true',
+        dest='no_prompt_export',
+        help='Disable the startup prompt for step XLSX exports.',
     )
     ap.add_argument(
         '--plot-max-points',
@@ -2173,24 +2179,43 @@ def main():
         ),
     )
     args=ap.parse_args()
-    if args.prompt_export:
+    if not args.no_prompt_export or args.prompt_export:
         if sys.stdin is None or not sys.stdin.isatty():
-            print(
-                "Export prompt requested, but stdin is not interactive. "
-                "Skipping step workbook exports.",
-                file=sys.stderr,
-            )
-            args.export_step_plots = False
+            if args.export_step_plots:
+                print(
+                    "Interactive prompt unavailable; using --export-step-plots setting.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Interactive prompt unavailable; skipping step workbook exports.",
+                    file=sys.stderr,
+                )
         else:
+            default_answer = "y" if args.export_step_plots else "n"
+            prompt_hint = "[Y/n]" if default_answer == "y" else "[y/N]"
             while True:
-                response = input("Export step Excel workbooks? [y/N]: ").strip().lower()
+                response = input(f"Export step Excel workbooks? {prompt_hint}: ").strip().lower()
                 if response in {"y", "yes"}:
                     args.export_step_plots = True
                     break
-                if response in {"n", "no", ""}:
+                if response in {"n", "no"}:
                     args.export_step_plots = False
                     break
+                if response == "":
+                    args.export_step_plots = default_answer == "y"
+                    break
                 print("Please enter 'y' or 'n'.", file=sys.stderr)
+            if args.export_step_plots:
+                prompt_suffix = ""
+                if args.export_step_plots_dir:
+                    prompt_suffix = f" (current: {args.export_step_plots_dir})"
+                response = input(
+                    "Output directory for step XLSX exports (leave blank for default)"
+                    f"{prompt_suffix}: "
+                ).strip()
+                if response:
+                    args.export_step_plots_dir = response
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]

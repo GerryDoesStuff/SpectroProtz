@@ -108,6 +108,8 @@ parses JCAMP-DX spectra, normalises axes, and fits peaks after converting any
 transmittance (%T or fractional) signals into absorbance with `A = -log10(T)`.
 This ensures downstream preprocessing and peak finding work with a consistent
 representation regardless of how the original instrument exported the Y axis.
+At startup the CLI prompts to export per-step XLSX workbooks unless you pass
+`--no-prompt-export` (or explicitly set `--export-step-plots`).
 Results are persisted in `peaks.duckdb` under `index_dir` with four tables:
 
 - `spectra` – one row per JCAMP source file including normalised metadata.
