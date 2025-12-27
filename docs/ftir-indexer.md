@@ -46,7 +46,10 @@ Defaults are shown in parentheses.
 
 ### Peak detection and preprocessing
 - `--prominence` (0.005)
-- `--min-distance` (3.0) — minimum peak separation (cm⁻¹).
+- `--min-distance` (3.0) — minimum peak separation (cm⁻¹, converted to points using median X spacing).
+- `--min-distance-mode` (`fixed`) — `fixed` uses `--min-distance` as-is; `adaptive` clamps it to a fraction
+  of the estimated median FWHM so narrow peaks remain eligible.
+- `--min-distance-fwhm-fraction` (0.5) — fraction of the median FWHM used to clamp `--min-distance` in adaptive mode.
 - `--noise-sigma-multiplier` (1.5)
 - `--noise-window-cm` (400.0) — window size for local noise estimation (set to 0 to use a global noise floor).
 - `--min-prominence-by-region` (None) — comma-separated ranges with prominence floors
@@ -101,6 +104,8 @@ Defaults are shown in parentheses.
 **Tuning guidance**
 - The prominence threshold is computed as the max of `--prominence`, the local noise estimate
   (`--noise-sigma-multiplier` × noise sigma), and any `--min-prominence-by-region` floor.
+- When `--min-distance-mode adaptive` is enabled, the minimum separation is clamped to
+  `--min-distance-fwhm-fraction × median(FWHM)` so narrower peaks can still be detected.
 - Increase `--noise-sigma-multiplier` or `--prominence` if weak artifacts still appear.
 - Use `--min-prominence-by-region` to raise floors in the 400–1500 cm⁻¹ fingerprint region
   without suppressing stronger peaks elsewhere.
