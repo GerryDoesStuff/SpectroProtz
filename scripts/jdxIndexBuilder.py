@@ -11,7 +11,7 @@ What it does
 Usage
   pip install duckdb pandas numpy scipy scikit-learn pyarrow
   python index_and_consensus.py /path/to/data /path/to/index_dir \
-      --prominence 0.02 --min-distance 5 --sg-win 9 --sg-poly 3 \
+      --prominence 0.005 --min-distance 5 --sg-win 9 --sg-poly 3 \
       --als-lam 1e5 --als-p 0.01 --model Gaussian --min-r2 0.9 \
       --file-min-samples 2 --file-eps-factor 0.5 --file-eps-min 2.0 \
       --global-min-samples 2 --global-eps-abs 4.0
@@ -1569,6 +1569,8 @@ def detect_peak_candidates(
     args: object,
     *,
     resolution_cm: float | None = None,
+    file_path: str | None = None,
+    spectrum_id: int | None = None,
 ) -> List[Dict[str, object]]:
     min_distance_cm = float(_get_param(args, "min_distance", 1.0))
     step_cm = _resolve_step(x, min_distance_cm)
@@ -1583,15 +1585,18 @@ def detect_peak_candidates(
     if not segments:
         segments = [(float(np.nanmin(x)), float(np.nanmax(x)), True)]
 
+    width_min_arg = float(_get_param(args, "peak_width_min", 0.0))
+    width_max_arg = float(_get_param(args, "peak_width_max", 0.0))
     width_min_cm, width_max_cm = _resolve_width_bounds_cm(
-        float(_get_param(args, "peak_width_min", 0.0)),
-        float(_get_param(args, "peak_width_max", 0.0)),
+        width_min_arg,
+        width_max_arg,
         step_cm=step_cm,
         resolution_cm=resolution_cm,
     )
     width_min_pts = max(1, int(np.ceil(width_min_cm / max(step_cm, 1e-9))))
     width_max_pts = max(width_min_pts, int(np.ceil(width_max_cm / max(step_cm, 1e-9))))
-    width_bounds = (width_min_pts, width_max_pts)
+    width_filter_enabled = width_min_arg > 0 or width_max_arg > 0
+    width_bounds = (width_min_pts, width_max_pts) if width_filter_enabled else None
 
     detect_negative = bool(_get_param(args, "detect_negative_peaks", False))
     cwt_enabled = bool(_get_param(args, "cwt_enabled", False))
@@ -1602,6 +1607,28 @@ def detect_peak_candidates(
     merge_tolerance_cm = float(_get_param(args, "merge_tolerance", 8.0))
     if min_distance_cm > 0:
         merge_tolerance_cm = min(merge_tolerance_cm, min_distance_cm)
+
+    logger.info(
+        "Peak thresholds path=%s spectrum_id=%s min_distance_cm=%.4g step_cm=%.4g "
+        "distance_pts=%d prominence_floor=%.4g noise_sigma=%.4g noise_sigma_multiplier=%.3g "
+        "width_min_cm=%.4g width_max_cm=%.4g width_min_pts=%d width_max_pts=%d width_filter=%s "
+        "plateau_min_points=%d plateau_prominence_factor=%.3g",
+        file_path or "unknown",
+        spectrum_id if spectrum_id is not None else "unknown",
+        min_distance_cm,
+        step_cm,
+        distance_pts,
+        prominence_floor,
+        float(noise_sigma) if np.isfinite(noise_sigma) else float("nan"),
+        sigma_multiplier,
+        width_min_cm,
+        width_max_cm,
+        width_min_pts,
+        width_max_pts,
+        width_filter_enabled,
+        int(_get_param(args, "plateau_min_points", 3)),
+        float(_get_param(args, "plateau_prominence_factor", 1.0)),
+    )
 
     candidates: List[Dict[str, object]] = []
 
@@ -1638,9 +1665,12 @@ def detect_peak_candidates(
         noise_floor = sigma_multiplier * float(local_noise) if np.isfinite(local_noise) and local_noise > 0 else 0.0
         region_floor = _region_prominence_floor(seg_low, seg_high, region_prominence)
         effective_prominence = max(prominence_floor, noise_floor, region_floor)
-        idxs_pos, _ = find_peaks(
-            y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-        )
+        if width_bounds is None:
+            idxs_pos, _ = find_peaks(y_slice, prominence=effective_prominence, distance=distance_pts)
+        else:
+            idxs_pos, _ = find_peaks(
+                y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+            )
         for idx in np.asarray(idxs_pos, dtype=int):
             abs_idx = int(idx) + start
             if 0 <= abs_idx < len(y_proc):
@@ -1687,9 +1717,12 @@ def detect_peak_candidates(
                         )
 
         if detect_negative:
-            idxs_neg, _ = find_peaks(
-                -y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-            )
+            if width_bounds is None:
+                idxs_neg, _ = find_peaks(-y_slice, prominence=effective_prominence, distance=distance_pts)
+            else:
+                idxs_neg, _ = find_peaks(
+                    -y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+                )
             for idx in np.asarray(idxs_neg, dtype=int):
                 abs_idx = int(idx) + start
                 if 0 <= abs_idx < len(y_proc):
@@ -2244,6 +2277,8 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                         noise_sigma,
                         args,
                         resolution_cm=resolution_cm,
+                        file_path=path,
+                        spectrum_id=sid,
                     )
                     peak_overlay = [
                         {
@@ -2433,14 +2468,20 @@ def main():
     ap.add_argument(
         '--prominence',
         type=float,
-        default=0.02,
+        default=0.005,
         help='Base prominence floor for peak detection (normalized absorbance units).',
     )
-    ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
+    ap.add_argument(
+        '--min-distance',
+        type=float,
+        default=3.0,
+        dest='min_distance',
+        help='Minimum peak separation in cm^-1 (converted to points using median spacing).',
+    )
     ap.add_argument(
         '--noise-sigma-multiplier',
         type=float,
-        default=4.0,
+        default=1.5,
         dest='noise_sigma_multiplier',
         help='Multiplier applied to estimated noise sigma to set the prominence floor.',
     )
