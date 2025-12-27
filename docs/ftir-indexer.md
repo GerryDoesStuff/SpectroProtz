@@ -45,9 +45,9 @@ Defaults are shown in parentheses.
   - Output directory for the DuckDB database and optional exports.
 
 ### Peak detection and preprocessing
-- `--prominence` (0.02)
+- `--prominence` (0.005)
 - `--min-distance` (3.0) — minimum peak separation (cm⁻¹).
-- `--noise-sigma-multiplier` (4.0)
+- `--noise-sigma-multiplier` (1.5)
 - `--noise-window-cm` (400.0) — window size for local noise estimation (set to 0 to use a global noise floor).
 - `--min-prominence-by-region` (None) — comma-separated ranges with prominence floors
   (e.g. `400-1500:0.03,1500-1800:0.02`).
@@ -104,6 +104,7 @@ Defaults are shown in parentheses.
 - Increase `--noise-sigma-multiplier` or `--prominence` if weak artifacts still appear.
 - Use `--min-prominence-by-region` to raise floors in the 400–1500 cm⁻¹ fingerprint region
   without suppressing stronger peaks elsewhere.
+- Set `--peak-width-min 0 --peak-width-max 0` to disable width filtering if narrow peaks are missed.
 
 **Basic run**
 ```bash
@@ -118,7 +119,7 @@ python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index --strict
 **Peak tuning**
 ```bash
 python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
-  --prominence 0.02 --min-distance 5 --sg-win 11 --sg-poly 3 \
+  --prominence 0.01 --min-distance 5 --sg-win 11 --sg-poly 3 \
   --als-lam 1e5 --als-p 0.01 --min-r2 0.9
 ```
 
@@ -126,7 +127,23 @@ python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
 ```bash
 python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
   --min-prominence-by-region "400-1500:0.03" --noise-window-cm 400 \
-  --noise-sigma-multiplier 4
+  --noise-sigma-multiplier 3
+```
+
+**Recommended presets**
+
+Sensitive (favor weak or narrow peaks):
+```bash
+python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
+  --prominence 0.005 --noise-sigma-multiplier 1.5 --min-distance 2 \
+  --peak-width-min 0 --peak-width-max 0
+```
+
+Conservative (favor cleaner, well-separated peaks):
+```bash
+python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
+  --prominence 0.02 --noise-sigma-multiplier 3 --min-distance 5 \
+  --peak-width-min 4 --peak-width-max 40
 ```
 
 **Export per-step plots (Excel workbooks)**
