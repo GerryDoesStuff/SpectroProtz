@@ -1126,16 +1126,16 @@ class FtirIndexerDialog(QDialog):
 
     def _apply_defaults(self) -> None:
         defaults = self._defaults
-        self._prominence_spin.setValue(float(defaults.get("prominence", 0.02)))
-        self._noise_sigma_multiplier_spin.setValue(float(defaults.get("noise_sigma_multiplier", 3.0)))
-        self._min_distance_spin.setValue(int(defaults.get("min_distance", 5)))
+        self._prominence_spin.setValue(float(defaults.get("prominence", 0.004)))
+        self._noise_sigma_multiplier_spin.setValue(float(defaults.get("noise_sigma_multiplier", 1.8)))
+        self._min_distance_spin.setValue(int(defaults.get("min_distance", 1)))
         self._sg_window_spin.setValue(int(defaults.get("sg_win", 9)))
         self._sg_window_cm_spin.setValue(float(defaults.get("sg_window_cm", 0.0)))
         self._sg_poly_spin.setValue(int(defaults.get("sg_poly", 3)))
         self._als_lambda_spin.setValue(float(defaults.get("als_lam", 1e5)))
         self._als_p_spin.setValue(float(defaults.get("als_p", 0.01)))
         self._fit_window_spin.setValue(int(defaults.get("fit_window_pts", 50)))
-        self._min_r2_spin.setValue(float(defaults.get("min_r2", 0.9)))
+        self._min_r2_spin.setValue(float(defaults.get("min_r2", 0.80)))
         self._detect_negative_check.setChecked(bool(defaults.get("detect_negative_peaks", False)))
         self._file_min_samples_spin.setValue(int(defaults.get("file_min_samples", 2)))
         self._file_eps_factor_spin.setValue(float(defaults.get("file_eps_factor", 0.5)))
