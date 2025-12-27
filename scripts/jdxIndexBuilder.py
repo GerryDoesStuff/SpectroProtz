@@ -687,6 +687,106 @@ def estimate_noise_sigma(
     return MAD_SCALE * mad
 
 
+def _estimate_segment_noise_sigma(y: np.ndarray, fallback: float) -> float:
+    values = np.asarray(y, dtype=float)
+    if values.size < 3:
+        return float(fallback)
+    median = float(np.nanmedian(values))
+    mad = float(np.nanmedian(np.abs(values - median)))
+    if not np.isfinite(mad) or mad <= 0:
+        return float(fallback)
+    sigma = MAD_SCALE * mad
+    if not np.isfinite(sigma) or sigma <= 0:
+        return float(fallback)
+    return float(sigma)
+
+
+def _parse_min_prominence_by_region(spec: Optional[str]) -> List[Tuple[float, float, float]]:
+    if not spec:
+        return []
+    regions: List[Tuple[float, float, float]] = []
+    for chunk in str(spec).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk:
+            logger.warning("Invalid region prominence entry '%s' (missing ':')", chunk)
+            continue
+        range_part, prom_part = chunk.split(":", 1)
+        range_part = range_part.strip()
+        prom_part = prom_part.strip()
+        try:
+            prominence = float(prom_part)
+        except ValueError:
+            logger.warning("Invalid prominence value '%s' in '%s'", prom_part, chunk)
+            continue
+        if "-" not in range_part:
+            logger.warning("Invalid range '%s' in '%s'", range_part, chunk)
+            continue
+        lo_str, hi_str = range_part.split("-", 1)
+        try:
+            low = float(lo_str.strip())
+            high = float(hi_str.strip())
+        except ValueError:
+            logger.warning("Invalid range bounds '%s' in '%s'", range_part, chunk)
+            continue
+        if not np.isfinite(low) or not np.isfinite(high) or not np.isfinite(prominence):
+            logger.warning("Invalid region prominence entry '%s'", chunk)
+            continue
+        low, high = (low, high) if low <= high else (high, low)
+        regions.append((low, high, float(prominence)))
+    return regions
+
+
+def _build_prominence_segments(
+    x: np.ndarray,
+    window_cm: float,
+    regions: List[Tuple[float, float, float]],
+) -> List[Tuple[float, float, bool]]:
+    if x.size == 0:
+        return []
+    x_min = float(np.nanmin(x))
+    x_max = float(np.nanmax(x))
+    if not np.isfinite(x_min) or not np.isfinite(x_max):
+        return []
+    if x_min == x_max:
+        return [(x_min, x_max, True)]
+    edges = {x_min, x_max}
+    if window_cm and window_cm > 0:
+        step = float(window_cm)
+        if step > 0:
+            current = x_min + step
+            while current < x_max:
+                edges.add(current)
+                current += step
+    for low, high, _ in regions:
+        edges.add(float(low))
+        edges.add(float(high))
+    ordered = sorted(edges)
+    segments: List[Tuple[float, float, bool]] = []
+    for idx in range(len(ordered) - 1):
+        low = ordered[idx]
+        high = ordered[idx + 1]
+        if low == high:
+            continue
+        is_last = idx == len(ordered) - 2
+        segments.append((low, high, is_last))
+    return segments
+
+
+def _region_prominence_floor(
+    low: float,
+    high: float,
+    regions: List[Tuple[float, float, float]],
+) -> float:
+    floor = 0.0
+    for region_low, region_high, region_floor in regions:
+        if high < region_low or low > region_high:
+            continue
+        floor = max(floor, region_floor)
+    return float(floor)
+
+
 def _append_processing_step(
     registry: List[Dict[str, object]] | None,
     label: str,
@@ -1407,12 +1507,14 @@ def detect_peak_candidates(
     step_cm = _resolve_step(x, min_distance_cm)
     distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
 
-    prominence_floor = float(_get_param(args, "prominence", 0.01))
-    sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 3.0))
-    if np.isfinite(noise_sigma) and noise_sigma > 0:
-        effective_prominence = sigma_multiplier * float(noise_sigma)
-    else:
-        effective_prominence = prominence_floor
+    prominence_floor = float(_get_param(args, "prominence", 0.02))
+    sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 4.0))
+    noise_window_cm = float(_get_param(args, "noise_window_cm", 0.0))
+    region_prominence_spec = _get_param(args, "min_prominence_by_region", None)
+    region_prominence = _parse_min_prominence_by_region(region_prominence_spec)
+    segments = _build_prominence_segments(x, noise_window_cm, region_prominence)
+    if not segments:
+        segments = [(float(np.nanmin(x)), float(np.nanmax(x)), True)]
 
     width_min_cm, width_max_cm = _resolve_width_bounds_cm(
         float(_get_param(args, "peak_width_min", 0.0)),
@@ -1447,51 +1549,93 @@ def detect_peak_candidates(
             }
         )
 
-    idxs_pos, _ = find_peaks(
-        y_proc, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-    )
-    for idx in np.asarray(idxs_pos, dtype=int):
-        if 0 <= idx < len(y_proc):
-            _add_candidate(idx, 1, "prominence", {"prominence": effective_prominence, "width_pts": width_bounds})
-
     plateau_min_points = max(2, int(_get_param(args, "plateau_min_points", 3)))
     plateau_prominence_factor = float(_get_param(args, "plateau_prominence_factor", 1.0))
-    plateau_prominence = max(effective_prominence * plateau_prominence_factor, 0.0)
-    if plateau_min_points >= 2:
-        plateau_idxs, plateau_props = find_peaks(
-            y_proc,
-            prominence=plateau_prominence,
-            distance=distance_pts,
-            plateau_size=plateau_min_points,
+
+    for seg_low, seg_high, seg_last in segments:
+        if seg_low == seg_high:
+            continue
+        if seg_last:
+            mask = (x >= seg_low) & (x <= seg_high)
+        else:
+            mask = (x >= seg_low) & (x < seg_high)
+        idxs = np.where(mask)[0]
+        if idxs.size == 0:
+            continue
+        start, end = int(idxs[0]), int(idxs[-1]) + 1
+        y_slice = y_proc[start:end]
+        local_noise = _estimate_segment_noise_sigma(
+            y_slice,
+            noise_sigma if np.isfinite(noise_sigma) else float("nan"),
         )
-        if plateau_idxs.size:
-            left_edges = plateau_props.get("left_edges", [])
-            right_edges = plateau_props.get("right_edges", [])
-            sizes = plateau_props.get("plateau_sizes", [])
-            for idx, left, right, size in zip(plateau_idxs, left_edges, right_edges, sizes):
-                left = int(left)
-                right = int(right)
-                center = int(round((left + right) / 2))
-                if 0 <= center < len(y_proc):
+        noise_floor = sigma_multiplier * float(local_noise) if np.isfinite(local_noise) and local_noise > 0 else 0.0
+        region_floor = _region_prominence_floor(seg_low, seg_high, region_prominence)
+        effective_prominence = max(prominence_floor, noise_floor, region_floor)
+        idxs_pos, _ = find_peaks(
+            y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+        )
+        for idx in np.asarray(idxs_pos, dtype=int):
+            abs_idx = int(idx) + start
+            if 0 <= abs_idx < len(y_proc):
+                _add_candidate(
+                    abs_idx,
+                    1,
+                    "prominence",
+                    {
+                        "prominence": effective_prominence,
+                        "width_pts": width_bounds,
+                        "segment_range": (float(seg_low), float(seg_high)),
+                    },
+                )
+
+        plateau_prominence = max(effective_prominence * plateau_prominence_factor, 0.0)
+        if plateau_min_points >= 2:
+            plateau_idxs, plateau_props = find_peaks(
+                y_slice,
+                prominence=plateau_prominence,
+                distance=distance_pts,
+                plateau_size=plateau_min_points,
+            )
+            if plateau_idxs.size:
+                left_edges = plateau_props.get("left_edges", [])
+                right_edges = plateau_props.get("right_edges", [])
+                sizes = plateau_props.get("plateau_sizes", [])
+                for idx, left, right, size in zip(plateau_idxs, left_edges, right_edges, sizes):
+                    left = int(left)
+                    right = int(right)
+                    center = int(round((left + right) / 2))
+                    abs_center = center + start
+                    if 0 <= abs_center < len(y_proc):
+                        _add_candidate(
+                            abs_center,
+                            1,
+                            "plateau",
+                            {
+                                "plateau_left": left + start,
+                                "plateau_right": right + start,
+                                "plateau_size": int(size),
+                                "prominence": plateau_prominence,
+                                "segment_range": (float(seg_low), float(seg_high)),
+                            },
+                        )
+
+        if detect_negative:
+            idxs_neg, _ = find_peaks(
+                -y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
+            )
+            for idx in np.asarray(idxs_neg, dtype=int):
+                abs_idx = int(idx) + start
+                if 0 <= abs_idx < len(y_proc):
                     _add_candidate(
-                        center,
-                        1,
-                        "plateau",
+                        abs_idx,
+                        -1,
+                        "prominence",
                         {
-                            "plateau_left": left,
-                            "plateau_right": right,
-                            "plateau_size": int(size),
-                            "prominence": plateau_prominence,
+                            "prominence": effective_prominence,
+                            "width_pts": width_bounds,
+                            "segment_range": (float(seg_low), float(seg_high)),
                         },
                     )
-
-    if detect_negative:
-        idxs_neg, _ = find_peaks(
-            -y_proc, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-        )
-        for idx in np.asarray(idxs_neg, dtype=int):
-            if 0 <= idx < len(y_proc):
-                _add_candidate(idx, -1, "prominence", {"prominence": effective_prominence, "width_pts": width_bounds})
 
     if cwt_enabled:
         cwt_width_min_cm, cwt_width_max_cm = _resolve_width_bounds_cm(
@@ -2219,9 +2363,39 @@ def main():
         default=script_dir,
         help='Output directory for DuckDB/Parquet files (defaults to script location)',
     )
-    ap.add_argument('--prominence',type=float,default=0.01)
+    ap.add_argument(
+        '--prominence',
+        type=float,
+        default=0.02,
+        help='Base prominence floor for peak detection (normalized absorbance units).',
+    )
     ap.add_argument('--min-distance',type=float,default=3.0,dest='min_distance')
-    ap.add_argument('--noise-sigma-multiplier',type=float,default=3.0,dest='noise_sigma_multiplier')
+    ap.add_argument(
+        '--noise-sigma-multiplier',
+        type=float,
+        default=4.0,
+        dest='noise_sigma_multiplier',
+        help='Multiplier applied to estimated noise sigma to set the prominence floor.',
+    )
+    ap.add_argument(
+        '--noise-window-cm',
+        type=float,
+        default=400.0,
+        dest='noise_window_cm',
+        help=(
+            'Window size (cm^-1) for local noise estimation. '
+            'Set to 0 to use a single global noise estimate.'
+        ),
+    )
+    ap.add_argument(
+        '--min-prominence-by-region',
+        default=None,
+        dest='min_prominence_by_region',
+        help=(
+            'Comma-separated regional prominence floors, e.g. "400-1500:0.03,1500-1800:0.02". '
+            'Use this to suppress low-value artifacts in targeted ranges.'
+        ),
+    )
     ap.add_argument('--peak-width-min',type=float,default=0.0,dest='peak_width_min')
     ap.add_argument('--peak-width-max',type=float,default=0.0,dest='peak_width_max')
     ap.add_argument('--cwt-enabled',action='store_true',dest='cwt_enabled')
