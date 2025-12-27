@@ -1594,8 +1594,22 @@ def detect_peak_candidates(
     spectrum_id: int | None = None,
 ) -> List[Dict[str, object]]:
     min_distance_cm = float(_get_param(args, "min_distance", 1.0))
-    step_cm = _resolve_step(x, min_distance_cm)
+    x_clean = np.asarray(x, dtype=float)
+    x_clean = x_clean[np.isfinite(x_clean)]
+    if x_clean.size > 1:
+        x_sorted = np.sort(x_clean)
+        step_cm = _resolve_step_from_x(x_sorted)
+    else:
+        step_cm = _resolve_step(x, min_distance_cm)
     distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
+    min_distance_mode = str(_get_param(args, "min_distance_mode", "fixed")).lower()
+    min_distance_fwhm_fraction = float(_get_param(args, "min_distance_fwhm_fraction", 0.5))
+    if min_distance_mode not in {"fixed", "adaptive"}:
+        logger.warning(
+            "Unknown min_distance_mode=%s, falling back to fixed behavior.",
+            min_distance_mode,
+        )
+        min_distance_mode = "fixed"
 
     prominence_floor = float(_get_param(args, "prominence", 0.02))
     sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 4.0))
@@ -1626,30 +1640,6 @@ def detect_peak_candidates(
     cwt_width_step_cm = float(_get_param(args, "cwt_width_step", 0.0))
     cwt_cluster_tolerance_cm = float(_get_param(args, "cwt_cluster_tolerance", 8.0))
     merge_tolerance_cm = float(_get_param(args, "merge_tolerance", 8.0))
-    if min_distance_cm > 0:
-        merge_tolerance_cm = min(merge_tolerance_cm, min_distance_cm)
-
-    logger.info(
-        "Peak thresholds path=%s spectrum_id=%s min_distance_cm=%.4g step_cm=%.4g "
-        "distance_pts=%d prominence_floor=%.4g noise_sigma=%.4g noise_sigma_multiplier=%.3g "
-        "width_min_cm=%.4g width_max_cm=%.4g width_min_pts=%d width_max_pts=%d width_filter=%s "
-        "plateau_min_points=%d plateau_prominence_factor=%.3g",
-        file_path or "unknown",
-        spectrum_id if spectrum_id is not None else "unknown",
-        min_distance_cm,
-        step_cm,
-        distance_pts,
-        prominence_floor,
-        float(noise_sigma) if np.isfinite(noise_sigma) else float("nan"),
-        sigma_multiplier,
-        width_min_cm,
-        width_max_cm,
-        width_min_pts,
-        width_max_pts,
-        width_filter_enabled,
-        int(_get_param(args, "plateau_min_points", 3)),
-        float(_get_param(args, "plateau_prominence_factor", 1.0)),
-    )
 
     fallback_noise_sigma = _estimate_segment_noise_sigma(
         y_proc,
@@ -1666,6 +1656,70 @@ def detect_peak_candidates(
         0.0,
     )
     finite_local_floor = local_noise_floor[np.isfinite(local_noise_floor)]
+    adaptive_fwhm_cm = float("nan")
+    if min_distance_mode == "adaptive":
+        adaptive_floor = prominence_floor
+        if finite_local_floor.size:
+            adaptive_floor = max(adaptive_floor, float(np.nanmedian(finite_local_floor)))
+
+        def _estimate_median_fwhm_cm(prominence_value: float) -> float:
+            if y_proc.size < 3:
+                return 0.0
+            target = np.abs(y_proc)
+            peak_idxs, _ = find_peaks(target, prominence=prominence_value)
+            if peak_idxs.size == 0:
+                return 0.0
+            widths, _, left_ips, right_ips = peak_widths(target, peak_idxs, rel_height=0.5)
+            xs = np.arange(len(x), dtype=float)
+            fwhm_values: List[float] = []
+            for left_ip, right_ip, width in zip(left_ips, right_ips, widths):
+                if np.isfinite(left_ip) and np.isfinite(right_ip):
+                    left_x = float(np.interp(left_ip, xs, x))
+                    right_x = float(np.interp(right_ip, xs, x))
+                    fwhm = abs(right_x - left_x)
+                else:
+                    fwhm = float(width) * step_cm
+                if np.isfinite(fwhm) and fwhm > 0:
+                    fwhm_values.append(fwhm)
+            if not fwhm_values:
+                return 0.0
+            return float(np.nanmedian(fwhm_values))
+
+        adaptive_fwhm_cm = _estimate_median_fwhm_cm(adaptive_floor)
+        if adaptive_fwhm_cm > 0 and min_distance_fwhm_fraction > 0:
+            adaptive_limit_cm = adaptive_fwhm_cm * min_distance_fwhm_fraction
+            if np.isfinite(adaptive_limit_cm) and adaptive_limit_cm > 0:
+                min_distance_cm = min(min_distance_cm, adaptive_limit_cm)
+                distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
+
+    if min_distance_cm > 0:
+        merge_tolerance_cm = min(merge_tolerance_cm, min_distance_cm)
+
+    logger.info(
+        "Peak thresholds path=%s spectrum_id=%s min_distance_cm=%.4g step_cm=%.4g "
+        "distance_pts=%d min_distance_mode=%s min_distance_fwhm_fraction=%.3g "
+        "adaptive_fwhm_cm=%.4g prominence_floor=%.4g noise_sigma=%.4g noise_sigma_multiplier=%.3g "
+        "width_min_cm=%.4g width_max_cm=%.4g width_min_pts=%d width_max_pts=%d width_filter=%s "
+        "plateau_min_points=%d plateau_prominence_factor=%.3g",
+        file_path or "unknown",
+        spectrum_id if spectrum_id is not None else "unknown",
+        min_distance_cm,
+        step_cm,
+        distance_pts,
+        min_distance_mode,
+        min_distance_fwhm_fraction,
+        adaptive_fwhm_cm,
+        prominence_floor,
+        float(noise_sigma) if np.isfinite(noise_sigma) else float("nan"),
+        sigma_multiplier,
+        width_min_cm,
+        width_max_cm,
+        width_min_pts,
+        width_max_pts,
+        width_filter_enabled,
+        int(_get_param(args, "plateau_min_points", 3)),
+        float(_get_param(args, "plateau_prominence_factor", 1.0)),
+    )
     if finite_local_floor.size:
         logger.info(
             "Local noise floor path=%s spectrum_id=%s median=%.4g min=%.4g max=%.4g",
@@ -2615,6 +2669,23 @@ def main():
         default=3.0,
         dest='min_distance',
         help='Minimum peak separation in cm^-1 (converted to points using median spacing).',
+    )
+    ap.add_argument(
+        '--min-distance-mode',
+        choices=['fixed', 'adaptive'],
+        default='fixed',
+        dest='min_distance_mode',
+        help=(
+            'Use a fixed min distance or clamp it to a fraction of the median '
+            'peak FWHM (adaptive).'
+        ),
+    )
+    ap.add_argument(
+        '--min-distance-fwhm-fraction',
+        type=float,
+        default=0.5,
+        dest='min_distance_fwhm_fraction',
+        help='Fraction of median peak FWHM to clamp min-distance in adaptive mode.',
     )
     ap.add_argument(
         '--noise-sigma-multiplier',
