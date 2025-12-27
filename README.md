@@ -110,6 +110,8 @@ This ensures downstream preprocessing and peak finding work with a consistent
 representation regardless of how the original instrument exported the Y axis.
 At startup the CLI prompts to export per-step XLSX workbooks unless you pass
 `--no-prompt-export` (or explicitly set `--export-step-plots`).
+Detailed CLI usage and output descriptions are available in
+[`docs/ftir-indexer.md`](docs/ftir-indexer.md).
 Results are persisted in `peaks.duckdb` under `index_dir` with four tables:
 
 - `spectra` – one row per JCAMP source file including normalised metadata.
