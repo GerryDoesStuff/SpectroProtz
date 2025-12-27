@@ -25,7 +25,7 @@ from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
-from scipy.signal import find_peaks, find_peaks_cwt, savgol_filter
+from scipy.signal import find_peaks, find_peaks_cwt, peak_widths, savgol_filter
 from scipy.optimize import curve_fit, OptimizeWarning
 from scipy.interpolate import UnivariateSpline
 from scipy.special import wofz
@@ -1631,17 +1631,57 @@ def detect_peak_candidates(
     )
 
     candidates: List[Dict[str, object]] = []
+    fwhm_cache: Dict[Tuple[int, int], float] = {}
 
-    def _add_candidate(index: int, polarity: int, source: str, metadata: Dict[str, object]):
+    def _add_candidate(
+        index: int,
+        polarity: int,
+        source: str,
+        pass_label: str,
+        metadata: Dict[str, object],
+    ):
         candidates.append(
             {
                 "index": int(index),
                 "polarity": int(polarity),
                 "score": float(abs(y_proc[int(index)])),
-                "detections": [metadata | {"source": source}],
-                "sources": {source},
+                "detections": [metadata | {"source": source, "pass": pass_label}],
+                "sources": {pass_label},
             }
         )
+
+    def _estimate_fwhm_cm(index: int, polarity: int) -> float:
+        cache_key = (int(index), int(polarity))
+        if cache_key in fwhm_cache:
+            return fwhm_cache[cache_key]
+        y_target = y_proc if polarity >= 0 else -y_proc
+        fwhm_cm = float("nan")
+        try:
+            widths, _, left_ips, right_ips = peak_widths(y_target, [int(index)], rel_height=0.5)
+            if widths.size:
+                left_ip = float(left_ips[0])
+                right_ip = float(right_ips[0])
+                if np.isfinite(left_ip) and np.isfinite(right_ip):
+                    xs = np.arange(len(x), dtype=float)
+                    left_x = float(np.interp(left_ip, xs, x))
+                    right_x = float(np.interp(right_ip, xs, x))
+                    fwhm_cm = abs(right_x - left_x)
+                else:
+                    fwhm_cm = float(widths[0]) * step_cm
+        except (ValueError, IndexError):
+            fwhm_cm = float("nan")
+        if not np.isfinite(fwhm_cm):
+            fwhm_cm = 0.0
+        fwhm_cache[cache_key] = fwhm_cm
+        return fwhm_cm
+
+    def _merge_tolerance_cm(index_a: int, index_b: int, polarity: int) -> float:
+        fwhm_a = _estimate_fwhm_cm(index_a, polarity)
+        fwhm_b = _estimate_fwhm_cm(index_b, polarity)
+        fwhm = max(fwhm_a, fwhm_b)
+        half_fwhm = 0.5 * fwhm if fwhm > 0 else 0.0
+        target_tolerance = max(2.0, min(4.0, half_fwhm if half_fwhm > 0 else 4.0))
+        return min(merge_tolerance_cm, target_tolerance)
 
     plateau_min_points = max(2, int(_get_param(args, "plateau_min_points", 3)))
     plateau_prominence_factor = float(_get_param(args, "plateau_prominence_factor", 1.0))
@@ -1665,25 +1705,56 @@ def detect_peak_candidates(
         noise_floor = sigma_multiplier * float(local_noise) if np.isfinite(local_noise) and local_noise > 0 else 0.0
         region_floor = _region_prominence_floor(seg_low, seg_high, region_prominence)
         effective_prominence = max(prominence_floor, noise_floor, region_floor)
-        if width_bounds is None:
-            idxs_pos, _ = find_peaks(y_slice, prominence=effective_prominence, distance=distance_pts)
-        else:
-            idxs_pos, _ = find_peaks(
-                y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-            )
-        for idx in np.asarray(idxs_pos, dtype=int):
-            abs_idx = int(idx) + start
-            if 0 <= abs_idx < len(y_proc):
-                _add_candidate(
-                    abs_idx,
-                    1,
-                    "prominence",
-                    {
-                        "prominence": effective_prominence,
-                        "width_pts": width_bounds,
-                        "segment_range": (float(seg_low), float(seg_high)),
-                    },
+        pass1_distance = distance_pts
+        pass2_distance = max(1, int(max(1, round(distance_pts * 0.5))))
+        pass1_prominence = effective_prominence
+        pass2_prominence = max(prominence_floor * 0.5, effective_prominence * 0.6)
+        width_bounds_pass1 = width_bounds
+        width_bounds_pass2 = None
+        if width_bounds is not None:
+            pass2_min = max(1, int(math.ceil(width_bounds[0] * 0.5)))
+            pass2_max = max(pass2_min, int(math.ceil(width_bounds[1] * 0.75)))
+            width_bounds_pass2 = (pass2_min, pass2_max)
+
+        def _record_prominence_candidates(
+            slice_data: np.ndarray,
+            polarity: int,
+            pass_label: str,
+            prominence_value: float,
+            distance_value: int,
+            width_value: Tuple[int, int] | None,
+        ) -> None:
+            if polarity >= 0:
+                target = slice_data
+            else:
+                target = -slice_data
+            if width_value is None:
+                peak_idxs, _ = find_peaks(target, prominence=prominence_value, distance=distance_value)
+            else:
+                peak_idxs, _ = find_peaks(
+                    target, prominence=prominence_value, distance=distance_value, width=width_value
                 )
+            for idx in np.asarray(peak_idxs, dtype=int):
+                abs_idx = int(idx) + start
+                if 0 <= abs_idx < len(y_proc):
+                    _add_candidate(
+                        abs_idx,
+                        polarity,
+                        "prominence",
+                        pass_label,
+                        {
+                            "prominence": prominence_value,
+                            "width_pts": width_value,
+                            "segment_range": (float(seg_low), float(seg_high)),
+                        },
+                    )
+
+        _record_prominence_candidates(
+            y_slice, 1, "pass1", pass1_prominence, pass1_distance, width_bounds_pass1
+        )
+        _record_prominence_candidates(
+            y_slice, 1, "pass2", pass2_prominence, pass2_distance, width_bounds_pass2
+        )
 
         plateau_prominence = max(effective_prominence * plateau_prominence_factor, 0.0)
         if plateau_min_points >= 2:
@@ -1707,6 +1778,7 @@ def detect_peak_candidates(
                             abs_center,
                             1,
                             "plateau",
+                            "pass1",
                             {
                                 "plateau_left": left + start,
                                 "plateau_right": right + start,
@@ -1717,25 +1789,12 @@ def detect_peak_candidates(
                         )
 
         if detect_negative:
-            if width_bounds is None:
-                idxs_neg, _ = find_peaks(-y_slice, prominence=effective_prominence, distance=distance_pts)
-            else:
-                idxs_neg, _ = find_peaks(
-                    -y_slice, prominence=effective_prominence, distance=distance_pts, width=width_bounds
-                )
-            for idx in np.asarray(idxs_neg, dtype=int):
-                abs_idx = int(idx) + start
-                if 0 <= abs_idx < len(y_proc):
-                    _add_candidate(
-                        abs_idx,
-                        -1,
-                        "prominence",
-                        {
-                            "prominence": effective_prominence,
-                            "width_pts": width_bounds,
-                            "segment_range": (float(seg_low), float(seg_high)),
-                        },
-                    )
+            _record_prominence_candidates(
+                y_slice, -1, "pass1", pass1_prominence, pass1_distance, width_bounds_pass1
+            )
+            _record_prominence_candidates(
+                y_slice, -1, "pass2", pass2_prominence, pass2_distance, width_bounds_pass2
+            )
 
     if cwt_enabled:
         cwt_width_min_cm, cwt_width_max_cm = _resolve_width_bounds_cm(
@@ -1761,6 +1820,7 @@ def detect_peak_candidates(
                     idx,
                     1,
                     "cwt",
+                    "cwt",
                     {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
                 )
         if detect_negative:
@@ -1774,6 +1834,7 @@ def detect_peak_candidates(
                     _add_candidate(
                         idx,
                         -1,
+                        "cwt",
                         "cwt",
                         {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
                     )
@@ -1806,7 +1867,8 @@ def detect_peak_candidates(
         for existing in merged:
             if int(existing["polarity"]) != polarity:
                 continue
-            if abs(float(x[idx]) - float(x[int(existing["index"])])) <= merge_tolerance_cm:
+            tolerance_cm = _merge_tolerance_cm(idx, int(existing["index"]), polarity)
+            if abs(float(x[idx]) - float(x[int(existing["index"])])) <= tolerance_cm:
                 match = existing
                 break
         if match is None:
@@ -1821,6 +1883,7 @@ def detect_peak_candidates(
     merged.sort(key=lambda c: c["index"])
     for candidate_id, candidate in enumerate(merged):
         candidate["candidate_id"] = int(candidate_id)
+        candidate["sources"] = sorted(candidate.get("sources", []))
         plateau_bounds = _extract_plateau_bounds(candidate.get("detections", []))
         if plateau_bounds is not None:
             candidate["plateau_bounds"] = plateau_bounds
