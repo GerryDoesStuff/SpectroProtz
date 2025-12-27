@@ -22,11 +22,11 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, find_peaks_cwt, savgol_filter
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, OptimizeWarning
 from scipy.interpolate import UnivariateSpline
 from scipy.special import wofz
 from scipy import sparse
@@ -57,6 +57,14 @@ class FileTimeoutError(TimeoutError):
         self.seconds = seconds
         self.stage = stage or "unknown"
         super().__init__(f"Timed out after {seconds:.1f}s during {self.stage}")
+
+
+class FitTimeoutError(TimeoutError):
+    """Raised when a peak fit exceeds the configured timeout."""
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        super().__init__(f"Fit timed out after {seconds:.1f}s")
 
 
 _FTIR_HEADER_KEYS = {
@@ -1021,6 +1029,8 @@ def _fit_peak_single(
     model: str,
     *,
     center_bounds: tuple[float, float] | None = None,
+    maxfev: int = 10000,
+    fit_timeout_sec: float = 0.0,
 ) -> Optional[Dict[str, float]]:
     if xs.size < 5:
         return None
@@ -1051,14 +1061,15 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        popt, _ = curve_fit(
-            lorentzian,
-            xs_sorted,
-            ys_sorted,
-            p0=[A, x0, width_guess, C],
-            maxfev=12000,
-            bounds=bounds,
-        )
+        with _FitTimeoutGuard(fit_timeout_sec):
+            popt, _ = curve_fit(
+                lorentzian,
+                xs_sorted,
+                ys_sorted,
+                p0=[A, x0, width_guess, C],
+                maxfev=maxfev,
+                bounds=bounds,
+            )
         A, x0, gamma, C = popt
         yfit = lorentzian(xs_sorted, *popt)
         fwhm = 2.0 * abs(gamma)
@@ -1068,14 +1079,15 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf, np.inf],
         )
-        popt, _ = curve_fit(
-            voigt_profile,
-            xs_sorted,
-            ys_sorted,
-            p0=[A, x0, width_guess, width_guess, C],
-            maxfev=20000,
-            bounds=bounds,
-        )
+        with _FitTimeoutGuard(fit_timeout_sec):
+            popt, _ = curve_fit(
+                voigt_profile,
+                xs_sorted,
+                ys_sorted,
+                p0=[A, x0, width_guess, width_guess, C],
+                maxfev=maxfev,
+                bounds=bounds,
+            )
         A, x0, sigma, gamma, C = popt
         yfit = voigt_profile(xs_sorted, *popt)
         fwhm = 0.5346 * (2.0 * abs(gamma)) + math.sqrt(
@@ -1087,14 +1099,15 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        popt, _ = curve_fit(
-            gaussian,
-            xs_sorted,
-            ys_sorted,
-            p0=[A, x0, width_guess, C],
-            maxfev=12000,
-            bounds=bounds,
-        )
+        with _FitTimeoutGuard(fit_timeout_sec):
+            popt, _ = curve_fit(
+                gaussian,
+                xs_sorted,
+                ys_sorted,
+                p0=[A, x0, width_guess, C],
+                maxfev=maxfev,
+                bounds=bounds,
+            )
         A, x0, sigma, C = popt
         yfit = gaussian(xs_sorted, *popt)
         fwhm = 2.3548 * abs(sigma)
@@ -1112,6 +1125,9 @@ def _fit_multi_peak(
     ys: np.ndarray,
     centers: List[float],
     model: str,
+    *,
+    maxfev: int = 10000,
+    fit_timeout_sec: float = 0.0,
 ) -> Optional[Tuple[List[Dict[str, float]], float]]:
     if xs.size < 5 or not centers:
         return None
@@ -1173,14 +1189,15 @@ def _fit_multi_peak(
         return total
 
     fit_fn = _sum_gaussian if model == "gaussian" else _sum_lorentzian if model == "lorentzian" else _sum_voigt
-    popt, _ = curve_fit(
-        fit_fn,
-        xs_sorted,
-        ys_sorted,
-        p0=params,
-        bounds=(lower, upper),
-        maxfev=40000,
-    )
+    with _FitTimeoutGuard(fit_timeout_sec):
+        popt, _ = curve_fit(
+            fit_fn,
+            xs_sorted,
+            ys_sorted,
+            p0=params,
+            bounds=(lower, upper),
+            maxfev=maxfev,
+        )
     yfit = fit_fn(xs_sorted, *popt)
     r2 = 1 - np.sum((ys_sorted - yfit) ** 2) / (np.sum((ys_sorted - np.mean(ys_sorted)) ** 2) + 1e-12)
     results: List[Dict[str, float]] = []
@@ -1232,6 +1249,9 @@ def fit_peak(
     *,
     center_bounds: tuple[float, float] | None = None,
     x0_guess: float | None = None,
+    maxfev: int = 10000,
+    fit_timeout_sec: float = 0.0,
+    raise_on_error: bool = False,
 ):
     xs, ys = _fit_peak_window(x, y, idx, window)
     if len(xs) < 5:
@@ -1244,8 +1264,26 @@ def fit_peak(
     if np.count_nonzero(local_mask) >= 5:
         xs = xs[local_mask]
         ys = ys[local_mask]
+    if raise_on_error:
+        return _fit_peak_single(
+            xs,
+            ys,
+            x0_guess,
+            model,
+            center_bounds=center_bounds,
+            maxfev=maxfev,
+            fit_timeout_sec=fit_timeout_sec,
+        )
     try:
-        return _fit_peak_single(xs, ys, x0_guess, model, center_bounds=center_bounds)
+        return _fit_peak_single(
+            xs,
+            ys,
+            x0_guess,
+            model,
+            center_bounds=center_bounds,
+            maxfev=maxfev,
+            fit_timeout_sec=fit_timeout_sec,
+        )
     except Exception:
         return None
 
@@ -1595,13 +1633,41 @@ def refine_peak_candidates(
     args: object,
     *,
     y_abs: np.ndarray | None = None,
+    file_path: str | None = None,
+    spectrum_id: int | None = None,
+    fit_errors: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
     if not candidates:
         return []
     model = str(_get_param(args, "model", "Gaussian") or "Gaussian")
     fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
     min_r2 = float(_get_param(args, "min_r2", 0.85))
+    fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
+    fit_maxfev = max(1, fit_maxfev)
+    fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
     results: List[Dict[str, object]] = []
+
+    def record_fit_failure(candidate_id: int, model_name: str, exc: BaseException) -> None:
+        path_label = file_path or "unknown"
+        spectrum_label = spectrum_id if spectrum_id is not None else "unknown"
+        logger.warning(
+            "Peak fit failed path=%s spectrum_id=%s candidate_id=%s model=%s error=%s",
+            path_label,
+            spectrum_label,
+            candidate_id,
+            model_name,
+            exc,
+        )
+        if fit_errors is not None:
+            fit_errors.append(
+                {
+                    "file_path": path_label,
+                    "spectrum_id": spectrum_label,
+                    "candidate_id": candidate_id,
+                    "model": model_name,
+                    "error": str(exc),
+                }
+            )
 
     for polarity in (1, -1):
         group = [c for c in candidates if int(c["polarity"]) == polarity]
@@ -1635,8 +1701,19 @@ def refine_peak_candidates(
                 ]
                 centers = candidate_centers + extra_centers
                 try:
-                    fitted = _fit_multi_peak(xs_cluster, ys_cluster, centers, model)
-                except Exception:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", OptimizeWarning)
+                        fitted = _fit_multi_peak(
+                            xs_cluster,
+                            ys_cluster,
+                            centers,
+                            model,
+                            maxfev=fit_maxfev,
+                            fit_timeout_sec=fit_timeout_sec,
+                        )
+                except (RuntimeError, OptimizeWarning, ValueError) as exc:
+                    for candidate in cluster:
+                        record_fit_failure(int(candidate["candidate_id"]), model, exc)
                     fitted = None
                 if fitted is not None:
                     fitted_peaks, _ = fitted
@@ -1666,15 +1743,24 @@ def refine_peak_candidates(
                     center_bounds = (min(left_x, right_x), max(left_x, right_x))
                     x0_guess = (center_bounds[0] + center_bounds[1]) / 2.0
                 fit_source = fit_y_abs if use_absorbance else fit_y
-                fit = fit_peak(
-                    x,
-                    fit_source,
-                    idx,
-                    model,
-                    fit_window,
-                    center_bounds=center_bounds,
-                    x0_guess=x0_guess,
-                )
+                fit = None
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", OptimizeWarning)
+                        fit = fit_peak(
+                            x,
+                            fit_source,
+                            idx,
+                            model,
+                            fit_window,
+                            center_bounds=center_bounds,
+                            x0_guess=x0_guess,
+                            maxfev=fit_maxfev,
+                            fit_timeout_sec=fit_timeout_sec,
+                            raise_on_error=True,
+                        )
+                except (RuntimeError, OptimizeWarning, ValueError) as exc:
+                    record_fit_failure(int(candidate["candidate_id"]), model, exc)
                 if not fit:
                     if plateau_bounds is None:
                         continue
@@ -1793,6 +1879,35 @@ class _FileTimeoutGuard:
         return False
 
 
+class _FitTimeoutGuard:
+    def __init__(self, seconds: float):
+        self.seconds = float(seconds or 0.0)
+        self._enabled = bool(self.seconds and self.seconds > 0 and hasattr(signal, "SIGALRM"))
+        self._previous_handler = None
+        self._previous_timer = None
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        self._previous_handler = signal.getsignal(signal.SIGALRM)
+        self._previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+        def _handle_alarm(_signum, _frame):
+            raise FitTimeoutError(self.seconds)
+
+        signal.signal(signal.SIGALRM, _handle_alarm)
+        signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._enabled and hasattr(signal, "SIGALRM"):
+            if self._previous_timer is not None:
+                signal.setitimer(signal.ITIMER_REAL, *self._previous_timer)
+            if self._previous_handler is not None:
+                signal.signal(signal.SIGALRM, self._previous_handler)
+        return False
+
+
 def index_file(path:str,con,args,failed_files=None,step_registry_collector: Optional[List[Dict[str, object]]] = None):
     def record_failure(message: str) -> None:
         if failed_files is not None:
@@ -1851,6 +1966,7 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
             max_points=0
             y_units=headers.get('YUNITS','')
             resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
+            fit_errors: List[Dict[str, object]] = []
 
             con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
 
@@ -1946,6 +2062,9 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                         peak_candidates,
                         args,
                         y_abs=y_for_processing,
+                        file_path=path,
+                        spectrum_id=sid,
+                        fit_errors=fit_errors,
                     )
                     refined_overlay = [
                         {
@@ -2132,6 +2251,8 @@ def main():
     )
     ap.add_argument('--min-r2',type=float,default=0.85,dest='min_r2')
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
+    ap.add_argument('--fit-maxfev',type=int,default=10000,dest='fit_maxfev')
+    ap.add_argument('--fit-timeout-sec',type=float,default=0.0,dest='fit_timeout_sec')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--detect-negative-peaks',action='store_true',dest='detect_negative_peaks',help='Also detect negative peaks by searching inverted spectra.')
