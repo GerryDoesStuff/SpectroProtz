@@ -45,9 +45,12 @@ Defaults are shown in parentheses.
   - Output directory for the DuckDB database and optional exports.
 
 ### Peak detection and preprocessing
-- `--prominence` (0.01)
+- `--prominence` (0.02)
 - `--min-distance` (3.0) — minimum peak separation (cm⁻¹).
-- `--noise-sigma-multiplier` (3.0)
+- `--noise-sigma-multiplier` (4.0)
+- `--noise-window-cm` (400.0) — window size for local noise estimation (set to 0 to use a global noise floor).
+- `--min-prominence-by-region` (None) — comma-separated ranges with prominence floors
+  (e.g. `400-1500:0.03,1500-1800:0.02`).
 - `--peak-width-min` (0.0)
 - `--peak-width-max` (0.0)
 - `--cwt-enabled` (false)
@@ -95,6 +98,13 @@ Defaults are shown in parentheses.
 - `--plot-max-points` (0) — downsample exported plots (0 disables downsampling).
 
 ## Common usage examples
+**Tuning guidance**
+- The prominence threshold is computed as the max of `--prominence`, the local noise estimate
+  (`--noise-sigma-multiplier` × noise sigma), and any `--min-prominence-by-region` floor.
+- Increase `--noise-sigma-multiplier` or `--prominence` if weak artifacts still appear.
+- Use `--min-prominence-by-region` to raise floors in the 400–1500 cm⁻¹ fingerprint region
+  without suppressing stronger peaks elsewhere.
+
 **Basic run**
 ```bash
 python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index
@@ -110,6 +120,13 @@ python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index --strict
 python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
   --prominence 0.02 --min-distance 5 --sg-win 11 --sg-poly 3 \
   --als-lam 1e5 --als-p 0.01 --min-r2 0.9
+```
+
+**Suppress low-value artifacts in the fingerprint region**
+```bash
+python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
+  --min-prominence-by-region "400-1500:0.03" --noise-window-cm 400 \
+  --noise-sigma-multiplier 4
 ```
 
 **Export per-step plots (Excel workbooks)**
