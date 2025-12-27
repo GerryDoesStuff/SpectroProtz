@@ -1601,7 +1601,7 @@ def detect_peak_candidates(
         step_cm = _resolve_step_from_x(x_sorted)
     else:
         step_cm = _resolve_step(x, min_distance_cm)
-    distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
+    distance_pts = max(1, int(np.floor(min_distance_cm / max(step_cm, 1e-9))))
     min_distance_mode = str(_get_param(args, "min_distance_mode", "fixed")).lower()
     min_distance_fwhm_fraction = float(_get_param(args, "min_distance_fwhm_fraction", 0.5))
     if min_distance_mode not in {"fixed", "adaptive"}:
@@ -1620,8 +1620,9 @@ def detect_peak_candidates(
     if not segments:
         segments = [(float(np.nanmin(x)), float(np.nanmax(x)), True)]
 
-    width_min_arg = float(_get_param(args, "peak_width_min", 0.0))
+    width_min_arg_raw = float(_get_param(args, "peak_width_min", 0.0))
     width_max_arg = float(_get_param(args, "peak_width_max", 0.0))
+    width_min_arg = 0.0
     width_min_cm, width_max_cm = _resolve_width_bounds_cm(
         width_min_arg,
         width_max_arg,
@@ -1630,7 +1631,7 @@ def detect_peak_candidates(
     )
     width_min_pts = max(1, int(np.ceil(width_min_cm / max(step_cm, 1e-9))))
     width_max_pts = max(width_min_pts, int(np.ceil(width_max_cm / max(step_cm, 1e-9))))
-    width_filter_enabled = width_min_arg > 0 or width_max_arg > 0
+    width_filter_enabled = width_max_arg > 0
     width_bounds = (width_min_pts, width_max_pts) if width_filter_enabled else None
 
     detect_negative = bool(_get_param(args, "detect_negative_peaks", False))
@@ -1640,6 +1641,7 @@ def detect_peak_candidates(
     cwt_width_step_cm = float(_get_param(args, "cwt_width_step", 0.0))
     cwt_cluster_tolerance_cm = float(_get_param(args, "cwt_cluster_tolerance", 8.0))
     merge_tolerance_cm = float(_get_param(args, "merge_tolerance", 8.0))
+    close_peak_tolerance_cm = float(_get_param(args, "close_peak_tolerance_cm", 1.5))
 
     fallback_noise_sigma = _estimate_segment_noise_sigma(
         y_proc,
@@ -1690,7 +1692,7 @@ def detect_peak_candidates(
             adaptive_limit_cm = adaptive_fwhm_cm * min_distance_fwhm_fraction
             if np.isfinite(adaptive_limit_cm) and adaptive_limit_cm > 0:
                 min_distance_cm = min(min_distance_cm, adaptive_limit_cm)
-                distance_pts = max(1, int(np.ceil(min_distance_cm / max(step_cm, 1e-9))))
+                distance_pts = max(1, int(np.floor(min_distance_cm / max(step_cm, 1e-9))))
 
     if min_distance_cm > 0:
         merge_tolerance_cm = min(merge_tolerance_cm, min_distance_cm)
@@ -1720,6 +1722,13 @@ def detect_peak_candidates(
         int(_get_param(args, "plateau_min_points", 3)),
         float(_get_param(args, "plateau_prominence_factor", 1.0)),
     )
+    if width_min_arg_raw > 0:
+        logger.info(
+            "Peak width min override path=%s spectrum_id=%s requested_min=%.4g applied_min=0.0",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+            width_min_arg_raw,
+        )
     if finite_local_floor.size:
         logger.info(
             "Local noise floor path=%s spectrum_id=%s median=%.4g min=%.4g max=%.4g",
@@ -1813,11 +1822,11 @@ def detect_peak_candidates(
             base_floor,
         )
         pass1_distance = distance_pts
-        pass2_distance = max(1, int(max(1, round(distance_pts * 0.5))))
+        pass2_distance = max(1, int(max(1, round(distance_pts * 0.4))))
         pass1_prominence = per_point_floor
         pass2_prominence = np.maximum(
-            prominence_floor,
-            np.maximum(prominence_floor * 0.5, per_point_floor * 0.6),
+            prominence_floor * 1.1,
+            np.maximum(prominence_floor, per_point_floor * 1.15),
         )
         width_bounds_pass1 = width_bounds
         width_bounds_pass2 = None
@@ -2003,11 +2012,74 @@ def detect_peak_candidates(
         if match is None:
             merged.append(candidate)
             continue
+        logger.info(
+            "Peak merge by tolerance path=%s spectrum_id=%s idx=%d existing_idx=%d tolerance_cm=%.3g",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+            idx,
+            int(match["index"]),
+            tolerance_cm,
+        )
         match["sources"] = set(match["sources"]) | set(candidate["sources"])
         match["detections"] = list(match["detections"]) + list(candidate["detections"])
         if float(candidate["score"]) > float(match["score"]):
             match["index"] = idx
             match["score"] = float(candidate["score"])
+
+    def _cluster_close_candidates(
+        items: List[Dict[str, object]],
+        *,
+        tolerance_cm: float,
+        polarity: int,
+    ) -> List[Dict[str, object]]:
+        if len(items) <= 1:
+            return items
+        items_sorted = sorted(items, key=lambda c: float(x[int(c["index"])]))
+        clusters: List[List[Dict[str, object]]] = []
+        current = [items_sorted[0]]
+        for candidate in items_sorted[1:]:
+            prev = current[-1]
+            if abs(float(x[int(candidate["index"])]) - float(x[int(prev["index"])])) <= tolerance_cm:
+                current.append(candidate)
+            else:
+                clusters.append(current)
+                current = [candidate]
+        clusters.append(current)
+        clustered: List[Dict[str, object]] = []
+        for cluster in clusters:
+            if len(cluster) == 1:
+                clustered.append(cluster[0])
+                continue
+            best = max(cluster, key=lambda c: float(c["score"]))
+            merged_cluster = dict(best)
+            merged_cluster["detections"] = []
+            merged_cluster["sources"] = set()
+            for candidate in cluster:
+                merged_cluster["detections"].extend(candidate.get("detections", []))
+                merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
+            logger.info(
+                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
+                file_path or "unknown",
+                spectrum_id if spectrum_id is not None else "unknown",
+                polarity,
+                [int(c["index"]) for c in cluster],
+                tolerance_cm,
+            )
+            clustered.append(merged_cluster)
+        return clustered
+
+    merged = (
+        _cluster_close_candidates(
+            [c for c in merged if int(c["polarity"]) == 1],
+            tolerance_cm=close_peak_tolerance_cm,
+            polarity=1,
+        )
+        + _cluster_close_candidates(
+            [c for c in merged if int(c["polarity"]) == -1],
+            tolerance_cm=close_peak_tolerance_cm,
+            polarity=-1,
+        )
+    )
 
     merged.sort(key=lambda c: c["index"])
     for candidate_id, candidate in enumerate(merged):
