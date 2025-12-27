@@ -2075,13 +2075,19 @@ def main():
         '--export-step-plots',
         action='store_true',
         dest='export_step_plots',
-        help='Export per-step spectra to XLSX workbooks.',
+        help='Export per-step spectra to XLSX workbooks (only when enabled).',
     )
     ap.add_argument(
         '--export-step-plots-dir',
         default=None,
         dest='export_step_plots_dir',
         help='Output directory for step XLSX exports (defaults to {index_dir}/debug_plots).',
+    )
+    ap.add_argument(
+        '--prompt-export',
+        action='store_true',
+        dest='prompt_export',
+        help='Prompt at startup to decide whether to export step XLSX workbooks.',
     )
     ap.add_argument(
         '--plot-max-points',
@@ -2095,6 +2101,24 @@ def main():
         ),
     )
     args=ap.parse_args()
+    if args.prompt_export:
+        if sys.stdin is None or not sys.stdin.isatty():
+            print(
+                "Export prompt requested, but stdin is not interactive. "
+                "Skipping step workbook exports.",
+                file=sys.stderr,
+            )
+            args.export_step_plots = False
+        else:
+            while True:
+                response = input("Export step Excel workbooks? [y/N]: ").strip().lower()
+                if response in {"y", "yes"}:
+                    args.export_step_plots = True
+                    break
+                if response in {"n", "no", ""}:
+                    args.export_step_plots = False
+                    break
+                print("Please enter 'y' or 'n'.", file=sys.stderr)
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
