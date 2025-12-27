@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, find_peaks_cwt, savgol_filter
@@ -47,6 +47,16 @@ class UnsupportedSpectrumError(RuntimeError):
         super().__init__(message)
         self.descriptor = descriptor_clean
         self.header_key = header_key
+
+
+class FileTimeoutError(TimeoutError):
+    """Raised when indexing a single file exceeds the configured timeout."""
+
+    def __init__(self, path: str, seconds: float, stage: Optional[str] = None):
+        self.path = path
+        self.seconds = seconds
+        self.stage = stage or "unknown"
+        super().__init__(f"Timed out after {seconds:.1f}s during {self.stage}")
 
 
 _FTIR_HEADER_KEYS = {
@@ -1749,18 +1759,46 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
         values
     )
 
+
+class _FileTimeoutGuard:
+    def __init__(self, seconds: float, path: str, stage_getter):
+        self.seconds = seconds
+        self.path = path
+        self.stage_getter = stage_getter
+        self._enabled = bool(seconds and seconds > 0)
+        self._previous_handler = None
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        if not hasattr(signal, "SIGALRM"):
+            logger.warning("File timeout requested but SIGALRM unavailable; skipping timeout guard.")
+            self._enabled = False
+            return self
+        self._previous_handler = signal.getsignal(signal.SIGALRM)
+
+        def _handle_alarm(_signum, _frame):
+            stage = self.stage_getter() if self.stage_getter else None
+            raise FileTimeoutError(self.path, self.seconds, stage=stage)
+
+        signal.signal(signal.SIGALRM, _handle_alarm)
+        signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._enabled and hasattr(signal, "SIGALRM"):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self._previous_handler is not None:
+                signal.signal(signal.SIGALRM, self._previous_handler)
+        return False
+
+
 def index_file(path:str,con,args,failed_files=None,step_registry_collector: Optional[List[Dict[str, object]]] = None):
     def record_failure(message: str) -> None:
         if failed_files is not None:
             failed_files.append((path, message))
 
-    headers=parse_jdx_headers(path)
-    try:
-        is_ftir_spectrum(headers)
-    except UnsupportedSpectrumError as exc:
-        message=f"Unsupported spectrum type: {exc.descriptor}"
-        logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
-        record_failure(message)
+    def persist_ingest_error(message: str) -> None:
         try:
             con.execute(
                 """
@@ -1774,178 +1812,205 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
             )
         except Exception:
             logger.debug("Failed to record ingest error for %s", path, exc_info=True)
-        if getattr(args,'strict',False) or getattr(args,'_collect_skips',False):
-            raise
-        return 0,0
+
+    current_stage = "initializing"
+
+    def set_stage(stage: str) -> None:
+        nonlocal current_stage
+        current_stage = stage
+        logger.info("Indexing stage [%s]: %s", stage, path)
+
+    timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
     try:
-        x,Y,headers=parse_jcamp_multispec(path)
+        with _FileTimeoutGuard(timeout_seconds, path, lambda: current_stage):
+            set_stage("parse_headers")
+            headers=parse_jdx_headers(path)
+            try:
+                is_ftir_spectrum(headers)
+            except UnsupportedSpectrumError as exc:
+                message=f"Unsupported spectrum type: {exc.descriptor}"
+                logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+                record_failure(message)
+                persist_ingest_error(message)
+                if getattr(args,'strict',False) or getattr(args,'_collect_skips',False):
+                    raise
+                return 0,0
+            try:
+                set_stage("parse_spectra")
+                x,Y,headers=parse_jcamp_multispec(path)
+            except Exception as exc:
+                logger.error("Failed to parse JCAMP file %s: %s", path, exc)
+                record_failure(str(exc))
+                persist_ingest_error(str(exc))
+                if getattr(args,'strict',False):
+                    raise
+                return 0,0
+            file_id=file_sha1(path)
+            total_peaks=0
+            processed_spectra=0
+            max_points=0
+            y_units=headers.get('YUNITS','')
+            resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
+
+            con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
+
+            con.execute('BEGIN TRANSACTION')
+            try:
+                set_stage("persist_headers")
+                store_headers(con,file_id,headers)
+                con.execute('DELETE FROM peaks WHERE file_id=?',[file_id])
+
+                for sid,y in enumerate(Y):
+                    x_clean,y_clean=sanitize_xy(x,y)
+                    if x_clean.size==0 or y_clean.size==0:
+                        continue
+
+                    processed_spectra+=1
+                    max_points=max(max_points,len(x_clean))
+
+                    set_stage(f"preprocess_spectrum_{sid}")
+                    y_for_processing=convert_y_for_processing(y_clean,y_units)
+                    step_metadata = {
+                        "file_id": file_id,
+                        "spectrum_id": sid,
+                        "y_units": y_units,
+                        "processing": {
+                            "sg_win": int(args.sg_win),
+                            "sg_poly": int(args.sg_poly),
+                            "sg_window_cm": float(args.sg_window_cm or 0.0),
+                            "als_lam": float(args.als_lam),
+                            "als_p": float(args.als_p),
+                            "baseline_method": str(args.baseline_method),
+                            "baseline_niter": int(args.baseline_niter),
+                            "baseline_piecewise": bool(args.baseline_piecewise),
+                            "baseline_ranges": args.baseline_ranges,
+                        },
+                    }
+                    step_registry: List[Dict[str, object]] = []
+                    _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
+                    _append_processing_step(
+                        step_registry,
+                        "absorbance_converted",
+                        x_clean,
+                        y_for_processing,
+                        step_metadata,
+                    )
+                    y_proc, noise_sigma = preprocess_with_noise(
+                        x_clean,
+                        y_for_processing,
+                        args.sg_win,
+                        args.sg_poly,
+                        args.als_lam,
+                        args.als_p,
+                        sg_window_cm=args.sg_window_cm,
+                        baseline_method=args.baseline_method,
+                        baseline_niter=args.baseline_niter,
+                        baseline_piecewise=args.baseline_piecewise,
+                        baseline_ranges=args.baseline_ranges,
+                        step_registry=step_registry,
+                        step_metadata=step_metadata,
+                    )
+                    set_stage(f"detect_peaks_spectrum_{sid}")
+                    peak_candidates=detect_peak_candidates(
+                        x_clean,
+                        y_proc,
+                        noise_sigma,
+                        args,
+                        resolution_cm=resolution_cm,
+                    )
+                    peak_overlay = [
+                        {
+                            "index": int(candidate["index"]),
+                            "x": float(x_clean[int(candidate["index"])]),
+                            "wavenumber": float(x_clean[int(candidate["index"])]),
+                            "y": float(y_proc[int(candidate["index"])]),
+                            "polarity": int(candidate.get("polarity", 1)),
+                            "score": float(candidate.get("score", 0.0)),
+                            "sources": sorted(candidate.get("sources", [])),
+                        }
+                        for candidate in peak_candidates
+                        if 0 <= int(candidate["index"]) < len(x_clean)
+                    ]
+                    _append_processing_step(
+                        step_registry,
+                        "candidate_peaks_overlay",
+                        x_clean,
+                        y_proc,
+                        step_metadata,
+                        extra_metadata={"candidates": peak_overlay},
+                    )
+                    set_stage(f"fit_peaks_spectrum_{sid}")
+                    refined = refine_peak_candidates(
+                        x_clean,
+                        y_proc,
+                        peak_candidates,
+                        args,
+                        y_abs=y_for_processing,
+                    )
+                    refined_overlay = [
+                        {
+                            "index": int(fit.get("index", -1)),
+                            "wavenumber": float(fit.get("center", float("nan"))),
+                            "center": float(fit.get("center", float("nan"))),
+                            "polarity": int(fit.get("polarity", 1)),
+                            "r2": float(fit.get("r2", float("nan"))),
+                        }
+                        for fit in refined
+                    ]
+                    _append_processing_step(
+                        step_registry,
+                        "refined_peaks_overlay",
+                        x_clean,
+                        y_proc,
+                        step_metadata,
+                        extra_metadata={"peaks": refined_overlay},
+                    )
+                    set_stage(f"insert_peaks_spectrum_{sid}")
+                    pid = 0
+                    for fit in refined:
+                        con.execute(
+                            'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
+                            [
+                                file_id,
+                                sid,
+                                int(fit.get("candidate_id", pid)),
+                                int(fit.get("polarity", 1)),
+                                fit["center"],
+                                fit["fwhm"],
+                                fit["amplitude"],
+                                fit["area"],
+                                fit["r2"],
+                            ],
+                        )
+                        pid += 1
+                    total_peaks += pid
+                    if step_registry_collector is not None:
+                        step_registry_collector.append(
+                            {
+                                "file_id": file_id,
+                                "spectrum_id": sid,
+                                "steps": step_registry,
+                            }
+                        )
+                set_stage("update_spectra_summary")
+                con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
+                con.execute('COMMIT')
+            except Exception:
+                con.execute('ROLLBACK')
+                raise
+            return processed_spectra,total_peaks
     except Exception as exc:
-        logger.error("Failed to parse JCAMP file %s: %s", path, exc)
-        record_failure(str(exc))
-        try:
-            con.execute(
-                """
-                INSERT INTO ingest_errors (file_path,error)
-                VALUES (?, ?)
-                ON CONFLICT(file_path) DO UPDATE SET
-                    error=excluded.error,
-                    occurred_at=now()
-                """,
-                [path, str(exc)]
-            )
-        except Exception:
-            logger.debug("Failed to record ingest error for %s", path, exc_info=True)
+        if isinstance(exc, FileTimeoutError):
+            message = f"Timeout: {exc}"
+            logger.error("File timed out %s: %s", path, exc)
+        else:
+            message = str(exc)
+            logger.error("Failed to index %s at stage %s: %s", path, current_stage, exc)
+        record_failure(message)
+        persist_ingest_error(message)
         if getattr(args,'strict',False):
             raise
         return 0,0
-    file_id=file_sha1(path)
-    total_peaks=0
-    processed_spectra=0
-    max_points=0
-    y_units=headers.get('YUNITS','')
-    resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
-
-    con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
-
-    con.execute('BEGIN TRANSACTION')
-    try:
-        store_headers(con,file_id,headers)
-        con.execute('DELETE FROM peaks WHERE file_id=?',[file_id])
-
-        for sid,y in enumerate(Y):
-            x_clean,y_clean=sanitize_xy(x,y)
-            if x_clean.size==0 or y_clean.size==0:
-                continue
-
-            processed_spectra+=1
-            max_points=max(max_points,len(x_clean))
-
-            y_for_processing=convert_y_for_processing(y_clean,y_units)
-            step_metadata = {
-                "file_id": file_id,
-                "spectrum_id": sid,
-                "y_units": y_units,
-                "processing": {
-                    "sg_win": int(args.sg_win),
-                    "sg_poly": int(args.sg_poly),
-                    "sg_window_cm": float(args.sg_window_cm or 0.0),
-                    "als_lam": float(args.als_lam),
-                    "als_p": float(args.als_p),
-                    "baseline_method": str(args.baseline_method),
-                    "baseline_niter": int(args.baseline_niter),
-                    "baseline_piecewise": bool(args.baseline_piecewise),
-                    "baseline_ranges": args.baseline_ranges,
-                },
-            }
-            step_registry: List[Dict[str, object]] = []
-            _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
-            _append_processing_step(
-                step_registry,
-                "absorbance_converted",
-                x_clean,
-                y_for_processing,
-                step_metadata,
-            )
-            y_proc, noise_sigma = preprocess_with_noise(
-                x_clean,
-                y_for_processing,
-                args.sg_win,
-                args.sg_poly,
-                args.als_lam,
-                args.als_p,
-                sg_window_cm=args.sg_window_cm,
-                baseline_method=args.baseline_method,
-                baseline_niter=args.baseline_niter,
-                baseline_piecewise=args.baseline_piecewise,
-                baseline_ranges=args.baseline_ranges,
-                step_registry=step_registry,
-                step_metadata=step_metadata,
-            )
-            peak_candidates=detect_peak_candidates(
-                x_clean,
-                y_proc,
-                noise_sigma,
-                args,
-                resolution_cm=resolution_cm,
-            )
-            peak_overlay = [
-                {
-                    "index": int(candidate["index"]),
-                    "x": float(x_clean[int(candidate["index"])]),
-                    "wavenumber": float(x_clean[int(candidate["index"])]),
-                    "y": float(y_proc[int(candidate["index"])]),
-                    "polarity": int(candidate.get("polarity", 1)),
-                    "score": float(candidate.get("score", 0.0)),
-                    "sources": sorted(candidate.get("sources", [])),
-                }
-                for candidate in peak_candidates
-                if 0 <= int(candidate["index"]) < len(x_clean)
-            ]
-            _append_processing_step(
-                step_registry,
-                "candidate_peaks_overlay",
-                x_clean,
-                y_proc,
-                step_metadata,
-                extra_metadata={"candidates": peak_overlay},
-            )
-            refined = refine_peak_candidates(
-                x_clean,
-                y_proc,
-                peak_candidates,
-                args,
-                y_abs=y_for_processing,
-            )
-            refined_overlay = [
-                {
-                    "index": int(fit.get("index", -1)),
-                    "wavenumber": float(fit.get("center", float("nan"))),
-                    "center": float(fit.get("center", float("nan"))),
-                    "polarity": int(fit.get("polarity", 1)),
-                    "r2": float(fit.get("r2", float("nan"))),
-                }
-                for fit in refined
-            ]
-            _append_processing_step(
-                step_registry,
-                "refined_peaks_overlay",
-                x_clean,
-                y_proc,
-                step_metadata,
-                extra_metadata={"peaks": refined_overlay},
-            )
-            pid = 0
-            for fit in refined:
-                con.execute(
-                    'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
-                    [
-                        file_id,
-                        sid,
-                        int(fit.get("candidate_id", pid)),
-                        int(fit.get("polarity", 1)),
-                        fit["center"],
-                        fit["fwhm"],
-                        fit["amplitude"],
-                        fit["area"],
-                        fit["r2"],
-                    ],
-                )
-                pid += 1
-            total_peaks += pid
-            if step_registry_collector is not None:
-                step_registry_collector.append(
-                    {
-                        "file_id": file_id,
-                        "spectrum_id": sid,
-                        "steps": step_registry,
-                    }
-                )
-        con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
-        con.execute('COMMIT')
-    except Exception:
-        con.execute('ROLLBACK')
-        raise
-    return processed_spectra,total_peaks
 
 def weighted_median(x,w):
     o=np.argsort(x);x=x[o];w=w[o];c=np.cumsum(w)/(np.sum(w)+1e-12)
@@ -2071,6 +2136,13 @@ def main():
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--detect-negative-peaks',action='store_true',dest='detect_negative_peaks',help='Also detect negative peaks by searching inverted spectra.')
     ap.add_argument('--strict',action='store_true',help='Raise exceptions during indexing instead of skipping files')
+    ap.add_argument(
+        '--file-timeout-seconds',
+        type=float,
+        default=0.0,
+        dest='file_timeout_seconds',
+        help='Abort indexing a single file after this many seconds (0 disables).',
+    )
     ap.add_argument(
         '--export-step-plots',
         action='store_true',
