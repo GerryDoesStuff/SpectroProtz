@@ -746,6 +746,27 @@ def _estimate_segment_noise_sigma(y: np.ndarray, fallback: float) -> float:
     return float(sigma)
 
 
+def _rolling_mad_sigma(y: np.ndarray, window_pts: int, fallback: float) -> np.ndarray:
+    values = np.asarray(y, dtype=float)
+    n = values.size
+    if n == 0:
+        return np.asarray([], dtype=float)
+    if window_pts < 3 or window_pts >= n:
+        sigma = _estimate_segment_noise_sigma(values, fallback)
+        return np.full(n, sigma, dtype=float)
+    if window_pts % 2 == 0:
+        window_pts += 1
+    pad = window_pts // 2
+    padded = np.pad(values, (pad, pad), mode="edge")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, window_pts)
+    medians = np.nanmedian(windows, axis=1)
+    mads = np.nanmedian(np.abs(windows - medians[:, None]), axis=1)
+    sigma = MAD_SCALE * mads
+    fallback_value = float(fallback) if np.isfinite(fallback) and fallback > 0 else float("nan")
+    sigma = np.where(np.isfinite(sigma) & (sigma > 0), sigma, fallback_value)
+    return sigma.astype(float)
+
+
 def _parse_min_prominence_by_region(spec: Optional[str]) -> List[Tuple[float, float, float]]:
     if not spec:
         return []
@@ -1630,6 +1651,37 @@ def detect_peak_candidates(
         float(_get_param(args, "plateau_prominence_factor", 1.0)),
     )
 
+    fallback_noise_sigma = _estimate_segment_noise_sigma(
+        y_proc,
+        noise_sigma if np.isfinite(noise_sigma) else float("nan"),
+    )
+    if noise_window_cm > 0 and np.isfinite(step_cm) and step_cm > 0:
+        window_pts = int(max(3, round(noise_window_cm / step_cm)))
+    else:
+        window_pts = max(3, int(y_proc.size))
+    local_noise_sigma = _rolling_mad_sigma(y_proc, window_pts, fallback_noise_sigma)
+    local_noise_floor = sigma_multiplier * np.where(
+        np.isfinite(local_noise_sigma) & (local_noise_sigma > 0),
+        local_noise_sigma,
+        0.0,
+    )
+    finite_local_floor = local_noise_floor[np.isfinite(local_noise_floor)]
+    if finite_local_floor.size:
+        logger.info(
+            "Local noise floor path=%s spectrum_id=%s median=%.4g min=%.4g max=%.4g",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+            float(np.nanmedian(finite_local_floor)),
+            float(np.nanmin(finite_local_floor)),
+            float(np.nanmax(finite_local_floor)),
+        )
+    else:
+        logger.info(
+            "Local noise floor path=%s spectrum_id=%s median=nan min=nan max=nan",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+        )
+
     candidates: List[Dict[str, object]] = []
     fwhm_cache: Dict[Tuple[int, int], float] = {}
 
@@ -1698,17 +1750,21 @@ def detect_peak_candidates(
             continue
         start, end = int(idxs[0]), int(idxs[-1]) + 1
         y_slice = y_proc[start:end]
-        local_noise = _estimate_segment_noise_sigma(
-            y_slice,
-            noise_sigma if np.isfinite(noise_sigma) else float("nan"),
-        )
-        noise_floor = sigma_multiplier * float(local_noise) if np.isfinite(local_noise) and local_noise > 0 else 0.0
         region_floor = _region_prominence_floor(seg_low, seg_high, region_prominence)
-        effective_prominence = max(prominence_floor, noise_floor, region_floor)
+        base_floor = max(prominence_floor, region_floor)
+        slice_noise_floor = local_noise_floor[start:end]
+        per_point_floor = np.where(
+            np.isfinite(slice_noise_floor) & (slice_noise_floor > 0),
+            np.maximum(base_floor, slice_noise_floor),
+            base_floor,
+        )
         pass1_distance = distance_pts
         pass2_distance = max(1, int(max(1, round(distance_pts * 0.5))))
-        pass1_prominence = effective_prominence
-        pass2_prominence = max(prominence_floor * 0.5, effective_prominence * 0.6)
+        pass1_prominence = per_point_floor
+        pass2_prominence = np.maximum(
+            prominence_floor,
+            np.maximum(prominence_floor * 0.5, per_point_floor * 0.6),
+        )
         width_bounds_pass1 = width_bounds
         width_bounds_pass2 = None
         if width_bounds is not None:
@@ -1720,7 +1776,7 @@ def detect_peak_candidates(
             slice_data: np.ndarray,
             polarity: int,
             pass_label: str,
-            prominence_value: float,
+            prominence_floor_values: np.ndarray,
             distance_value: int,
             width_value: Tuple[int, int] | None,
         ) -> None:
@@ -1728,14 +1784,29 @@ def detect_peak_candidates(
                 target = slice_data
             else:
                 target = -slice_data
-            if width_value is None:
-                peak_idxs, _ = find_peaks(target, prominence=prominence_value, distance=distance_value)
+            if prominence_floor_values.size:
+                min_prominence = float(np.nanmin(prominence_floor_values))
             else:
-                peak_idxs, _ = find_peaks(
-                    target, prominence=prominence_value, distance=distance_value, width=width_value
+                min_prominence = prominence_floor
+            if not np.isfinite(min_prominence):
+                min_prominence = prominence_floor
+            if width_value is None:
+                peak_idxs, props = find_peaks(target, prominence=min_prominence, distance=distance_value)
+            else:
+                peak_idxs, props = find_peaks(
+                    target, prominence=min_prominence, distance=distance_value, width=width_value
                 )
-            for idx in np.asarray(peak_idxs, dtype=int):
+            prominences = np.asarray(props.get("prominences", []), dtype=float)
+            for idx, prominence_value in zip(np.asarray(peak_idxs, dtype=int), prominences):
                 abs_idx = int(idx) + start
+                if 0 <= idx < prominence_floor_values.size:
+                    required_floor = float(prominence_floor_values[int(idx)])
+                else:
+                    required_floor = float(min_prominence)
+                if not np.isfinite(required_floor):
+                    required_floor = float(min_prominence)
+                if not np.isfinite(prominence_value) or prominence_value < required_floor:
+                    continue
                 if 0 <= abs_idx < len(y_proc):
                     _add_candidate(
                         abs_idx,
@@ -1743,7 +1814,8 @@ def detect_peak_candidates(
                         "prominence",
                         pass_label,
                         {
-                            "prominence": prominence_value,
+                            "prominence": float(prominence_value),
+                            "prominence_floor": float(required_floor),
                             "width_pts": width_value,
                             "segment_range": (float(seg_low), float(seg_high)),
                         },
@@ -1756,7 +1828,10 @@ def detect_peak_candidates(
             y_slice, 1, "pass2", pass2_prominence, pass2_distance, width_bounds_pass2
         )
 
-        plateau_prominence = max(effective_prominence * plateau_prominence_factor, 0.0)
+        plateau_base = float(np.nanmedian(pass1_prominence)) if pass1_prominence.size else 0.0
+        if not np.isfinite(plateau_base):
+            plateau_base = 0.0
+        plateau_prominence = max(plateau_base * plateau_prominence_factor, 0.0)
         if plateau_min_points >= 2:
             plateau_idxs, plateau_props = find_peaks(
                 y_slice,
