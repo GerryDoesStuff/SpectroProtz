@@ -40,6 +40,7 @@ from spectro_app.app_context import AppContext
 from scripts.jdxIndexBuilder import (
     convert_y_for_processing,
     detect_peak_candidates,
+    export_spectrum_steps_to_xlsx,
     refine_peak_candidates,
     parse_jcamp_multispec,
     preprocess_with_noise,
@@ -161,6 +162,9 @@ class IndexerWorker(QObject):
         index_dir = Path(self._params["index_dir"]).resolve()
         peaks_path = (index_dir / "peaks.duckdb").resolve()
         failed_files_path = (index_dir / "failed_files.txt").resolve()
+        export_steps = bool(self._params.get("export_step_plots", False))
+        export_steps_dir = self._params.get("export_step_plots_dir")
+        step_registry_collector: List[Dict[str, object]] | None = [] if export_steps else None
 
         con = None
         try:
@@ -220,7 +224,11 @@ class IndexerWorker(QObject):
                 try:
                     before_failures = len(failed_files)
                     n_specs, n_peaks = index_file(
-                        str(path), con, args, failed_files=failed_files
+                        str(path),
+                        con,
+                        args,
+                        failed_files=failed_files,
+                        step_registry_collector=step_registry_collector,
                     )
                 except UnsupportedSpectrumError as exc:
                     descriptor = getattr(exc, "descriptor", str(exc))
@@ -269,6 +277,28 @@ class IndexerWorker(QObject):
                 )
                 self.cancelled.emit(summary, str(peaks_path))
                 return
+
+            if export_steps and step_registry_collector:
+                export_dir = (
+                    Path(export_steps_dir).resolve()
+                    if export_steps_dir
+                    else (index_dir / "debug_plots")
+                )
+                for entry in step_registry_collector:
+                    file_id = entry.get("file_id")
+                    spectrum_id = entry.get("spectrum_id")
+                    steps = entry.get("steps") or []
+                    if file_id is None or spectrum_id is None:
+                        continue
+                    output_path = export_dir / f"{file_id}_{spectrum_id}.xlsx"
+                    export_spectrum_steps_to_xlsx(
+                        steps,
+                        str(output_path),
+                        plot_max_points=int(self._params.get("plot_max_points", 0) or 0),
+                    )
+                self.log_message.emit(
+                    f"Exported step workbooks to {export_dir}."
+                )
 
             fc = build_file_consensus(con, args)
             gc = build_global_consensus(con, fc, args)
@@ -352,9 +382,38 @@ class FtirIndexerDialog(QDialog):
         source_layout = self._build_path_row(self._source_dir_edit, self._on_pick_source_dir)
         index_layout = self._build_path_row(self._index_dir_edit, self._on_pick_index_dir)
 
+        self._export_steps_check = QCheckBox("Export step Excel workbooks")
+        self._export_steps_check.setToolTip(
+            "Generate per-step XLSX workbooks for each spectrum. "
+            "Workbooks are only created when export is enabled."
+        )
+        self._export_steps_check.setWhatsThis(
+            "When enabled, the indexer exports an Excel workbook per spectrum with each preprocessing step. "
+            "Leave disabled to skip generating step workbooks."
+        )
+        self._export_steps_check.toggled.connect(self._update_export_steps_state)
+
+        self._export_steps_dir_edit = QLineEdit()
+        self._export_steps_dir_edit.setPlaceholderText("Default: {index_dir}/debug_plots")
+        self._export_steps_dir_edit.setToolTip(
+            "Optional folder for exported step workbooks. "
+            "If empty, exports go under the index output folder."
+        )
+        self._export_steps_dir_edit.setWhatsThis(
+            "Pick a destination folder for the step workbook exports. "
+            "If left blank, the indexer writes them to {index_dir}/debug_plots."
+        )
+
+        export_steps_layout = self._build_path_row(
+            self._export_steps_dir_edit,
+            self._on_pick_export_steps_dir,
+        )
+
         paths_form = QFormLayout()
         paths_form.addRow("JCAMP source folder", source_layout)
         paths_form.addRow("Index output folder", index_layout)
+        paths_form.addRow(self._export_steps_check)
+        paths_form.addRow("Export destination", export_steps_layout)
 
         paths_tab = QWidget()
         paths_tab.setLayout(paths_form)
@@ -730,6 +789,19 @@ class FtirIndexerDialog(QDialog):
         container.setLayout(row)
         return container
 
+    def _update_export_steps_state(self, enabled: bool) -> None:
+        self._export_steps_dir_edit.setEnabled(enabled)
+
+    def _on_pick_export_steps_dir(self) -> None:
+        start = self._export_steps_dir_edit.text().strip() or str(Path.home())
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Step Workbook Export Folder",
+            start,
+        )
+        if directory:
+            self._export_steps_dir_edit.setText(directory)
+
     def _set_numeric_help(self, widget: QWidget, text: str) -> None:
         widget.setToolTip(text)
         widget.setWhatsThis(text)
@@ -1071,6 +1143,9 @@ class FtirIndexerDialog(QDialog):
         self._global_min_samples_spin.setValue(int(defaults.get("global_min_samples", 2)))
         self._global_eps_abs_spin.setValue(float(defaults.get("global_eps_abs", 4.0)))
         self._strict_check.setChecked(bool(defaults.get("strict", False)))
+        self._export_steps_check.setChecked(bool(defaults.get("export_step_plots", False)))
+        self._export_steps_dir_edit.clear()
+        self._update_export_steps_state(self._export_steps_check.isChecked())
 
     def _restore_defaults(self) -> None:
         self._apply_defaults()
@@ -1113,6 +1188,8 @@ class FtirIndexerDialog(QDialog):
             "global_min_samples": lambda value: self._global_min_samples_spin.setValue(int(value)),
             "global_eps_abs": lambda value: self._global_eps_abs_spin.setValue(float(value)),
             "strict": lambda value: self._strict_check.setChecked(bool(value)),
+            "export_step_plots": lambda value: self._export_steps_check.setChecked(bool(value)),
+            "export_step_plots_dir": lambda value: self._export_steps_dir_edit.setText(str(value or "")),
         }
 
         for key, setter in setters.items():
@@ -1121,6 +1198,7 @@ class FtirIndexerDialog(QDialog):
                     setter(params[key])
                 except (TypeError, ValueError):  # pragma: no cover - invalid persisted value
                     continue
+        self._update_export_steps_state(self._export_steps_check.isChecked())
 
     def _persist_preferences(self, success: bool, db_path: str | None = None) -> None:
         if not self._last_run_params:
@@ -1149,6 +1227,8 @@ class FtirIndexerDialog(QDialog):
             "global_min_samples",
             "global_eps_abs",
             "strict",
+            "export_step_plots",
+            "export_step_plots_dir",
         }
         advanced_params = {
             key: params.get(key)
@@ -1181,6 +1261,7 @@ class FtirIndexerDialog(QDialog):
 
     # ------------------------------------------------------------------
     def values(self) -> Dict[str, Any]:
+        export_dir = self._export_steps_dir_edit.text().strip()
         return {
             "data_dir": self._source_dir_edit.text().strip(),
             "index_dir": self._index_dir_edit.text().strip(),
@@ -1209,6 +1290,9 @@ class FtirIndexerDialog(QDialog):
             "global_min_samples": int(self._global_min_samples_spin.value()),
             "global_eps_abs": float(self._global_eps_abs_spin.value()),
             "strict": bool(self._strict_check.isChecked()),
+            "export_step_plots": bool(self._export_steps_check.isChecked()),
+            "export_step_plots_dir": export_dir or None,
+            "plot_max_points": int(self._defaults.get("plot_max_points", 0)),
         }
 
     def _validate_inputs(self) -> bool:
@@ -1262,6 +1346,8 @@ class FtirIndexerDialog(QDialog):
         widgets = [
             self._source_dir_edit,
             self._index_dir_edit,
+            self._export_steps_check,
+            self._export_steps_dir_edit,
             self._prominence_spin,
             self._noise_sigma_multiplier_spin,
             self._min_distance_spin,
@@ -1285,6 +1371,8 @@ class FtirIndexerDialog(QDialog):
         ]
         for widget in widgets:
             widget.setEnabled(enabled)
+        if enabled:
+            self._update_export_steps_state(self._export_steps_check.isChecked())
 
     def _append_log(self, message: str) -> None:
         text = message.rstrip()
