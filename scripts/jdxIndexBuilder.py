@@ -33,6 +33,44 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
 
+PEAK_PRESETS = {
+    "working": {
+        "prominence": 0.005,
+        "noise_sigma_multiplier": 1.5,
+        "min_distance": 3.0,
+        "peak_width_min": 0.0,
+        "peak_width_max": 0.0,
+    },
+    "balanced": {
+        "prominence": 0.004,
+        "noise_sigma_multiplier": 1.3,
+        "min_distance": 2.5,
+        "peak_width_min": 0.0,
+        "peak_width_max": 0.0,
+    },
+    "conservative": {
+        "prominence": 0.008,
+        "noise_sigma_multiplier": 2.0,
+        "min_distance": 4.0,
+        "peak_width_min": 0.0,
+        "peak_width_max": 18.0,
+    },
+    "sensitive": {
+        "prominence": 0.0025,
+        "noise_sigma_multiplier": 1.1,
+        "min_distance": 2.0,
+        "peak_width_min": 0.0,
+        "peak_width_max": 0.0,
+    },
+    "close_peaks": {
+        "prominence": 0.003,
+        "noise_sigma_multiplier": 1.2,
+        "min_distance": 1.5,
+        "peak_width_min": 0.0,
+        "peak_width_max": 12.0,
+    },
+}
+
 
 class UnsupportedSpectrumError(RuntimeError):
     """Raised when the JCAMP headers do not describe an FTIR spectrum."""
@@ -1504,6 +1542,18 @@ def _get_param(args: object, name: str, default):
     return getattr(args, name, default)
 
 
+def apply_peak_preset(args: object) -> Tuple[str, Dict[str, float]] | None:
+    preset = getattr(args, "peak_preset", None)
+    if not preset:
+        return None
+    preset_values = PEAK_PRESETS.get(preset)
+    if preset_values is None:
+        return None
+    for key, value in preset_values.items():
+        setattr(args, key, value)
+    return preset, preset_values
+
+
 def _resolve_step(x: np.ndarray, fallback: float) -> float:
     diffs = np.diff(x)
     if diffs.size:
@@ -1972,13 +2022,25 @@ def detect_peak_candidates(
                     _add_candidate(
                         idx,
                         -1,
-                        "cwt",
-                        "cwt",
-                        {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
-                    )
+                    "cwt",
+                    "cwt",
+                    {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
+                )
 
-    if not candidates:
+    before_merge_count = len(candidates)
+    if before_merge_count == 0:
+        logger.info(
+            "Peak candidate counts path=%s spectrum_id=%s before_merge=0 after_merge=0",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+        )
         return []
+    logger.info(
+        "Peak candidate counts path=%s spectrum_id=%s before_merge=%d",
+        file_path or "unknown",
+        spectrum_id if spectrum_id is not None else "unknown",
+        before_merge_count,
+    )
 
     def _extract_plateau_bounds(detections: List[Dict[str, object]]):
         lefts = []
@@ -2079,6 +2141,13 @@ def detect_peak_candidates(
             tolerance_cm=close_peak_tolerance_cm,
             polarity=-1,
         )
+    )
+
+    logger.info(
+        "Peak candidate counts path=%s spectrum_id=%s after_merge=%d",
+        file_path or "unknown",
+        spectrum_id if spectrum_id is not None else "unknown",
+        len(merged),
     )
 
     merged.sort(key=lambda c: c["index"])
@@ -2785,6 +2854,13 @@ def main():
             'Use this to suppress low-value artifacts in targeted ranges.'
         ),
     )
+    ap.add_argument(
+        '--peak-preset',
+        choices=sorted(PEAK_PRESETS.keys()),
+        default=None,
+        dest='peak_preset',
+        help='Named peak-detection preset that overrides prominence, noise sigma, distance, and width settings.',
+    )
     ap.add_argument('--peak-width-min',type=float,default=0.0,dest='peak_width_min')
     ap.add_argument('--peak-width-max',type=float,default=0.0,dest='peak_width_max')
     ap.add_argument('--cwt-enabled',action='store_true',dest='cwt_enabled')
@@ -2868,6 +2944,12 @@ def main():
         ),
     )
     args=ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    preset_info = apply_peak_preset(args)
+    if preset_info is not None:
+        preset_name, preset_values = preset_info
+        overrides = ", ".join(f"{key}={value}" for key, value in preset_values.items())
+        logger.info("Applied peak preset '%s' (%s)", preset_name, overrides)
     if not args.no_prompt_export or args.prompt_export:
         if sys.stdin is None or not sys.stdin.isatty():
             if args.export_step_plots:
@@ -2905,7 +2987,6 @@ def main():
                 ).strip()
                 if response:
                     args.export_step_plots_dir = response
-    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
     total_files=len(files)
