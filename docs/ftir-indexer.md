@@ -45,12 +45,12 @@ Defaults are shown in parentheses.
   - Output directory for the DuckDB database and optional exports.
 
 ### Peak detection and preprocessing
-- `--prominence` (0.004)
-- `--min-distance` (1.2) — minimum peak separation (cm⁻¹, converted to points using median X spacing).
+- `--prominence` (0.003)
+- `--min-distance` (0.8) — minimum peak separation (cm⁻¹, converted to points using median X spacing).
 - `--min-distance-mode` (`fixed`) — `fixed` uses `--min-distance` as-is; `adaptive` clamps it to a fraction
   of the estimated median FWHM so narrow peaks remain eligible.
 - `--min-distance-fwhm-fraction` (0.5) — fraction of the median FWHM used to clamp `--min-distance` in adaptive mode.
-- `--noise-sigma-multiplier` (1.8)
+- `--noise-sigma-multiplier` (1.5)
 - `--noise-window-cm` (400.0) — window size for local noise estimation (set to 0 to use a global noise floor).
 - `--min-prominence-by-region` (None) — comma-separated ranges with prominence floors
   (e.g. `400-1500:0.03,1500-1800:0.02`).
@@ -76,7 +76,7 @@ Defaults are shown in parentheses.
 
 ### Peak fitting
 - `--model` (`Gaussian`) — choices: `Gaussian`, `Lorentzian`, `Voigt`, `Spline`.
-- `--min-r2` (0.80)
+- `--min-r2` (0.75)
 - `--fit-window-pts` (70)
 - `--fit-maxfev` (10000)
 - `--fit-timeout-sec` (0.0)

@@ -11,8 +11,8 @@ What it does
 Usage
   pip install duckdb pandas numpy scipy scikit-learn pyarrow
   python index_and_consensus.py /path/to/data /path/to/index_dir \
-      --prominence 0.004 --min-distance 1.2 --sg-win 9 --sg-poly 3 \
-      --als-lam 1e5 --als-p 0.01 --model Gaussian --min-r2 0.80 \
+      --prominence 0.003 --min-distance 0.8 --sg-win 9 --sg-poly 3 \
+      --als-lam 1e5 --als-p 0.01 --model Gaussian --min-r2 0.75 \
       --file-min-samples 2 --file-eps-factor 0.5 --file-eps-min 2.0 \
       --global-min-samples 2 --global-eps-abs 4.0
 
@@ -1593,7 +1593,7 @@ def detect_peak_candidates(
     file_path: str | None = None,
     spectrum_id: int | None = None,
 ) -> List[Dict[str, object]]:
-    min_distance_cm = float(_get_param(args, "min_distance", 1.2))
+    min_distance_cm = float(_get_param(args, "min_distance", 0.8))
     x_clean = np.asarray(x, dtype=float)
     x_clean = x_clean[np.isfinite(x_clean)]
     if x_clean.size > 1:
@@ -1611,8 +1611,8 @@ def detect_peak_candidates(
         )
         min_distance_mode = "fixed"
 
-    prominence_floor = float(_get_param(args, "prominence", 0.004))
-    sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 1.8))
+    prominence_floor = float(_get_param(args, "prominence", 0.003))
+    sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 1.5))
     noise_window_cm = float(_get_param(args, "noise_window_cm", 0.0))
     region_prominence_spec = _get_param(args, "min_prominence_by_region", None)
     region_prominence = _parse_min_prominence_by_region(region_prominence_spec)
@@ -2149,7 +2149,7 @@ def refine_peak_candidates(
         return []
     model = str(_get_param(args, "model", "Gaussian") or "Gaussian")
     fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
-    min_r2 = float(_get_param(args, "min_r2", 0.80))
+    min_r2 = float(_get_param(args, "min_r2", 0.75))
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
     fit_maxfev = max(1, fit_maxfev)
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
@@ -2732,13 +2732,13 @@ def main():
     ap.add_argument(
         '--prominence',
         type=float,
-        default=0.004,
+        default=0.003,
         help='Base prominence floor for peak detection (normalized absorbance units).',
     )
     ap.add_argument(
         '--min-distance',
         type=float,
-        default=1.2,
+        default=0.8,
         dest='min_distance',
         help='Minimum peak separation in cm^-1 (converted to points using median spacing).',
     )
@@ -2762,7 +2762,7 @@ def main():
     ap.add_argument(
         '--noise-sigma-multiplier',
         type=float,
-        default=1.8,
+        default=1.5,
         dest='noise_sigma_multiplier',
         help='Multiplier applied to estimated noise sigma to set the prominence floor.',
     )
@@ -2817,7 +2817,7 @@ def main():
         choices=['Gaussian', 'Lorentzian', 'Voigt', 'Spline'],
         default='Gaussian',
     )
-    ap.add_argument('--min-r2',type=float,default=0.80,dest='min_r2')
+    ap.add_argument('--min-r2',type=float,default=0.75,dest='min_r2')
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
     ap.add_argument('--fit-maxfev',type=int,default=10000,dest='fit_maxfev')
     ap.add_argument('--fit-timeout-sec',type=float,default=0.0,dest='fit_timeout_sec')
