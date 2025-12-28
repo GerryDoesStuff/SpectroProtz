@@ -1766,15 +1766,18 @@ def detect_peak_candidates(
         metadata: Dict[str, object],
     ):
         amplitude = float(abs(y_proc[int(index)])) if 0 <= int(index) < len(y_proc) else 0.0
+        is_shoulder = pass_label == "shoulder"
+        score = amplitude * (1.15 if is_shoulder else 1.0)
         candidates.append(
             {
                 "index": int(index),
                 "polarity": int(polarity),
-                "score": amplitude,
+                "score": score,
                 "baseline_corrected_amplitude": amplitude,
                 "detections": [metadata | {"source": source, "pass": pass_label}],
                 "sources": {pass_label},
                 "close_peak": False,
+                "priority": 1 if is_shoulder else 0,
             }
         )
 
@@ -2132,9 +2135,16 @@ def detect_peak_candidates(
             prev["sources"] = set(prev["sources"]) | set(candidate["sources"])
             prev["detections"] = list(prev["detections"]) + list(candidate["detections"])
             prev["close_peak"] = bool(prev.get("close_peak")) or bool(candidate.get("close_peak"))
-            if float(candidate["score"]) > float(prev["score"]):
+            prev_priority = int(prev.get("priority", 0) or 0)
+            candidate_priority = int(candidate.get("priority", 0) or 0)
+            if candidate_priority > prev_priority or (
+                candidate_priority == prev_priority and float(candidate["score"]) > float(prev["score"])
+            ):
                 prev["index"] = idx
                 prev["score"] = float(candidate["score"])
+                prev["priority"] = candidate_priority
+            else:
+                prev["priority"] = max(prev_priority, candidate_priority)
         return merged_items
 
     merged = (
@@ -2172,12 +2182,20 @@ def detect_peak_candidates(
             if len(cluster) == 1:
                 clustered.append(cluster[0])
                 continue
-            best = max(cluster, key=lambda c: float(c["score"]))
+            best = max(cluster, key=lambda c: (int(c.get("priority", 0) or 0), float(c["score"])))
             merged_cluster = dict(best)
             merged_cluster["detections"] = []
             merged_cluster["sources"] = set()
             merged_cluster["close_peak"] = True
             for candidate in cluster:
+            merged_cluster["detections"].extend(candidate.get("detections", []))
+            merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
+            merged_cluster["priority"] = max(
+                int(merged_cluster.get("priority", 0) or 0),
+                int(candidate.get("priority", 0) or 0),
+            )
+            logger.debug(
+                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
                 merged_cluster["detections"].extend(candidate.get("detections", []))
                 merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
             logger.info(
@@ -2253,7 +2271,10 @@ def detect_peak_candidates(
     if max_candidates > 0 and len(merged) > max_candidates:
         merged = sorted(
             merged,
-            key=lambda c: float(c.get("prominence", c.get("score", 0.0))),
+            key=lambda c: (
+                int(c.get("priority", 0) or 0),
+                float(c.get("prominence", c.get("score", 0.0))),
+            ),
             reverse=True,
         )[:max_candidates]
         merged.sort(key=lambda c: c["index"])
@@ -2326,7 +2347,7 @@ def refine_peak_candidates(
     fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
     min_r2 = float(_get_param(args, "min_r2", 0.75))
     shoulder_fit_window = int(
-        _get_param(args, "shoulder_fit_window_pts", max(5, int(fit_window * 0.8)))
+        _get_param(args, "shoulder_fit_window_pts", max(5, int(fit_window * 0.6)))
     )
     shoulder_min_r2 = float(_get_param(args, "shoulder_min_r2", 0.65))
     min_absorbance_threshold = float(_get_param(args, "min_absorbance_threshold", 0.05))
