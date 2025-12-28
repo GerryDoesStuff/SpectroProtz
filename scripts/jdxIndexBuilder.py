@@ -2327,6 +2327,7 @@ def refine_peak_candidates(
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
     fit_maxfev = max(1, min(fit_maxfev, 20000))
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
+    multi_fit_min_span_cm = float(_get_param(args, "multi_fit_min_span_cm", 10.0) or 0.0)
     results: List[Dict[str, object]] = []
 
     def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
@@ -2389,8 +2390,17 @@ def refine_peak_candidates(
             span_end = min(max(cluster_indices) + fit_window, len(x))
             xs_cluster = x[span_start:span_end]
             ys_cluster = fit_y[span_start:span_end]
-            if len(cluster) > 1 and model.lower() in {"gaussian", "lorentzian", "voigt"} and not has_plateau:
-                candidate_centers = [float(x[int(c["index"])]) for c in cluster]
+            candidate_centers = [float(x[int(c["index"])]) for c in cluster]
+            cluster_span_cm = 0.0
+            if candidate_centers:
+                cluster_span_cm = abs(max(candidate_centers) - min(candidate_centers))
+            allow_multi_fit = (
+                len(cluster) > 1
+                and model.lower() in {"gaussian", "lorentzian", "voigt"}
+                and not has_plateau
+                and (multi_fit_min_span_cm <= 0.0 or cluster_span_cm >= multi_fit_min_span_cm)
+            )
+            if allow_multi_fit:
                 curvature_centers = _curvature_seed_centers(
                     xs_cluster,
                     ys_cluster,
@@ -3061,6 +3071,13 @@ def main():
     )
     ap.add_argument('--min-r2',type=float,default=0.75,dest='min_r2')
     ap.add_argument('--fit-window-pts',type=int,default=70,dest='fit_window_pts')
+    ap.add_argument(
+        '--multi-fit-min-span-cm',
+        type=float,
+        default=10.0,
+        dest='multi_fit_min_span_cm',
+        help='Minimum cluster span (cm^-1) required for multi-peak fitting.',
+    )
     ap.add_argument('--fit-maxfev',type=int,default=10000,dest='fit_maxfev')
     ap.add_argument('--fit-timeout-sec',type=float,default=0.0,dest='fit_timeout_sec')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
