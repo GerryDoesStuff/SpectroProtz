@@ -25,7 +25,7 @@ from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
-from scipy.signal import find_peaks, find_peaks_cwt, peak_widths, savgol_filter
+from scipy.signal import find_peaks, find_peaks_cwt, peak_prominences, peak_widths, savgol_filter
 from scipy.optimize import curve_fit, OptimizeWarning
 from scipy.interpolate import UnivariateSpline
 from scipy.special import wofz
@@ -2084,38 +2084,54 @@ def detect_peak_candidates(
             return None
         return min(lefts), max(rights)
 
-    merged: List[Dict[str, object]] = []
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    for candidate in candidates:
-        idx = int(candidate["index"])
-        polarity = int(candidate["polarity"])
-        match = None
-        for existing in merged:
-            if int(existing["polarity"]) != polarity:
+    def _merge_candidates_by_tolerance(
+        items: List[Dict[str, object]],
+        *,
+        polarity: int,
+    ) -> List[Dict[str, object]]:
+        if not items:
+            return []
+        items_sorted = sorted(items, key=lambda c: int(c["index"]))
+        merged_items: List[Dict[str, object]] = []
+        for candidate in items_sorted:
+            idx = int(candidate["index"])
+            if not merged_items:
+                merged_items.append(candidate)
                 continue
-            tolerance_cm = _merge_tolerance_cm(idx, int(existing["index"]), polarity)
-            if "shoulder" in candidate.get("sources", []) or "shoulder" in existing.get("sources", []):
+            prev = merged_items[-1]
+            prev_idx = int(prev["index"])
+            tolerance_cm = _merge_tolerance_cm(idx, prev_idx, polarity)
+            if "shoulder" in candidate.get("sources", []) or "shoulder" in prev.get("sources", []):
                 tolerance_cm = min(tolerance_cm, shoulder_merge_tolerance_cm)
-            if abs(float(x[idx]) - float(x[int(existing["index"])])) <= tolerance_cm:
-                match = existing
-                break
-        if match is None:
-            merged.append(candidate)
-            continue
-        logger.info(
-            "Peak merge by tolerance path=%s spectrum_id=%s idx=%d existing_idx=%d tolerance_cm=%.3g",
-            file_path or "unknown",
-            spectrum_id if spectrum_id is not None else "unknown",
-            idx,
-            int(match["index"]),
-            tolerance_cm,
+            if abs(float(x[idx]) - float(x[prev_idx])) > tolerance_cm:
+                merged_items.append(candidate)
+                continue
+            logger.debug(
+                "Peak merge by tolerance path=%s spectrum_id=%s idx=%d existing_idx=%d tolerance_cm=%.3g",
+                file_path or "unknown",
+                spectrum_id if spectrum_id is not None else "unknown",
+                idx,
+                prev_idx,
+                tolerance_cm,
+            )
+            prev["sources"] = set(prev["sources"]) | set(candidate["sources"])
+            prev["detections"] = list(prev["detections"]) + list(candidate["detections"])
+            prev["close_peak"] = bool(prev.get("close_peak")) or bool(candidate.get("close_peak"))
+            if float(candidate["score"]) > float(prev["score"]):
+                prev["index"] = idx
+                prev["score"] = float(candidate["score"])
+        return merged_items
+
+    merged = (
+        _merge_candidates_by_tolerance(
+            [c for c in candidates if int(c["polarity"]) == 1],
+            polarity=1,
         )
-        match["sources"] = set(match["sources"]) | set(candidate["sources"])
-        match["detections"] = list(match["detections"]) + list(candidate["detections"])
-        match["close_peak"] = bool(match.get("close_peak")) or bool(candidate.get("close_peak"))
-        if float(candidate["score"]) > float(match["score"]):
-            match["index"] = idx
-            match["score"] = float(candidate["score"])
+        + _merge_candidates_by_tolerance(
+            [c for c in candidates if int(c["polarity"]) == -1],
+            polarity=-1,
+        )
+    )
 
     def _cluster_close_candidates(
         items: List[Dict[str, object]],
@@ -2149,7 +2165,7 @@ def detect_peak_candidates(
             for candidate in cluster:
                 merged_cluster["detections"].extend(candidate.get("detections", []))
                 merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
-            logger.info(
+            logger.debug(
                 "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
                 file_path or "unknown",
                 spectrum_id if spectrum_id is not None else "unknown",
@@ -2174,6 +2190,55 @@ def detect_peak_candidates(
     )
 
     merged.sort(key=lambda c: c["index"])
+    max_candidates = int(_get_param(args, "max_peak_candidates", 0) or 0)
+    min_prominence = np.finfo(float).eps
+    min_width_pts = np.finfo(float).eps
+
+    def _annotate_and_filter_metrics(
+        items: List[Dict[str, object]],
+        *,
+        polarity: int,
+    ) -> List[Dict[str, object]]:
+        if not items:
+            return []
+        indices = np.asarray([int(item["index"]) for item in items], dtype=int)
+        target = y_proc if polarity >= 0 else -y_proc
+        prominences = np.full(indices.shape, np.nan, dtype=float)
+        widths = np.full(indices.shape, np.nan, dtype=float)
+        try:
+            prominences, _, _ = peak_prominences(target, indices)
+        except (ValueError, IndexError):
+            pass
+        try:
+            widths, _, _, _ = peak_widths(target, indices, rel_height=0.5)
+        except (ValueError, IndexError):
+            pass
+        filtered: List[Dict[str, object]] = []
+        for item, prominence_value, width_value in zip(items, prominences, widths):
+            prominence_value = float(prominence_value) if np.isfinite(prominence_value) else 0.0
+            width_value = float(width_value) if np.isfinite(width_value) else 0.0
+            item["prominence"] = prominence_value
+            item["width_pts"] = width_value
+            if prominence_value <= min_prominence or width_value <= min_width_pts:
+                continue
+            filtered.append(item)
+        return filtered
+
+    merged = _annotate_and_filter_metrics(
+        [c for c in merged if int(c["polarity"]) == 1],
+        polarity=1,
+    ) + _annotate_and_filter_metrics(
+        [c for c in merged if int(c["polarity"]) == -1],
+        polarity=-1,
+    )
+
+    if max_candidates > 0 and len(merged) > max_candidates:
+        merged = sorted(
+            merged,
+            key=lambda c: float(c.get("prominence", c.get("score", 0.0))),
+            reverse=True,
+        )[:max_candidates]
+        merged.sort(key=lambda c: c["index"])
     for candidate_id, candidate in enumerate(merged):
         candidate["candidate_id"] = int(candidate_id)
         candidate["sources"] = sorted(candidate.get("sources", []))
@@ -2247,7 +2312,7 @@ def refine_peak_candidates(
     )
     shoulder_min_r2 = float(_get_param(args, "shoulder_min_r2", min_r2 * 0.9))
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
-    fit_maxfev = max(1, fit_maxfev)
+    fit_maxfev = max(1, min(fit_maxfev, 20000))
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
     results: List[Dict[str, object]] = []
 
@@ -2319,7 +2384,7 @@ def refine_peak_candidates(
                             maxfev=fit_maxfev,
                             fit_timeout_sec=fit_timeout_sec,
                         )
-                except (RuntimeError, OptimizeWarning, ValueError) as exc:
+                except (RuntimeError, OptimizeWarning, ValueError, FitTimeoutError) as exc:
                     for candidate in cluster:
                         record_fit_failure(int(candidate["candidate_id"]), model, exc)
                     fitted = None
@@ -2371,7 +2436,7 @@ def refine_peak_candidates(
                             fit_timeout_sec=fit_timeout_sec,
                             raise_on_error=True,
                         )
-                except (RuntimeError, OptimizeWarning, ValueError) as exc:
+                except (RuntimeError, OptimizeWarning, ValueError, FitTimeoutError) as exc:
                     record_fit_failure(int(candidate["candidate_id"]), model, exc)
                 if not fit:
                     if plateau_bounds is None:
@@ -2891,6 +2956,13 @@ def main():
     )
     ap.add_argument('--peak-width-min',type=float,default=0.0,dest='peak_width_min')
     ap.add_argument('--peak-width-max',type=float,default=0.0,dest='peak_width_max')
+    ap.add_argument(
+        '--max-peak-candidates',
+        type=int,
+        default=0,
+        dest='max_peak_candidates',
+        help='Maximum number of peak candidates to retain per spectrum (0 disables).',
+    )
     ap.add_argument('--cwt-enabled',action='store_true',dest='cwt_enabled')
     ap.add_argument('--cwt-width-min',type=float,default=0.0,dest='cwt_width_min')
     ap.add_argument('--cwt-width-max',type=float,default=0.0,dest='cwt_width_max')
