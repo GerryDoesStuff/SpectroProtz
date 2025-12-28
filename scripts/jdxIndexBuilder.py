@@ -2188,16 +2188,20 @@ def detect_peak_candidates(
             merged_cluster["sources"] = set()
             merged_cluster["close_peak"] = True
             for candidate in cluster:
-            merged_cluster["detections"].extend(candidate.get("detections", []))
-            merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
-            merged_cluster["priority"] = max(
-                int(merged_cluster.get("priority", 0) or 0),
-                int(candidate.get("priority", 0) or 0),
-            )
-            logger.debug(
-                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
                 merged_cluster["detections"].extend(candidate.get("detections", []))
                 merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
+                merged_cluster["priority"] = max(
+                    int(merged_cluster.get("priority", 0) or 0),
+                    int(candidate.get("priority", 0) or 0),
+                )
+            logger.debug(
+                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
+                file_path or "unknown",
+                spectrum_id if spectrum_id is not None else "unknown",
+                polarity,
+                [int(c["index"]) for c in cluster],
+                tolerance_cm,
+            )
             logger.info(
                 "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g "
                 "kept_index=%d dropped_indices=%s",
