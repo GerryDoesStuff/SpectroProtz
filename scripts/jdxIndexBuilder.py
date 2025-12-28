@@ -2322,7 +2322,8 @@ def refine_peak_candidates(
     shoulder_fit_window = int(
         _get_param(args, "shoulder_fit_window_pts", max(5, int(fit_window * 0.8)))
     )
-    shoulder_min_r2 = float(_get_param(args, "shoulder_min_r2", min_r2 * 0.9))
+    shoulder_min_r2 = float(_get_param(args, "shoulder_min_r2", 0.65))
+    min_absorbance_threshold = float(_get_param(args, "min_absorbance_threshold", 0.05))
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
     fit_maxfev = max(1, min(fit_maxfev, 20000))
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
@@ -2353,6 +2354,24 @@ def refine_peak_candidates(
                     "error": str(exc),
                 }
             )
+
+    def record_r2_rejection(
+        candidate_id: int,
+        r2: float,
+        threshold: float,
+        sources: List[str],
+    ) -> None:
+        path_label = file_path or "unknown"
+        spectrum_label = spectrum_id if spectrum_id is not None else "unknown"
+        logger.info(
+            "Peak rejected by r2 path=%s spectrum_id=%s candidate_id=%s r2=%.4f threshold=%.4f sources=%s",
+            path_label,
+            spectrum_label,
+            candidate_id,
+            r2,
+            threshold,
+            sources,
+        )
 
     for polarity in (1, -1):
         group = [c for c in candidates if int(c["polarity"]) == polarity]
@@ -2403,14 +2422,29 @@ def refine_peak_candidates(
                 if fitted is not None:
                     fitted_peaks, _ = fitted
                     for candidate, fit_result in zip(cluster, fitted_peaks[: len(candidate_centers)]):
-                        threshold = shoulder_min_r2 if _shoulder_candidate(candidate) else min_r2
-                        if not fit_result or fit_result.get("r2", 0.0) < threshold:
+                        if not fit_result:
                             continue
+                        is_shoulder = _shoulder_candidate(candidate)
+                        candidate_sources = list(candidate.get("sources", []))
+                        fit_r2 = float(fit_result.get("r2", 0.0))
+                        fit_amplitude = abs(float(fit_result.get("amplitude", 0.0)))
+                        if is_shoulder:
+                            if fit_amplitude <= min_absorbance_threshold:
+                                continue
+                        else:
+                            if fit_r2 < min_r2:
+                                record_r2_rejection(
+                                    int(candidate["candidate_id"]),
+                                    fit_r2,
+                                    min_r2,
+                                    candidate_sources,
+                                )
+                                continue
                         result = dict(fit_result)
                         result["candidate_id"] = int(candidate["candidate_id"])
                         result["index"] = int(candidate["index"])
                         result["polarity"] = int(polarity)
-                        result["sources"] = list(candidate.get("sources", []))
+                        result["sources"] = candidate_sources
                         if polarity < 0:
                             result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
                             result["area"] = float(result.get("area", 0.0)) * -1
@@ -2472,8 +2506,21 @@ def refine_peak_candidates(
                         area=area,
                         r2=float(candidate_min_r2),
                     )
-                if plateau_bounds is None and fit.get("r2", 0.0) < candidate_min_r2:
-                    continue
+                if plateau_bounds is None:
+                    fit_r2 = float(fit.get("r2", 0.0))
+                    fit_amplitude = abs(float(fit.get("amplitude", 0.0)))
+                    if is_shoulder:
+                        if fit_amplitude <= min_absorbance_threshold:
+                            continue
+                    else:
+                        if fit_r2 < candidate_min_r2:
+                            record_r2_rejection(
+                                int(candidate["candidate_id"]),
+                                fit_r2,
+                                candidate_min_r2,
+                                list(candidate.get("sources", [])),
+                            )
+                            continue
                 result = dict(fit)
                 result["candidate_id"] = int(candidate["candidate_id"])
                 result["index"] = int(candidate["index"])
