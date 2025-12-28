@@ -1642,6 +1642,13 @@ def detect_peak_candidates(
     cwt_cluster_tolerance_cm = float(_get_param(args, "cwt_cluster_tolerance", 8.0))
     merge_tolerance_cm = float(_get_param(args, "merge_tolerance", 8.0))
     close_peak_tolerance_cm = float(_get_param(args, "close_peak_tolerance_cm", 1.5))
+    shoulder_min_distance_cm = float(
+        _get_param(args, "shoulder_min_distance_cm", max(step_cm, min_distance_cm * 0.5))
+    )
+    shoulder_merge_tolerance_cm = float(_get_param(args, "shoulder_merge_tolerance_cm", 1.5))
+    shoulder_curvature_prominence_factor = float(
+        _get_param(args, "shoulder_curvature_prominence_factor", 1.2)
+    )
 
     fallback_noise_sigma = _estimate_segment_noise_sigma(
         y_proc,
@@ -1762,6 +1769,7 @@ def detect_peak_candidates(
                 "score": float(abs(y_proc[int(index)])),
                 "detections": [metadata | {"source": source, "pass": pass_label}],
                 "sources": {pass_label},
+                "close_peak": False,
             }
         )
 
@@ -1828,6 +1836,10 @@ def detect_peak_candidates(
             prominence_floor * 1.1,
             np.maximum(prominence_floor, per_point_floor * 1.15),
         )
+        shoulder_distance_pts = max(
+            1,
+            int(np.floor(shoulder_min_distance_cm / max(step_cm, 1e-9))),
+        )
         width_bounds_pass1 = width_bounds
         width_bounds_pass2 = None
         if width_bounds is not None:
@@ -1839,6 +1851,7 @@ def detect_peak_candidates(
             slice_data: np.ndarray,
             polarity: int,
             pass_label: str,
+            pass_id: str,
             prominence_floor_values: np.ndarray,
             distance_value: int,
             width_value: Tuple[int, int] | None,
@@ -1877,6 +1890,7 @@ def detect_peak_candidates(
                         "prominence",
                         pass_label,
                         {
+                            "pass_id": pass_id,
                             "prominence": float(prominence_value),
                             "prominence_floor": float(required_floor),
                             "width_pts": width_value,
@@ -1885,10 +1899,22 @@ def detect_peak_candidates(
                     )
 
         _record_prominence_candidates(
-            y_slice, 1, "pass1", pass1_prominence, pass1_distance, width_bounds_pass1
+            y_slice,
+            1,
+            "primary",
+            "pass1",
+            pass1_prominence,
+            pass1_distance,
+            width_bounds_pass1,
         )
         _record_prominence_candidates(
-            y_slice, 1, "pass2", pass2_prominence, pass2_distance, width_bounds_pass2
+            y_slice,
+            1,
+            "primary",
+            "pass2",
+            pass2_prominence,
+            pass2_distance,
+            width_bounds_pass2,
         )
 
         plateau_base = float(np.nanmedian(pass1_prominence)) if pass1_prominence.size else 0.0
@@ -1916,8 +1942,9 @@ def detect_peak_candidates(
                             abs_center,
                             1,
                             "plateau",
-                            "pass1",
+                            "primary",
                             {
+                                "pass_id": "plateau",
                                 "plateau_left": left + start,
                                 "plateau_right": right + start,
                                 "plateau_size": int(size),
@@ -1928,11 +1955,64 @@ def detect_peak_candidates(
 
         if detect_negative:
             _record_prominence_candidates(
-                y_slice, -1, "pass1", pass1_prominence, pass1_distance, width_bounds_pass1
+                y_slice,
+                -1,
+                "primary",
+                "pass1",
+                pass1_prominence,
+                pass1_distance,
+                width_bounds_pass1,
             )
             _record_prominence_candidates(
-                y_slice, -1, "pass2", pass2_prominence, pass2_distance, width_bounds_pass2
+                y_slice,
+                -1,
+                "primary",
+                "pass2",
+                pass2_prominence,
+                pass2_distance,
+                width_bounds_pass2,
             )
+
+        def _record_curvature_candidates(slice_data: np.ndarray, polarity: int) -> None:
+            curvature = -_compute_second_derivative(
+                x[start:end],
+                slice_data,
+                shoulder_distance_pts,
+            )
+            if curvature.size == 0:
+                return
+            median_curvature = float(np.nanmedian(np.abs(curvature)))
+            if not np.isfinite(median_curvature) or median_curvature <= 0:
+                median_curvature = float(np.nanmax(np.abs(curvature))) * 0.25 if curvature.size else 0.0
+            prominence = max(median_curvature * shoulder_curvature_prominence_factor, 1e-9)
+            peak_idxs, props = find_peaks(
+                curvature,
+                prominence=prominence,
+                distance=shoulder_distance_pts,
+            )
+            prominences = np.asarray(props.get("prominences", []), dtype=float)
+            for idx, prominence_value in zip(np.asarray(peak_idxs, dtype=int), prominences):
+                abs_idx = int(idx) + start
+                if not np.isfinite(prominence_value) or prominence_value < prominence:
+                    continue
+                if 0 <= abs_idx < len(y_proc):
+                    _add_candidate(
+                        abs_idx,
+                        polarity,
+                        "curvature",
+                        "shoulder",
+                        {
+                            "pass_id": "curvature",
+                            "curvature": float(curvature[int(idx)]),
+                            "curvature_prominence": float(prominence_value),
+                            "curvature_floor": float(prominence),
+                            "segment_range": (float(seg_low), float(seg_high)),
+                        },
+                    )
+
+        _record_curvature_candidates(y_slice, 1)
+        if detect_negative:
+            _record_curvature_candidates(-y_slice, -1)
 
     if cwt_enabled:
         cwt_width_min_cm, cwt_width_max_cm = _resolve_width_bounds_cm(
@@ -1958,8 +2038,12 @@ def detect_peak_candidates(
                     idx,
                     1,
                     "cwt",
-                    "cwt",
-                    {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
+                    "primary",
+                    {
+                        "pass_id": "cwt",
+                        "widths_pts": widths_pts.tolist(),
+                        "cluster_tolerance": cwt_cluster_tolerance_cm,
+                    },
                 )
         if detect_negative:
             cwt_neg = np.asarray(find_peaks_cwt(-y_proc, widths_pts), dtype=int)
@@ -1973,8 +2057,12 @@ def detect_peak_candidates(
                         idx,
                         -1,
                         "cwt",
-                        "cwt",
-                        {"widths_pts": widths_pts.tolist(), "cluster_tolerance": cwt_cluster_tolerance_cm},
+                        "primary",
+                        {
+                            "pass_id": "cwt",
+                            "widths_pts": widths_pts.tolist(),
+                            "cluster_tolerance": cwt_cluster_tolerance_cm,
+                        },
                     )
 
     if not candidates:
@@ -2006,6 +2094,8 @@ def detect_peak_candidates(
             if int(existing["polarity"]) != polarity:
                 continue
             tolerance_cm = _merge_tolerance_cm(idx, int(existing["index"]), polarity)
+            if "shoulder" in candidate.get("sources", []) or "shoulder" in existing.get("sources", []):
+                tolerance_cm = min(tolerance_cm, shoulder_merge_tolerance_cm)
             if abs(float(x[idx]) - float(x[int(existing["index"])])) <= tolerance_cm:
                 match = existing
                 break
@@ -2022,6 +2112,7 @@ def detect_peak_candidates(
         )
         match["sources"] = set(match["sources"]) | set(candidate["sources"])
         match["detections"] = list(match["detections"]) + list(candidate["detections"])
+        match["close_peak"] = bool(match.get("close_peak")) or bool(candidate.get("close_peak"))
         if float(candidate["score"]) > float(match["score"]):
             match["index"] = idx
             match["score"] = float(candidate["score"])
@@ -2054,6 +2145,7 @@ def detect_peak_candidates(
             merged_cluster = dict(best)
             merged_cluster["detections"] = []
             merged_cluster["sources"] = set()
+            merged_cluster["close_peak"] = True
             for candidate in cluster:
                 merged_cluster["detections"].extend(candidate.get("detections", []))
                 merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
@@ -2150,10 +2242,18 @@ def refine_peak_candidates(
     model = str(_get_param(args, "model", "Gaussian") or "Gaussian")
     fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
     min_r2 = float(_get_param(args, "min_r2", 0.75))
+    shoulder_fit_window = int(
+        _get_param(args, "shoulder_fit_window_pts", max(5, int(fit_window * 0.8)))
+    )
+    shoulder_min_r2 = float(_get_param(args, "shoulder_min_r2", min_r2 * 0.9))
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
     fit_maxfev = max(1, fit_maxfev)
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
     results: List[Dict[str, object]] = []
+
+    def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
+        sources = candidate.get("sources", [])
+        return "shoulder" in sources or bool(candidate.get("close_peak"))
 
     def record_fit_failure(candidate_id: int, model_name: str, exc: BaseException) -> None:
         path_label = file_path or "unknown"
@@ -2226,7 +2326,8 @@ def refine_peak_candidates(
                 if fitted is not None:
                     fitted_peaks, _ = fitted
                     for candidate, fit_result in zip(cluster, fitted_peaks[: len(candidate_centers)]):
-                        if not fit_result or fit_result.get("r2", 0.0) < min_r2:
+                        threshold = shoulder_min_r2 if _shoulder_candidate(candidate) else min_r2
+                        if not fit_result or fit_result.get("r2", 0.0) < threshold:
                             continue
                         result = dict(fit_result)
                         result["candidate_id"] = int(candidate["candidate_id"])
@@ -2244,6 +2345,9 @@ def refine_peak_candidates(
                 x0_guess = float(x[idx])
                 center_bounds = None
                 use_absorbance = fit_y_abs is not None and plateau_bounds is not None
+                is_shoulder = _shoulder_candidate(candidate)
+                candidate_fit_window = shoulder_fit_window if is_shoulder else fit_window
+                candidate_min_r2 = shoulder_min_r2 if is_shoulder else min_r2
                 if plateau_bounds is not None:
                     left_idx, right_idx = plateau_bounds
                     left_x = float(x[left_idx])
@@ -2260,7 +2364,7 @@ def refine_peak_candidates(
                             fit_source,
                             idx,
                             model,
-                            fit_window,
+                            candidate_fit_window,
                             center_bounds=center_bounds,
                             x0_guess=x0_guess,
                             maxfev=fit_maxfev,
@@ -2272,7 +2376,7 @@ def refine_peak_candidates(
                 if not fit:
                     if plateau_bounds is None:
                         continue
-                    xs, ys = _fit_peak_window(x, fit_source, idx, fit_window)
+                    xs, ys = _fit_peak_window(x, fit_source, idx, candidate_fit_window)
                     if xs.size < 3:
                         continue
                     local_idx = int(np.argmin(np.abs(xs - float(x[idx]))))
@@ -2289,9 +2393,9 @@ def refine_peak_candidates(
                         fwhm=float(fwhm),
                         amplitude=float(max(peak_y - baseline, 0.0)),
                         area=area,
-                        r2=float(min_r2),
+                        r2=float(candidate_min_r2),
                     )
-                if plateau_bounds is None and fit.get("r2", 0.0) < min_r2:
+                if plateau_bounds is None and fit.get("r2", 0.0) < candidate_min_r2:
                     continue
                 result = dict(fit)
                 result["candidate_id"] = int(candidate["candidate_id"])
