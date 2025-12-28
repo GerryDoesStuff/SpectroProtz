@@ -2118,13 +2118,16 @@ def detect_peak_candidates(
             if abs(float(x[idx]) - float(x[prev_idx])) > tolerance_cm:
                 merged_items.append(candidate)
                 continue
-            logger.debug(
-                "Peak merge by tolerance path=%s spectrum_id=%s idx=%d existing_idx=%d tolerance_cm=%.3g",
+            logger.info(
+                "Peak merge by tolerance path=%s spectrum_id=%s idx=%d existing_idx=%d "
+                "tolerance_cm=%.3g dropped_index=%d kept_index=%d",
                 file_path or "unknown",
                 spectrum_id if spectrum_id is not None else "unknown",
                 idx,
                 prev_idx,
                 tolerance_cm,
+                idx,
+                prev_idx,
             )
             prev["sources"] = set(prev["sources"]) | set(candidate["sources"])
             prev["detections"] = list(prev["detections"]) + list(candidate["detections"])
@@ -2177,13 +2180,16 @@ def detect_peak_candidates(
             for candidate in cluster:
                 merged_cluster["detections"].extend(candidate.get("detections", []))
                 merged_cluster["sources"] = merged_cluster["sources"] | set(candidate.get("sources", []))
-            logger.debug(
-                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g",
+            logger.info(
+                "Close-peak merge path=%s spectrum_id=%s polarity=%d indices=%s tolerance_cm=%.3g "
+                "kept_index=%d dropped_indices=%s",
                 file_path or "unknown",
                 spectrum_id if spectrum_id is not None else "unknown",
                 polarity,
                 [int(c["index"]) for c in cluster],
                 tolerance_cm,
+                int(best["index"]),
+                [int(c["index"]) for c in cluster if c is not best],
             )
             clustered.append(merged_cluster)
         return clustered
@@ -2433,6 +2439,15 @@ def refine_peak_candidates(
                     fitted_peaks, _ = fitted
                     for candidate, fit_result in zip(cluster, fitted_peaks[: len(candidate_centers)]):
                         if not fit_result:
+                            logger.info(
+                                "Peak candidate dropped path=%s spectrum_id=%s candidate_id=%s "
+                                "index=%s reason=fit_missing model=%s",
+                                file_path or "unknown",
+                                spectrum_id if spectrum_id is not None else "unknown",
+                                candidate.get("candidate_id", "unknown"),
+                                candidate.get("index", "unknown"),
+                                model,
+                            )
                             continue
                         is_shoulder = _shoulder_candidate(candidate)
                         candidate_sources = list(candidate.get("sources", []))
@@ -2496,6 +2511,15 @@ def refine_peak_candidates(
                     record_fit_failure(int(candidate["candidate_id"]), model, exc)
                 if not fit:
                     if plateau_bounds is None:
+                        logger.info(
+                            "Peak candidate dropped path=%s spectrum_id=%s candidate_id=%s "
+                            "index=%s reason=fit_failed model=%s",
+                            file_path or "unknown",
+                            spectrum_id if spectrum_id is not None else "unknown",
+                            candidate.get("candidate_id", "unknown"),
+                            candidate.get("index", "unknown"),
+                            model,
+                        )
                         continue
                     xs, ys = _fit_peak_window(x, fit_source, idx, candidate_fit_window)
                     if xs.size < 3:
