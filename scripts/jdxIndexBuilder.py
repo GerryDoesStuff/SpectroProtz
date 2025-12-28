@@ -1612,6 +1612,7 @@ def detect_peak_candidates(
         min_distance_mode = "fixed"
 
     prominence_floor = float(_get_param(args, "prominence", 0.003))
+    min_absorbance_threshold = float(_get_param(args, "min_absorbance_threshold", 0.05))
     sigma_multiplier = float(_get_param(args, "noise_sigma_multiplier", 1.5))
     noise_window_cm = float(_get_param(args, "noise_window_cm", 0.0))
     region_prominence_spec = _get_param(args, "min_prominence_by_region", None)
@@ -1708,6 +1709,7 @@ def detect_peak_candidates(
         "Peak thresholds path=%s spectrum_id=%s min_distance_cm=%.4g step_cm=%.4g "
         "distance_pts=%d min_distance_mode=%s min_distance_fwhm_fraction=%.3g "
         "adaptive_fwhm_cm=%.4g prominence_floor=%.4g noise_sigma=%.4g noise_sigma_multiplier=%.3g "
+        "min_absorbance_threshold=%.4g "
         "width_min_cm=%.4g width_max_cm=%.4g width_min_pts=%d width_max_pts=%d width_filter=%s "
         "plateau_min_points=%d plateau_prominence_factor=%.3g",
         file_path or "unknown",
@@ -1721,6 +1723,7 @@ def detect_peak_candidates(
         prominence_floor,
         float(noise_sigma) if np.isfinite(noise_sigma) else float("nan"),
         sigma_multiplier,
+        min_absorbance_threshold,
         width_min_cm,
         width_max_cm,
         width_min_pts,
@@ -1762,11 +1765,13 @@ def detect_peak_candidates(
         pass_label: str,
         metadata: Dict[str, object],
     ):
+        amplitude = float(abs(y_proc[int(index)])) if 0 <= int(index) < len(y_proc) else 0.0
         candidates.append(
             {
                 "index": int(index),
                 "polarity": int(polarity),
-                "score": float(abs(y_proc[int(index)])),
+                "score": amplitude,
+                "baseline_corrected_amplitude": amplitude,
                 "detections": [metadata | {"source": source, "pass": pass_label}],
                 "sources": {pass_label},
                 "close_peak": False,
@@ -2064,6 +2069,13 @@ def detect_peak_candidates(
                             "cluster_tolerance": cwt_cluster_tolerance_cm,
                         },
                     )
+
+    if candidates and min_absorbance_threshold > 0:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if float(candidate.get("baseline_corrected_amplitude", 0.0)) >= min_absorbance_threshold
+        ]
 
     if not candidates:
         return []
@@ -2903,6 +2915,13 @@ def main():
         type=float,
         default=0.003,
         help='Base prominence floor for peak detection (normalized absorbance units).',
+    )
+    ap.add_argument(
+        '--min-absorbance-threshold',
+        type=float,
+        default=0.05,
+        dest='min_absorbance_threshold',
+        help='Minimum baseline-corrected absorbance to keep a peak candidate.',
     )
     ap.add_argument(
         '--min-distance',
