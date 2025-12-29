@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, threading, queue
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
@@ -2433,9 +2433,10 @@ def refine_peak_candidates(
     file_path: str | None = None,
     spectrum_id: int | None = None,
     fit_errors: Optional[List[Dict[str, object]]] = None,
-) -> List[Dict[str, object]]:
+    progress_callback: Optional[callable] = None,
+) -> Tuple[List[Dict[str, object]], int]:
     if not candidates:
-        return []
+        return [], 0
     model = str(_get_param(args, "model", "Gaussian") or "Gaussian")
     fit_window = max(3, int(_get_param(args, "fit_window_pts", 70)))
     min_r2 = float(_get_param(args, "min_r2", 0.75))
@@ -2504,6 +2505,17 @@ def refine_peak_candidates(
                 stream=sys.stderr,
             )
             next_progress += progress_every
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "file": file_path,
+                    "spectrum_id": spectrum_id,
+                    "stage": "fit_progress",
+                    "candidates": processed_candidates,
+                    "refined": len(results),
+                    "skipped_due_to_timeout": timeout_skips + spectrum_timeout_skips,
+                }
+            )
 
     def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
         sources = candidate.get("sources", [])
@@ -2806,7 +2818,7 @@ def refine_peak_candidates(
             f"skipped={timeout_skips} candidates "
             f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}"
         )
-    return results
+    return results, timeout_skips + spectrum_timeout_skips
 
 def init_db(outdir: str, db_path: Optional[str] = None):
     os.makedirs(outdir, exist_ok=True)
@@ -2919,7 +2931,14 @@ class _FitTimeoutGuard:
         return False
 
 
-def index_file(path:str,con,args,failed_files=None,step_registry_collector: Optional[List[Dict[str, object]]] = None):
+def index_file(
+    path: str,
+    con,
+    args,
+    failed_files=None,
+    step_registry_collector: Optional[List[Dict[str, object]]] = None,
+    progress_queue: Optional[object] = None,
+) -> Tuple[int, int, List[Dict[str, object]]]:
     def record_failure(message: str) -> None:
         if failed_files is not None:
             failed_files.append((path, message))
@@ -2940,11 +2959,58 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
             logger.debug("Failed to record ingest error for %s", path, exc_info=True)
 
     current_stage = "initializing"
+    start_time = time.monotonic()
+    last_progress_emit = start_time
+    progress_events: List[Dict[str, object]] = []
+    current_spectrum_id: Optional[int] = None
+    progress_interval = float(getattr(args, "progress_interval_sec", 30.0) or 0.0)
+
+    def emit_progress(
+        stage: str,
+        *,
+        spectrum_id: Optional[int] = None,
+        candidates: Optional[int] = None,
+        refined: Optional[int] = None,
+        skipped_due_to_timeout: Optional[int] = None,
+        force: bool = False,
+    ) -> None:
+        nonlocal last_progress_emit
+        now = time.monotonic()
+        if not force and progress_interval > 0 and (now - last_progress_emit) < progress_interval:
+            return
+        if spectrum_id is None:
+            spectrum_id = current_spectrum_id
+        event = {
+            "file": path,
+            "spectrum_id": spectrum_id,
+            "stage": stage,
+            "elapsed_sec": round(now - start_time, 3),
+            "candidates": candidates,
+            "refined": refined,
+            "skipped_due_to_timeout": skipped_due_to_timeout,
+        }
+        progress_events.append(event)
+        if progress_queue is not None:
+            try:
+                progress_queue.put(event)
+            except Exception:
+                logger.debug("Failed to emit progress event for %s", path, exc_info=True)
+        last_progress_emit = now
+
+    def progress_callback(payload: Dict[str, object]) -> None:
+        emit_progress(
+            str(payload.get("stage", "progress")),
+            spectrum_id=payload.get("spectrum_id"),
+            candidates=payload.get("candidates"),
+            refined=payload.get("refined"),
+            skipped_due_to_timeout=payload.get("skipped_due_to_timeout"),
+        )
 
     def set_stage(stage: str) -> None:
         nonlocal current_stage
         current_stage = stage
         logger.info("Indexing stage [%s]: %s", stage, path)
+        emit_progress(stage)
 
     timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
     try:
@@ -2994,6 +3060,8 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
 
                     processed_spectra+=1
                     max_points=max(max_points,len(x_clean))
+                    current_spectrum_id = sid
+                    emit_progress("start_spectrum", spectrum_id=sid, force=True)
                     log_line(
                         f"Indexing spectrum {sid + 1}/{len(Y)} "
                         f"path={path} points={len(x_clean)}"
@@ -3073,7 +3141,7 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                         extra_metadata={"candidates": peak_overlay},
                     )
                     set_stage(f"fit_peaks_spectrum_{sid}")
-                    refined = refine_peak_candidates(
+                    refined, skipped_due_to_timeout = refine_peak_candidates(
                         x_clean,
                         y_proc,
                         peak_candidates,
@@ -3082,11 +3150,21 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                         file_path=path,
                         spectrum_id=sid,
                         fit_errors=fit_errors,
+                        progress_callback=progress_callback,
                     )
                     log_line(
                         "Spectrum fit summary "
                         f"path={path} spectrum_id={sid} "
-                        f"candidates={len(peak_candidates)} refined={len(refined)}"
+                        f"candidates={len(peak_candidates)} refined={len(refined)} "
+                        f"skipped_due_to_timeout={skipped_due_to_timeout}"
+                    )
+                    emit_progress(
+                        "spectrum_complete",
+                        spectrum_id=sid,
+                        candidates=len(peak_candidates),
+                        refined=len(refined),
+                        skipped_due_to_timeout=skipped_due_to_timeout,
+                        force=True,
                     )
                     refined_overlay = [
                         {
@@ -3139,7 +3217,7 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
             except Exception:
                 con.execute('ROLLBACK')
                 raise
-            return processed_spectra,total_peaks
+            return processed_spectra, total_peaks, progress_events
     except Exception as exc:
         if isinstance(exc, FileTimeoutError):
             message = f"Timeout: {exc}"
@@ -3151,7 +3229,7 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
         persist_ingest_error(message)
         if getattr(args,'strict',False):
             raise
-        return 0,0
+        return 0, 0, progress_events
 
 def weighted_median(x,w):
     o=np.argsort(x);x=x[o];w=w[o];c=np.cumsum(w)/(np.sum(w)+1e-12)
@@ -3235,6 +3313,27 @@ def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
+def format_progress_line(progress: Dict[str, object]) -> str:
+    file_path = progress.get("file") or "unknown"
+    spectrum_id = progress.get("spectrum_id")
+    stage = progress.get("stage") or "unknown"
+    elapsed = progress.get("elapsed_sec")
+    candidates = progress.get("candidates")
+    refined = progress.get("refined")
+    skipped = progress.get("skipped_due_to_timeout")
+    elapsed_str = f"{elapsed:.1f}" if isinstance(elapsed, (int, float)) else "n/a"
+    spectrum_str = spectrum_id if spectrum_id is not None else "unknown"
+    candidates_str = candidates if candidates is not None else "n/a"
+    refined_str = refined if refined is not None else "n/a"
+    skipped_str = skipped if skipped is not None else "n/a"
+    return (
+        "Progress "
+        f"file={file_path} spectrum_id={spectrum_str} stage={stage} "
+        f"elapsed_sec={elapsed_str} candidates={candidates_str} "
+        f"refined={refined_str} skipped_due_to_timeout={skipped_str}"
+    )
+
+
 def get_worker_db_path(index_dir: str) -> str:
     global _WORKER_DB_PATH
     if _WORKER_DB_PATH is None:
@@ -3254,12 +3353,19 @@ def index_file_worker(
     path: str,
     index_dir: str,
     args: argparse.Namespace,
+    progress_queue: Optional[object] = None,
 ) -> Dict[str, object]:
     db_path = get_worker_db_path(index_dir)
     con = init_db(os.path.dirname(db_path), db_path=db_path)
     step_registry_collector: List[Dict[str, object]] = []
     try:
-        n_s, n_p = index_file(path, con, args, step_registry_collector=step_registry_collector)
+        n_s, n_p, progress_events = index_file(
+            path,
+            con,
+            args,
+            step_registry_collector=step_registry_collector,
+            progress_queue=progress_queue,
+        )
     finally:
         con.close()
     return {
@@ -3268,6 +3374,7 @@ def index_file_worker(
         "spectra": n_s,
         "peaks": n_p,
         "step_registry": step_registry_collector,
+        "progress": progress_events,
     }
 
 
@@ -3411,6 +3518,13 @@ def main():
         help='Abort indexing a single file after this many seconds (0 disables).',
     )
     ap.add_argument(
+        '--progress-interval-sec',
+        type=float,
+        default=30.0,
+        dest='progress_interval_sec',
+        help='Emit progress updates at least this often (0 disables).',
+    )
+    ap.add_argument(
         '--export-step-plots',
         action='store_true',
         dest='export_step_plots',
@@ -3537,10 +3651,29 @@ def main():
         "Using per-worker DuckDB files; worker results will be merged into "
         f"{os.path.join(args.index_dir, 'peaks.duckdb')}."
     )
+    manager = multiprocessing.Manager()
+    progress_queue = manager.Queue()
+    progress_stop = threading.Event()
+
+    def progress_consumer() -> None:
+        while True:
+            try:
+                item = progress_queue.get(timeout=0.5)
+            except queue.Empty:
+                if progress_stop.is_set():
+                    break
+                continue
+            if item is None:
+                break
+            log_line(format_progress_line(item))
+
+    progress_thread = threading.Thread(target=progress_consumer, name="progress-consumer")
+    progress_thread.start()
+
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for p in files_to_index:
-            future = executor.submit(index_file_worker, p, args.index_dir, args)
+            future = executor.submit(index_file_worker, p, args.index_dir, args, progress_queue)
             futures[future] = p
         completed = 0
         for future in as_completed(futures):
@@ -3561,6 +3694,13 @@ def main():
             steps = result.get("step_registry") or []
             if steps:
                 step_registry_collector.extend(steps)
+    progress_stop.set()
+    try:
+        progress_queue.put(None)
+    except Exception:
+        pass
+    progress_thread.join(timeout=5)
+    manager.shutdown()
     if worker_db_paths:
         main_db_path = os.path.join(args.index_dir, "peaks.duckdb")
         log_line(
