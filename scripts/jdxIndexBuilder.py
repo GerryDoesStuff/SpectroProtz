@@ -23,6 +23,7 @@ Notes
 
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -3007,6 +3008,25 @@ def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
+def index_file_worker(
+    path: str,
+    index_dir: str,
+    args: argparse.Namespace,
+) -> Dict[str, object]:
+    con = init_db(index_dir)
+    step_registry_collector: List[Dict[str, object]] = []
+    try:
+        n_s, n_p = index_file(path, con, args, step_registry_collector=step_registry_collector)
+    finally:
+        con.close()
+    return {
+        "path": path,
+        "spectra": n_s,
+        "peaks": n_p,
+        "step_registry": step_registry_collector,
+    }
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ap=argparse.ArgumentParser()
@@ -3228,21 +3248,25 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
     total_files=len(files)
     log_line(f"Found {total_files} JCAMP file(s). Starting indexing...")
     total_specs=0;total_peaks=0
     step_registry_collector: List[Dict[str, object]] = []
-    for idx,p in enumerate(files,1):
-        log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
-        try:
-            n_s,n_p=index_file(p,con,args,step_registry_collector=step_registry_collector)
-        except UnsupportedSpectrumError:
-            if getattr(args,'strict',False):
-                raise
-            n_s,n_p=0,0
-        total_specs+=n_s;total_peaks+=n_p
+    max_workers = min(4, os.cpu_count() or 1)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for idx,p in enumerate(files,1):
+            log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
+            future = executor.submit(index_file_worker, p, args.index_dir, args)
+            futures[future] = p
+        for future in as_completed(futures):
+            result = future.result()
+            total_specs += int(result.get("spectra", 0) or 0)
+            total_peaks += int(result.get("peaks", 0) or 0)
+            steps = result.get("step_registry") or []
+            if steps:
+                step_registry_collector.extend(steps)
     if args.export_step_plots and step_registry_collector:
         export_dir = args.export_step_plots_dir or os.path.join(args.index_dir, "debug_plots")
         for entry in step_registry_collector:
@@ -3257,6 +3281,7 @@ def main():
                 output_path,
                 plot_max_points=args.plot_max_points,
             )
+    con=init_db(args.index_dir)
     log_line("Building file-level consensus clusters...", flush=True)
     fc=build_file_consensus(con,args)
     log_line("Building global consensus clusters...", flush=True)
