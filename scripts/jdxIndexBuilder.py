@@ -3248,15 +3248,48 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    existing_file_ids: set[str] = set()
+    existing_paths: set[str] = set()
+    existing_db_path = os.path.join(script_dir, "peaks.duckdb")
+    if os.path.isfile(existing_db_path):
+        try:
+            existing_con = duckdb.connect(existing_db_path, read_only=True)
+            rows = existing_con.execute("SELECT file_id, path FROM spectra").fetchall()
+            existing_file_ids = {row[0] for row in rows if row[0]}
+            existing_paths = {row[1] for row in rows if row[1]}
+            log_line(
+                f"Loaded {len(existing_file_ids)} existing file id(s) from {existing_db_path}."
+            )
+        except Exception as exc:
+            log_line(
+                f"Failed to load existing file ids from {existing_db_path}: {exc}",
+                stream=sys.stderr,
+            )
+        finally:
+            try:
+                existing_con.close()
+            except Exception:
+                pass
+
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
-    total_files=len(files)
-    log_line(f"Found {total_files} JCAMP file(s). Starting indexing...")
+    total_discovered=len(files)
+    files_to_index: List[str] = []
+    for path in files:
+        file_id = file_sha1(path)
+        if file_id in existing_file_ids:
+            log_line(f"Skipped {path} (already indexed).")
+            continue
+        files_to_index.append(path)
+    total_files=len(files_to_index)
+    log_line(
+        f"Found {total_discovered} JCAMP file(s) ({total_files} to index). Starting indexing..."
+    )
     total_specs=0;total_peaks=0
     step_registry_collector: List[Dict[str, object]] = []
     max_workers = min(4, os.cpu_count() or 1)
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        for idx,p in enumerate(files,1):
+        for idx,p in enumerate(files_to_index,1):
             log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
             future = executor.submit(index_file_worker, p, args.index_dir, args)
             futures[future] = p
