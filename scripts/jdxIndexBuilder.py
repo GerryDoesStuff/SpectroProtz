@@ -3884,7 +3884,16 @@ def main():
     total_peaks = 0
     start_time = time.monotonic()
     step_registry_collector: List[Dict[str, object]] = []
-    max_workers = min(4, os.cpu_count() or 1)
+    cpu_count = os.cpu_count()
+    max_workers = min(4, cpu_count or 1)
+    log_line(f"Startup: os.cpu_count()={cpu_count!r}, max_workers={max_workers}")
+    if max_workers < 4:
+        if cpu_count is None:
+            log_line("Startup: limiting workers because os.cpu_count() is unavailable; defaulting to 1.")
+        else:
+            log_line(
+                f"Startup: limiting workers because only {cpu_count} CPU core(s) reported."
+            )
     task_queue: multiprocessing.Queue = multiprocessing.Queue()
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
     workers: List[multiprocessing.Process] = []
