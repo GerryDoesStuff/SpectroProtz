@@ -3390,8 +3390,8 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     candidates = progress.get("candidates")
     refined = progress.get("refined")
     skipped = progress.get("skipped_due_to_timeout")
-    completed = progress.get("completed")
-    total = progress.get("total")
+    completed = progress.get("completed_tasks")
+    total = progress.get("total_tasks")
     file_done = progress.get("file_done")
     file_total = progress.get("file_total")
     elapsed_str = f"{elapsed:.1f}" if isinstance(elapsed, (int, float)) else "n/a"
@@ -4033,8 +4033,8 @@ def main():
                                     "stage": "heartbeat",
                                     "worker_id": worker_id,
                                     "elapsed_sec": round(now - start_time, 3),
-                                    "completed": completed_tasks,
-                                    "total": total_tasks,
+                                    "completed_tasks": completed_tasks,
+                                    "total_tasks": total_tasks,
                                 }
                             )
                         )
@@ -4079,8 +4079,8 @@ def main():
                         "candidates": candidates,
                         "refined": refined,
                         "skipped_due_to_timeout": skipped,
-                        "completed": completed_tasks,
-                        "total": total_tasks,
+                        "completed_tasks": completed_tasks,
+                        "total_tasks": total_tasks,
                         "file_done": file_done,
                         "file_total": file_total,
                     }
@@ -4096,7 +4096,10 @@ def main():
                     and file_done == file_total
                 ):
                     state["done_logged"] = True
-                    log_line(f"Indexed {file_path} spectra={file_total}")
+                    log_line(
+                        f"File completed path={file_path} spectra={file_total} "
+                        f"peaks={state.get('peaks', 0)}"
+                    )
             step_entry = result.get("step_registry")
             if step_entry:
                 step_registry_collector.append(step_entry)
