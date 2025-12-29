@@ -27,7 +27,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
-from scipy.signal import find_peaks, find_peaks_cwt, peak_prominences, peak_widths, savgol_filter
+from scipy.signal import (
+    PeakPropertyWarning,
+    find_peaks,
+    find_peaks_cwt,
+    peak_prominences,
+    peak_widths,
+    savgol_filter,
+)
 from scipy.optimize import curve_fit, OptimizeWarning
 from scipy.interpolate import UnivariateSpline
 from scipy.special import wofz
@@ -1667,6 +1674,21 @@ def detect_peak_candidates(
         local_noise_sigma,
         0.0,
     )
+    def _is_nonflat_peak(target: np.ndarray, idx: int) -> bool:
+        if idx < 0 or idx >= target.size:
+            return False
+        height = float(target[idx])
+        if not np.isfinite(height) or height <= 0:
+            return False
+        left = max(0, idx - 1)
+        right = min(target.size, idx + 2)
+        window = target[left:right]
+        if window.size < 2:
+            return False
+        finite = window[np.isfinite(window)]
+        if finite.size < 2:
+            return False
+        return float(np.nanmax(finite) - np.nanmin(finite)) > 0
     finite_local_floor = local_noise_floor[np.isfinite(local_noise_floor)]
     adaptive_fwhm_cm = float("nan")
     if min_distance_mode == "adaptive":
@@ -1681,7 +1703,18 @@ def detect_peak_candidates(
             peak_idxs, _ = find_peaks(target, prominence=prominence_value)
             if peak_idxs.size == 0:
                 return 0.0
-            widths, _, left_ips, right_ips = peak_widths(target, peak_idxs, rel_height=0.5)
+            valid_peak_idxs = [
+                int(idx) for idx in np.asarray(peak_idxs, dtype=int) if _is_nonflat_peak(target, int(idx))
+            ]
+            if not valid_peak_idxs:
+                return 0.0
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+                widths, _, left_ips, right_ips = peak_widths(
+                    target,
+                    valid_peak_idxs,
+                    rel_height=0.5,
+                )
             xs = np.arange(len(x), dtype=float)
             fwhm_values: List[float] = []
             for left_ip, right_ip, width in zip(left_ips, right_ips, widths):
@@ -1759,6 +1792,10 @@ def detect_peak_candidates(
 
     candidates: List[Dict[str, object]] = []
     fwhm_cache: Dict[Tuple[int, int], float] = {}
+    zero_width_peaks: set[Tuple[int, int]] = set()
+
+    def _mark_zero_width(index: int, polarity: int) -> None:
+        zero_width_peaks.add((int(index), int(polarity)))
 
     def _add_candidate(
         index: int,
@@ -1789,8 +1826,19 @@ def detect_peak_candidates(
             return fwhm_cache[cache_key]
         y_target = y_proc if polarity >= 0 else -y_proc
         fwhm_cm = float("nan")
+        if not _is_nonflat_peak(y_target, int(index)):
+            fwhm_cm = 0.0
+            _mark_zero_width(index, polarity)
+            fwhm_cache[cache_key] = fwhm_cm
+            return fwhm_cm
         try:
-            widths, _, left_ips, right_ips = peak_widths(y_target, [int(index)], rel_height=0.5)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+                widths, _, left_ips, right_ips = peak_widths(
+                    y_target,
+                    [int(index)],
+                    rel_height=0.5,
+                )
             if widths.size:
                 left_ip = float(left_ips[0])
                 right_ip = float(right_ips[0])
@@ -1805,6 +1853,8 @@ def detect_peak_candidates(
             fwhm_cm = float("nan")
         if not np.isfinite(fwhm_cm):
             fwhm_cm = 0.0
+        if fwhm_cm <= 0:
+            _mark_zero_width(index, polarity)
         fwhm_cache[cache_key] = fwhm_cm
         return fwhm_cm
 
@@ -2243,25 +2293,42 @@ def detect_peak_candidates(
     ) -> List[Dict[str, object]]:
         if not items:
             return []
-        indices = np.asarray([int(item["index"]) for item in items], dtype=int)
+        candidate_indices = [int(item["index"]) for item in items]
         target = y_proc if polarity >= 0 else -y_proc
+        valid_items: List[Dict[str, object]] = []
+        valid_indices: List[int] = []
+        for item, idx in zip(items, candidate_indices):
+            if _is_nonflat_peak(target, int(idx)):
+                valid_items.append(item)
+                valid_indices.append(int(idx))
+            else:
+                _mark_zero_width(idx, polarity)
+        if not valid_indices:
+            return []
+        indices = np.asarray(valid_indices, dtype=int)
         prominences = np.full(indices.shape, np.nan, dtype=float)
         widths = np.full(indices.shape, np.nan, dtype=float)
         try:
-            prominences, _, _ = peak_prominences(target, indices)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+                prominences, _, _ = peak_prominences(target, indices)
         except (ValueError, IndexError):
             pass
         try:
-            widths, _, _, _ = peak_widths(target, indices, rel_height=0.5)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+                widths, _, _, _ = peak_widths(target, indices, rel_height=0.5)
         except (ValueError, IndexError):
             pass
         filtered: List[Dict[str, object]] = []
-        for item, prominence_value, width_value in zip(items, prominences, widths):
+        for item, prominence_value, width_value in zip(valid_items, prominences, widths):
             prominence_value = float(prominence_value) if np.isfinite(prominence_value) else 0.0
             width_value = float(width_value) if np.isfinite(width_value) else 0.0
             item["prominence"] = prominence_value
             item["width_pts"] = width_value
             if prominence_value <= min_prominence or width_value <= min_width_pts:
+                if width_value <= min_width_pts:
+                    _mark_zero_width(item.get("index", 0), polarity)
                 continue
             filtered.append(item)
         return filtered
@@ -2273,6 +2340,13 @@ def detect_peak_candidates(
         [c for c in merged if int(c["polarity"]) == -1],
         polarity=-1,
     )
+    if zero_width_peaks:
+        log_line(
+            "Warning: zero-width peaks encountered "
+            f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'} "
+            f"count={len(zero_width_peaks)}",
+            stream=sys.stderr,
+        )
 
     if max_candidates > 0 and len(merged) > max_candidates:
         merged = sorted(
