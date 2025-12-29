@@ -2436,12 +2436,47 @@ def refine_peak_candidates(
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
     multi_fit_min_span_cm = float(_get_param(args, "multi_fit_min_span_cm", 10.0) or 0.0)
     results: List[Dict[str, object]] = []
+    timeout_skips = 0
+    total_candidates = len(candidates)
+    progress_every = int(_get_param(args, "fit_progress_every", 50) or 0)
+    progress_every = max(progress_every, 0)
+    processed_candidates = 0
+    next_progress = progress_every if progress_every else None
+
+    def mark_candidate_processed(count: int = 1) -> None:
+        nonlocal processed_candidates, next_progress
+        if count <= 0:
+            return
+        processed_candidates += count
+        if next_progress is None:
+            return
+        if processed_candidates >= next_progress:
+            log_line(
+                "Peak fit progress "
+                f"{processed_candidates}/{total_candidates} candidates "
+                f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}"
+            )
+            next_progress += progress_every
 
     def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
         sources = candidate.get("sources", [])
         return "shoulder" in sources or bool(candidate.get("close_peak"))
 
     def record_fit_failure(candidate_id: int, model_name: str, exc: BaseException) -> None:
+        nonlocal timeout_skips
+        if isinstance(exc, FitTimeoutError):
+            timeout_skips += 1
+            if fit_errors is not None:
+                fit_errors.append(
+                    {
+                        "file_path": file_path or "unknown",
+                        "spectrum_id": spectrum_id if spectrum_id is not None else "unknown",
+                        "candidate_id": candidate_id,
+                        "model": model_name,
+                        "error": "fit_timeout",
+                    }
+                )
+            return
         path_label = file_path or "unknown"
         spectrum_label = spectrum_id if spectrum_id is not None else "unknown"
         logger.warning(
@@ -2549,6 +2584,7 @@ def refine_peak_candidates(
                                 candidate.get("index", "unknown"),
                                 model,
                             )
+                            mark_candidate_processed()
                             continue
                         is_shoulder = _shoulder_candidate(candidate)
                         candidate_sources = list(candidate.get("sources", []))
@@ -2565,6 +2601,7 @@ def refine_peak_candidates(
                                     min_r2,
                                     candidate_sources,
                                 )
+                                mark_candidate_processed()
                                 continue
                         result = dict(fit_result)
                         result["candidate_id"] = int(candidate["candidate_id"])
@@ -2575,6 +2612,9 @@ def refine_peak_candidates(
                             result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
                             result["area"] = float(result.get("area", 0.0)) * -1
                         results.append(result)
+                        mark_candidate_processed()
+                else:
+                    mark_candidate_processed(len(cluster))
                     continue
             for candidate in cluster:
                 idx = int(candidate["index"])
@@ -2593,6 +2633,7 @@ def refine_peak_candidates(
                     x0_guess = (center_bounds[0] + center_bounds[1]) / 2.0
                 fit_source = fit_y_abs if use_absorbance else fit_y
                 fit = None
+                fit_timed_out = False
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("error", OptimizeWarning)
@@ -2609,21 +2650,26 @@ def refine_peak_candidates(
                             raise_on_error=True,
                         )
                 except (RuntimeError, OptimizeWarning, ValueError, FitTimeoutError) as exc:
+                    if isinstance(exc, FitTimeoutError):
+                        fit_timed_out = True
                     record_fit_failure(int(candidate["candidate_id"]), model, exc)
                 if not fit:
                     if plateau_bounds is None:
-                        logger.info(
-                            "Peak candidate dropped path=%s spectrum_id=%s candidate_id=%s "
-                            "index=%s reason=fit_failed model=%s",
-                            file_path or "unknown",
-                            spectrum_id if spectrum_id is not None else "unknown",
-                            candidate.get("candidate_id", "unknown"),
-                            candidate.get("index", "unknown"),
-                            model,
-                        )
+                        if not fit_timed_out:
+                            logger.info(
+                                "Peak candidate dropped path=%s spectrum_id=%s candidate_id=%s "
+                                "index=%s reason=fit_failed model=%s",
+                                file_path or "unknown",
+                                spectrum_id if spectrum_id is not None else "unknown",
+                                candidate.get("candidate_id", "unknown"),
+                                candidate.get("index", "unknown"),
+                                model,
+                            )
+                        mark_candidate_processed()
                         continue
                     xs, ys = _fit_peak_window(x, fit_source, idx, candidate_fit_window)
                     if xs.size < 3:
+                        mark_candidate_processed()
                         continue
                     local_idx = int(np.argmin(np.abs(xs - float(x[idx]))))
                     baseline = float(np.median(ys))
@@ -2655,6 +2701,7 @@ def refine_peak_candidates(
                                 candidate_min_r2,
                                 list(candidate.get("sources", [])),
                             )
+                            mark_candidate_processed()
                             continue
                 result = dict(fit)
                 result["candidate_id"] = int(candidate["candidate_id"])
@@ -2665,8 +2712,15 @@ def refine_peak_candidates(
                     result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
                     result["area"] = float(result.get("area", 0.0)) * -1
                 results.append(result)
+                mark_candidate_processed()
 
     results.sort(key=lambda r: (int(r.get("index", 0)), int(r.get("candidate_id", 0))))
+    if timeout_skips:
+        log_line(
+            "Peak fit timeouts "
+            f"skipped={timeout_skips} candidates "
+            f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}"
+        )
     return results
 
 def init_db(outdir:str):
@@ -2854,6 +2908,10 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
 
                     processed_spectra+=1
                     max_points=max(max_points,len(x_clean))
+                    log_line(
+                        f"Indexing spectrum {sid + 1}/{len(Y)} "
+                        f"path={path} points={len(x_clean)}"
+                    )
 
                     set_stage(f"preprocess_spectrum_{sid}")
                     y_for_processing=convert_y_for_processing(y_clean,y_units)
@@ -2938,6 +2996,11 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                         file_path=path,
                         spectrum_id=sid,
                         fit_errors=fit_errors,
+                    )
+                    log_line(
+                        "Spectrum fit summary "
+                        f"path={path} spectrum_id={sid} "
+                        f"candidates={len(peak_candidates)} refined={len(refined)}"
                     )
                     refined_overlay = [
                         {
