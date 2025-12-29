@@ -22,8 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, threading, queue
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -48,8 +47,6 @@ from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
-_WORKER_DB_PATH: Optional[str] = None
-
 
 class UnsupportedSpectrumError(RuntimeError):
     """Raised when the JCAMP headers do not describe an FTIR spectrum."""
@@ -3334,48 +3331,177 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     )
 
 
-def get_worker_db_path(index_dir: str) -> str:
-    global _WORKER_DB_PATH
-    if _WORKER_DB_PATH is None:
-        os.makedirs(index_dir, exist_ok=True)
-        pid = os.getpid()
-        db_path = os.path.join(index_dir, f"peaks_worker_{pid}.duckdb")
-        if os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-            except OSError:
-                pass
-        _WORKER_DB_PATH = db_path
-    return _WORKER_DB_PATH
-
-
-def index_file_worker(
-    path: str,
-    index_dir: str,
+def process_spectrum_task(
+    task: Dict[str, object],
     args: argparse.Namespace,
-    progress_queue: Optional[object] = None,
 ) -> Dict[str, object]:
-    db_path = get_worker_db_path(index_dir)
-    con = init_db(os.path.dirname(db_path), db_path=db_path)
-    step_registry_collector: List[Dict[str, object]] = []
-    try:
-        n_s, n_p, progress_events = index_file(
-            path,
-            con,
-            args,
-            step_registry_collector=step_registry_collector,
-            progress_queue=progress_queue,
-        )
-    finally:
-        con.close()
-    return {
-        "path": path,
-        "db_path": db_path,
-        "spectra": n_s,
-        "peaks": n_p,
-        "step_registry": step_registry_collector,
-        "progress": progress_events,
+    path = str(task["file_path"])
+    file_id = str(task["file_id"])
+    spectrum_id = int(task["spectrum_id"])
+    x = np.asarray(task["x"], dtype=float)
+    y = np.asarray(task["y"], dtype=float)
+    headers = task.get("headers") or {}
+    y_units = headers.get("YUNITS", "") if isinstance(headers, dict) else ""
+    resolution_cm = _parse_numeric(headers.get("RESOLUTION")) if isinstance(headers, dict) else None
+    step_metadata = {
+        "file_id": file_id,
+        "spectrum_id": spectrum_id,
+        "y_units": y_units,
+        "processing": {
+            "sg_win": int(args.sg_win),
+            "sg_poly": int(args.sg_poly),
+            "sg_window_cm": float(args.sg_window_cm or 0.0),
+            "als_lam": float(args.als_lam),
+            "als_p": float(args.als_p),
+            "baseline_method": str(args.baseline_method),
+            "baseline_niter": int(args.baseline_niter),
+            "baseline_piecewise": bool(args.baseline_piecewise),
+            "baseline_ranges": args.baseline_ranges,
+        },
     }
+    step_registry: List[Dict[str, object]] = []
+    if args.export_step_plots:
+        _append_processing_step(step_registry, "raw", x, y, step_metadata)
+    y_for_processing = convert_y_for_processing(y, y_units)
+    if args.export_step_plots:
+        _append_processing_step(
+            step_registry,
+            "absorbance_converted",
+            x,
+            y_for_processing,
+            step_metadata,
+        )
+    y_proc, noise_sigma = preprocess_with_noise(
+        x,
+        y_for_processing,
+        args.sg_win,
+        args.sg_poly,
+        args.als_lam,
+        args.als_p,
+        sg_window_cm=args.sg_window_cm,
+        baseline_method=args.baseline_method,
+        baseline_niter=args.baseline_niter,
+        baseline_piecewise=args.baseline_piecewise,
+        baseline_ranges=args.baseline_ranges,
+        step_registry=step_registry if args.export_step_plots else None,
+        step_metadata=step_metadata,
+    )
+    peak_candidates = detect_peak_candidates(
+        x,
+        y_proc,
+        noise_sigma,
+        args,
+        resolution_cm=resolution_cm,
+        file_path=path,
+        spectrum_id=spectrum_id,
+    )
+    if args.export_step_plots:
+        peak_overlay = [
+            {
+                "index": int(candidate["index"]),
+                "x": float(x[int(candidate["index"])]),
+                "wavenumber": float(x[int(candidate["index"])]),
+                "y": float(y_proc[int(candidate["index"])]),
+                "polarity": int(candidate.get("polarity", 1)),
+                "score": float(candidate.get("score", 0.0)),
+                "sources": sorted(candidate.get("sources", [])),
+            }
+            for candidate in peak_candidates
+            if 0 <= int(candidate["index"]) < len(x)
+        ]
+        _append_processing_step(
+            step_registry,
+            "candidate_peaks_overlay",
+            x,
+            y_proc,
+            step_metadata,
+            extra_metadata={"candidates": peak_overlay},
+        )
+    fit_errors: List[Dict[str, object]] = []
+    refined, skipped_due_to_timeout = refine_peak_candidates(
+        x,
+        y_proc,
+        peak_candidates,
+        args,
+        y_abs=y_for_processing,
+        file_path=path,
+        spectrum_id=spectrum_id,
+        fit_errors=fit_errors,
+        progress_callback=None,
+    )
+    if args.export_step_plots:
+        refined_overlay = [
+            {
+                "index": int(fit.get("index", -1)),
+                "wavenumber": float(fit.get("center", float("nan"))),
+                "center": float(fit.get("center", float("nan"))),
+                "polarity": int(fit.get("polarity", 1)),
+                "r2": float(fit.get("r2", float("nan"))),
+            }
+            for fit in refined
+        ]
+        _append_processing_step(
+            step_registry,
+            "refined_peaks_overlay",
+            x,
+            y_proc,
+            step_metadata,
+            extra_metadata={"peaks": refined_overlay},
+        )
+    peaks_rows: List[Tuple[object, ...]] = []
+    for pid, fit in enumerate(refined):
+        peaks_rows.append(
+            (
+                file_id,
+                spectrum_id,
+                int(fit.get("candidate_id", pid)),
+                int(fit.get("polarity", 1)),
+                fit["center"],
+                fit["fwhm"],
+                fit["amplitude"],
+                fit["area"],
+                fit["r2"],
+            )
+        )
+    return {
+        "file_path": path,
+        "file_id": file_id,
+        "spectrum_id": spectrum_id,
+        "peaks_rows": peaks_rows,
+        "candidates": len(peak_candidates),
+        "refined": len(refined),
+        "skipped_due_to_timeout": skipped_due_to_timeout,
+        "step_registry": (
+            {
+                "file_id": file_id,
+                "spectrum_id": spectrum_id,
+                "steps": step_registry,
+            }
+            if args.export_step_plots
+            else None
+        ),
+    }
+
+
+def spectrum_worker(
+    task_queue: multiprocessing.Queue,
+    result_queue: multiprocessing.Queue,
+    args: argparse.Namespace,
+) -> None:
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+        try:
+            result = process_spectrum_task(task, args)
+        except Exception as exc:
+            result = {
+                "file_path": task.get("file_path"),
+                "file_id": task.get("file_id"),
+                "spectrum_id": task.get("spectrum_id"),
+                "error": str(exc),
+            }
+        result_queue.put(result)
 
 
 def main():
@@ -3643,96 +3769,177 @@ def main():
     log_line(
         f"Found {total_discovered} JCAMP file(s) ({total_files} to index). Starting indexing..."
     )
-    total_specs=0;total_peaks=0
+    total_specs = 0
+    total_peaks = 0
+    start_time = time.monotonic()
     step_registry_collector: List[Dict[str, object]] = []
-    worker_db_paths: set[str] = set()
     max_workers = min(4, os.cpu_count() or 1)
-    log_line(
-        "Using per-worker DuckDB files; worker results will be merged into "
-        f"{os.path.join(args.index_dir, 'peaks.duckdb')}."
-    )
-    manager = multiprocessing.Manager()
-    progress_queue = manager.Queue()
-    progress_stop = threading.Event()
+    task_queue: multiprocessing.Queue = multiprocessing.Queue()
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    workers: List[multiprocessing.Process] = []
+    con = init_db(args.index_dir)
 
-    def progress_consumer() -> None:
-        while True:
-            try:
-                item = progress_queue.get(timeout=0.5)
-            except queue.Empty:
-                if progress_stop.is_set():
-                    break
-                continue
-            if item is None:
-                break
-            log_line(format_progress_line(item))
-
-    progress_thread = threading.Thread(target=progress_consumer, name="progress-consumer")
-    progress_thread.start()
-
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for p in files_to_index:
-            future = executor.submit(index_file_worker, p, args.index_dir, args, progress_queue)
-            futures[future] = p
-        completed = 0
-        for future in as_completed(futures):
-            result = future.result()
-            completed += 1
-            path = result.get("path") or futures.get(future, "unknown")
-            spectra_count = int(result.get("spectra", 0) or 0)
-            peak_count = int(result.get("peaks", 0) or 0)
-            log_line(
-                f"[{completed}/{total_files}] Indexed {path} "
-                f"(spectra={spectra_count} peaks={peak_count})"
-            )
-            total_specs += spectra_count
-            total_peaks += peak_count
-            db_path = result.get("db_path")
-            if db_path:
-                worker_db_paths.add(str(db_path))
-            steps = result.get("step_registry") or []
-            if steps:
-                step_registry_collector.extend(steps)
-    progress_stop.set()
-    try:
-        progress_queue.put(None)
-    except Exception:
-        pass
-    progress_thread.join(timeout=5)
-    manager.shutdown()
-    if worker_db_paths:
-        main_db_path = os.path.join(args.index_dir, "peaks.duckdb")
-        log_line(
-            f"Merging {len(worker_db_paths)} worker DuckDB file(s) into {main_db_path}."
-        )
-        con = init_db(args.index_dir)
+    def persist_ingest_error(file_path: str, message: str) -> None:
         try:
-            for idx, db_path in enumerate(sorted(worker_db_paths), 1):
-                if not os.path.isfile(db_path):
-                    log_line(f"Skipping missing worker DB {db_path}", stream=sys.stderr)
+            con.execute(
+                """
+                INSERT INTO ingest_errors (file_path,error)
+                VALUES (?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    error=excluded.error,
+                    occurred_at=now()
+                """,
+                [file_path, message],
+            )
+        except Exception:
+            logger.debug("Failed to record ingest error for %s", file_path, exc_info=True)
+
+    for _ in range(max_workers):
+        proc = multiprocessing.Process(
+            target=spectrum_worker,
+            args=(task_queue, result_queue, args),
+            daemon=True,
+        )
+        proc.start()
+        workers.append(proc)
+
+    file_state: Dict[str, Dict[str, object]] = {}
+    total_tasks = 0
+    for path in files_to_index:
+        current_stage = "parse_headers"
+        timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
+        try:
+            with _FileTimeoutGuard(timeout_seconds, path, lambda: current_stage):
+                headers = parse_jdx_headers(path)
+                try:
+                    is_ftir_spectrum(headers)
+                except UnsupportedSpectrumError as exc:
+                    message = f"Unsupported spectrum type: {exc.descriptor}"
+                    logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+                    persist_ingest_error(path, message)
+                    if getattr(args, "strict", False) or getattr(args, "_collect_skips", False):
+                        raise
                     continue
-                schema_name = f"worker_{idx}"
-                escaped_path = db_path.replace("'", "''")
-                con.execute(f"ATTACH '{escaped_path}' AS {schema_name}")
-                con.execute(
-                    f"INSERT OR REPLACE INTO spectra SELECT * FROM {schema_name}.spectra"
+                try:
+                    current_stage = "parse_spectra"
+                    x, Y, headers = parse_jcamp_multispec(path)
+                except Exception as exc:
+                    logger.error("Failed to parse JCAMP file %s: %s", path, exc)
+                    persist_ingest_error(path, str(exc))
+                    if getattr(args, "strict", False):
+                        raise
+                    continue
+        except Exception as exc:
+            if isinstance(exc, FileTimeoutError):
+                message = f"Timeout: {exc}"
+                logger.error("File timed out %s: %s", path, exc)
+            else:
+                message = str(exc)
+                logger.error("Failed to index %s at stage %s: %s", path, current_stage, exc)
+            persist_ingest_error(path, message)
+            if getattr(args, "strict", False):
+                raise
+            continue
+
+        file_id = file_sha1(path)
+        con.execute("DELETE FROM ingest_errors WHERE file_path=?", [path])
+        store_headers(con, file_id, headers)
+        con.execute("DELETE FROM peaks WHERE file_id=?", [file_id])
+
+        max_points = 0
+        processed_spectra = 0
+        for sid, y in enumerate(Y):
+            x_clean, y_clean = sanitize_xy(x, y)
+            if x_clean.size == 0 or y_clean.size == 0:
+                continue
+            processed_spectra += 1
+            max_points = max(max_points, len(x_clean))
+            task_queue.put(
+                {
+                    "file_path": path,
+                    "file_id": file_id,
+                    "spectrum_id": sid,
+                    "x": x_clean,
+                    "y": y_clean,
+                    "headers": headers,
+                }
+            )
+            total_tasks += 1
+        file_state[path] = {
+            "file_id": file_id,
+            "n_spectra": processed_spectra,
+            "max_points": max_points,
+            "peaks": 0,
+        }
+        if processed_spectra == 0:
+            con.execute(
+                "UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?",
+                [path, max_points, processed_spectra, file_id],
+            )
+
+    for _ in workers:
+        task_queue.put(None)
+
+    completed_tasks = 0
+    con.execute("BEGIN TRANSACTION")
+    try:
+        while completed_tasks < total_tasks:
+            result = result_queue.get()
+            completed_tasks += 1
+            if result.get("error"):
+                message = str(result.get("error"))
+                file_path = str(result.get("file_path"))
+                spectrum_id = result.get("spectrum_id")
+                log_line(
+                    f"Failed spectrum path={file_path} spectrum_id={spectrum_id}: {message}",
+                    stream=sys.stderr,
                 )
-                con.execute(
-                    f"INSERT OR REPLACE INTO peaks SELECT * FROM {schema_name}.peaks"
+                persist_ingest_error(file_path, message)
+                continue
+            peaks_rows = result.get("peaks_rows") or []
+            if peaks_rows:
+                con.executemany(
+                    "INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)",
+                    peaks_rows,
                 )
-                con.execute(
-                    f"INSERT OR REPLACE INTO ingest_errors "
-                    f"SELECT * FROM {schema_name}.ingest_errors"
+            file_path = str(result.get("file_path"))
+            spectrum_id = result.get("spectrum_id")
+            candidates = result.get("candidates")
+            refined = result.get("refined")
+            skipped = result.get("skipped_due_to_timeout")
+            log_line(
+                format_progress_line(
+                    {
+                        "file": file_path,
+                        "spectrum_id": spectrum_id,
+                        "stage": "spectrum_complete",
+                        "elapsed_sec": round(time.monotonic() - start_time, 3),
+                        "candidates": candidates,
+                        "refined": refined,
+                        "skipped_due_to_timeout": skipped,
+                    }
                 )
-                con.execute(f"DETACH {schema_name}")
-        finally:
-            con.close()
-        for db_path in worker_db_paths:
-            try:
-                os.remove(db_path)
-            except OSError:
-                log_line(f"Failed to remove worker DB {db_path}", stream=sys.stderr)
+            )
+            total_specs += 1
+            total_peaks += len(peaks_rows)
+            state = file_state.get(file_path)
+            if state is not None:
+                state["peaks"] = int(state.get("peaks", 0)) + len(peaks_rows)
+            step_entry = result.get("step_registry")
+            if step_entry:
+                step_registry_collector.append(step_entry)
+    finally:
+        con.execute("COMMIT")
+
+    for proc in workers:
+        proc.join(timeout=5)
+
+    for path, state in file_state.items():
+        file_id = state["file_id"]
+        con.execute(
+            "UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?",
+            [path, state.get("max_points", 0), state.get("n_spectra", 0), file_id],
+        )
     if args.export_step_plots and step_registry_collector:
         export_dir = args.export_step_plots_dir or os.path.join(args.index_dir, "debug_plots")
         for entry in step_registry_collector:
