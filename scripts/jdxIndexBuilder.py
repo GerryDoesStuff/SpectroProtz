@@ -23,6 +23,7 @@ Notes
 
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
+from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 from scipy.signal import find_peaks, find_peaks_cwt, peak_prominences, peak_widths, savgol_filter
@@ -3001,6 +3002,11 @@ def persist_consensus(con,fc,gc):
             gc[['cluster_id','polarity','center','support']].itertuples(index=False,name=None)
         )
 
+def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    print(f"{timestamp} {msg}", file=stream, flush=flush)
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ap=argparse.ArgumentParser()
@@ -3179,20 +3185,23 @@ def main():
     if not args.no_prompt_export or args.prompt_export:
         if sys.stdin is None or not sys.stdin.isatty():
             if args.export_step_plots:
-                print(
+                log_line(
                     "Interactive prompt unavailable; using --export-step-plots setting.",
-                    file=sys.stderr,
+                    stream=sys.stderr,
                 )
             else:
-                print(
+                log_line(
                     "Interactive prompt unavailable; skipping step workbook exports.",
-                    file=sys.stderr,
+                    stream=sys.stderr,
                 )
         else:
             default_answer = "y" if args.export_step_plots else "n"
             prompt_hint = "[Y/n]" if default_answer == "y" else "[y/N]"
             while True:
-                response = input(f"Export step Excel workbooks? {prompt_hint}: ").strip().lower()
+                response = input(
+                    f"{datetime.now().isoformat(timespec='seconds')} "
+                    f"Export step Excel workbooks? {prompt_hint}: "
+                ).strip().lower()
                 if response in {"y", "yes"}:
                     args.export_step_plots = True
                     break
@@ -3202,26 +3211,31 @@ def main():
                 if response == "":
                     args.export_step_plots = default_answer == "y"
                     break
-                print("Please enter 'y' or 'n'.", file=sys.stderr)
+                log_line("Please enter 'y' or 'n'.", stream=sys.stderr)
             if args.export_step_plots:
                 prompt_suffix = ""
                 if args.export_step_plots_dir:
                     prompt_suffix = f" (current: {args.export_step_plots_dir})"
                 response = input(
+                    f"{datetime.now().isoformat(timespec='seconds')} "
                     "Output directory for step XLSX exports (leave blank for default)"
                     f"{prompt_suffix}: "
                 ).strip()
                 if response:
                     args.export_step_plots_dir = response
-    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     con=init_db(args.index_dir)
     files=[p for p in glob.glob(os.path.join(args.data_dir,'**','*'),recursive=True) if os.path.isfile(p) and re.search(r'\.(jdx|dx)$',p,re.I)]
     total_files=len(files)
-    print(f'Found {total_files} JCAMP file(s). Starting indexing...')
+    log_line(f"Found {total_files} JCAMP file(s). Starting indexing...")
     total_specs=0;total_peaks=0
     step_registry_collector: List[Dict[str, object]] = []
     for idx,p in enumerate(files,1):
-        print(f'[{idx}/{total_files}] Indexing {p}', file=sys.stdout, flush=True)
+        log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
         try:
             n_s,n_p=index_file(p,con,args,step_registry_collector=step_registry_collector)
         except UnsupportedSpectrumError:
@@ -3243,11 +3257,14 @@ def main():
                 output_path,
                 plot_max_points=args.plot_max_points,
             )
-    print('Building file-level consensus clusters...', file=sys.stdout, flush=True)
+    log_line("Building file-level consensus clusters...", flush=True)
     fc=build_file_consensus(con,args)
-    print('Building global consensus clusters...', file=sys.stdout, flush=True)
+    log_line("Building global consensus clusters...", flush=True)
     gc=build_global_consensus(con,fc,args)
     persist_consensus(con,fc,gc)
-    print(f'Indexed spectra: {total_specs} | Peaks: {total_peaks} | File clusters: {len(fc)} | Global: {len(gc)}')
+    log_line(
+        f"Indexed spectra: {total_specs} | Peaks: {total_peaks} | "
+        f"File clusters: {len(fc)} | Global: {len(gc)}"
+    )
     con.close()
 if __name__=='__main__': main()
