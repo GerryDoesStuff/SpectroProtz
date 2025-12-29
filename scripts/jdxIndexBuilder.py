@@ -3318,16 +3318,28 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     candidates = progress.get("candidates")
     refined = progress.get("refined")
     skipped = progress.get("skipped_due_to_timeout")
+    completed = progress.get("completed")
+    total = progress.get("total")
+    file_done = progress.get("file_done")
+    file_total = progress.get("file_total")
     elapsed_str = f"{elapsed:.1f}" if isinstance(elapsed, (int, float)) else "n/a"
     spectrum_str = spectrum_id if spectrum_id is not None else "unknown"
     candidates_str = candidates if candidates is not None else "n/a"
     refined_str = refined if refined is not None else "n/a"
     skipped_str = skipped if skipped is not None else "n/a"
+    completed_str = completed if completed is not None else "n/a"
+    total_str = total if total is not None else "n/a"
+    file_done_str = file_done if file_done is not None else "n/a"
+    file_total_str = file_total if file_total is not None else "n/a"
+    file_progress = ""
+    if file_done is not None or file_total is not None:
+        file_progress = f" file_progress=[{file_done_str}/{file_total_str}]"
     return (
         "Progress "
         f"file={file_path} spectrum_id={spectrum_str} stage={stage} "
         f"elapsed_sec={elapsed_str} candidates={candidates_str} "
-        f"refined={refined_str} skipped_due_to_timeout={skipped_str}"
+        f"refined={refined_str} skipped_due_to_timeout={skipped_str} "
+        f"progress=[{completed_str}/{total_str}]{file_progress}"
     )
 
 
@@ -3870,6 +3882,7 @@ def main():
             "n_spectra": processed_spectra,
             "max_points": max_points,
             "peaks": 0,
+            "completed_spectra": 0,
         }
         if processed_spectra == 0:
             con.execute(
@@ -3907,6 +3920,13 @@ def main():
             candidates = result.get("candidates")
             refined = result.get("refined")
             skipped = result.get("skipped_due_to_timeout")
+            file_done = None
+            file_total = None
+            state = file_state.get(file_path)
+            if state is not None:
+                state["completed_spectra"] = int(state.get("completed_spectra", 0)) + 1
+                file_done = state.get("completed_spectra")
+                file_total = state.get("n_spectra")
             log_line(
                 format_progress_line(
                     {
@@ -3917,12 +3937,15 @@ def main():
                         "candidates": candidates,
                         "refined": refined,
                         "skipped_due_to_timeout": skipped,
+                        "completed": completed_tasks,
+                        "total": total_tasks,
+                        "file_done": file_done,
+                        "file_total": file_total,
                     }
                 )
             )
             total_specs += 1
             total_peaks += len(peaks_rows)
-            state = file_state.get(file_path)
             if state is not None:
                 state["peaks"] = int(state.get("peaks", 0)) + len(peaks_rows)
             step_entry = result.get("step_registry")
