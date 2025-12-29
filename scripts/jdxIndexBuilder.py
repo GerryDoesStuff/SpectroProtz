@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -3327,6 +3327,55 @@ def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
+def configure_warning_logging(peak_warning_limit: int = 5) -> None:
+    logging.captureWarnings(True)
+    warning_counts: Dict[str, int] = {}
+    suppressed_counts: Dict[str, int] = {}
+
+    def _showwarning(
+        message: warnings.WarningMessage | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file=None,
+        line: Optional[str] = None,
+    ) -> None:
+        warning_type = category.__name__ if category else "Warning"
+        filename_key = filename or "unknown"
+        if issubclass(category, PeakPropertyWarning):
+            seen = warning_counts.get(filename_key, 0)
+            warning_counts[filename_key] = seen + 1
+            if peak_warning_limit is not None and seen >= peak_warning_limit:
+                suppressed_counts[filename_key] = suppressed_counts.get(filename_key, 0) + 1
+                if seen == peak_warning_limit:
+                    log_line(
+                        f"PeakPropertyWarning rate limit reached for {filename_key}; "
+                        "suppressing further warnings.",
+                        stream=sys.stderr,
+                    )
+                return
+        log_line(
+            f"Warning {warning_type} at {filename}:{lineno}: {message}",
+            stream=sys.stderr,
+        )
+        if line:
+            log_line(f"  {line}", stream=sys.stderr)
+
+    def _emit_peak_warning_summary() -> None:
+        if not suppressed_counts:
+            return
+        for filename_key, suppressed in suppressed_counts.items():
+            if suppressed:
+                log_line(
+                    f"Suppressed {suppressed} additional PeakPropertyWarning(s) from {filename_key} "
+                    f"after first {peak_warning_limit}.",
+                    stream=sys.stderr,
+                )
+
+    warnings.showwarning = _showwarning
+    atexit.register(_emit_peak_warning_summary)
+
+
 def format_progress_line(progress: Dict[str, object]) -> str:
     file_path = progress.get("file") or "unknown"
     spectrum_id = progress.get("spectrum_id")
@@ -3762,6 +3811,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    configure_warning_logging()
     existing_file_ids: set[str] = set()
     existing_paths: set[str] = set()
     existing_db_path = os.path.join(script_dir, "peaks.duckdb")
