@@ -1713,13 +1713,16 @@ def detect_peak_candidates(
             ]
             if not valid_peak_idxs:
                 return 0.0
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+            nonlocal suppressed_peak_property_warnings
+            caught: List[warnings.WarningMessage] = []
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.filterwarnings("always", category=PeakPropertyWarning)
                 widths, _, left_ips, right_ips = peak_widths(
                     target,
                     valid_peak_idxs,
                     rel_height=0.5,
                 )
+            suppressed_peak_property_warnings += _count_peak_property_warnings(caught)
             xs = np.arange(len(x), dtype=float)
             fwhm_values: List[float] = []
             for left_ip, right_ip, width in zip(left_ips, right_ips, widths):
@@ -1798,6 +1801,12 @@ def detect_peak_candidates(
     candidates: List[Dict[str, object]] = []
     fwhm_cache: Dict[Tuple[int, int], float] = {}
     zero_width_peaks: set[Tuple[int, int]] = set()
+    suppressed_peak_property_warnings = 0
+
+    def _count_peak_property_warnings(caught: List[warnings.WarningMessage]) -> int:
+        return sum(
+            1 for warning in caught if issubclass(warning.category, PeakPropertyWarning)
+        )
 
     def _mark_zero_width(index: int, polarity: int) -> None:
         zero_width_peaks.add((int(index), int(polarity)))
@@ -1826,6 +1835,7 @@ def detect_peak_candidates(
         )
 
     def _estimate_fwhm_cm(index: int, polarity: int) -> float:
+        nonlocal suppressed_peak_property_warnings
         cache_key = (int(index), int(polarity))
         if cache_key in fwhm_cache:
             return fwhm_cache[cache_key]
@@ -1836,9 +1846,10 @@ def detect_peak_candidates(
             _mark_zero_width(index, polarity)
             fwhm_cache[cache_key] = fwhm_cm
             return fwhm_cm
+        caught: List[warnings.WarningMessage] = []
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.filterwarnings("always", category=PeakPropertyWarning)
                 widths, _, left_ips, right_ips = peak_widths(
                     y_target,
                     [int(index)],
@@ -1856,6 +1867,7 @@ def detect_peak_candidates(
                     fwhm_cm = float(widths[0]) * step_cm
         except (ValueError, IndexError):
             fwhm_cm = float("nan")
+        suppressed_peak_property_warnings += _count_peak_property_warnings(caught)
         if not np.isfinite(fwhm_cm):
             fwhm_cm = 0.0
         if fwhm_cm <= 0:
@@ -2296,6 +2308,7 @@ def detect_peak_candidates(
         *,
         polarity: int,
     ) -> List[Dict[str, object]]:
+        nonlocal suppressed_peak_property_warnings
         if not items:
             return []
         candidate_indices = [int(item["index"]) for item in items]
@@ -2313,18 +2326,22 @@ def detect_peak_candidates(
         indices = np.asarray(valid_indices, dtype=int)
         prominences = np.full(indices.shape, np.nan, dtype=float)
         widths = np.full(indices.shape, np.nan, dtype=float)
+        caught_prominences: List[warnings.WarningMessage] = []
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+            with warnings.catch_warnings(record=True) as caught_prominences:
+                warnings.filterwarnings("always", category=PeakPropertyWarning)
                 prominences, _, _ = peak_prominences(target, indices)
         except (ValueError, IndexError):
             pass
+        suppressed_peak_property_warnings += _count_peak_property_warnings(caught_prominences)
+        caught_widths: List[warnings.WarningMessage] = []
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=PeakPropertyWarning)
+            with warnings.catch_warnings(record=True) as caught_widths:
+                warnings.filterwarnings("always", category=PeakPropertyWarning)
                 widths, _, _, _ = peak_widths(target, indices, rel_height=0.5)
         except (ValueError, IndexError):
             pass
+        suppressed_peak_property_warnings += _count_peak_property_warnings(caught_widths)
         filtered: List[Dict[str, object]] = []
         for item, prominence_value, width_value in zip(valid_items, prominences, widths):
             prominence_value = float(prominence_value) if np.isfinite(prominence_value) else 0.0
@@ -2345,11 +2362,11 @@ def detect_peak_candidates(
         [c for c in merged if int(c["polarity"]) == -1],
         polarity=-1,
     )
-    if zero_width_peaks:
+    if suppressed_peak_property_warnings:
         log_line(
             "Warning: zero-width peaks encountered "
             f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'} "
-            f"count={len(zero_width_peaks)}",
+            f"count={suppressed_peak_property_warnings}",
             stream=sys.stderr,
         )
 
