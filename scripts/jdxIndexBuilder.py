@@ -27,8 +27,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
+try:
+    from scipy.signal import PeakPropertyWarning
+except ImportError:  # pragma: no cover - handled by fallback imports
+    try:
+        from scipy.signal._peak_finding import PeakPropertyWarning
+    except ImportError:  # pragma: no cover - fallback definition
+        class PeakPropertyWarning(UserWarning):
+            pass
 from scipy.signal import (
-    PeakPropertyWarning,
     find_peaks,
     find_peaks_cwt,
     peak_prominences,
