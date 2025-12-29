@@ -3003,8 +3003,12 @@ def persist_consensus(con,fc,gc):
             gc[['cluster_id','polarity','center','support']].itertuples(index=False,name=None)
         )
 
+def timestamp_now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = timestamp_now()
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
@@ -3218,9 +3222,9 @@ def main():
             default_answer = "y" if args.export_step_plots else "n"
             prompt_hint = "[Y/n]" if default_answer == "y" else "[y/N]"
             while True:
+                prompt_timestamp = timestamp_now()
                 response = input(
-                    f"{datetime.now().isoformat(timespec='seconds')} "
-                    f"Export step Excel workbooks? {prompt_hint}: "
+                    f"[{prompt_timestamp}] Export step Excel workbooks? {prompt_hint}: "
                 ).strip().lower()
                 if response in {"y", "yes"}:
                     args.export_step_plots = True
@@ -3236,9 +3240,10 @@ def main():
                 prompt_suffix = ""
                 if args.export_step_plots_dir:
                     prompt_suffix = f" (current: {args.export_step_plots_dir})"
+                prompt_timestamp = timestamp_now()
                 response = input(
-                    f"{datetime.now().isoformat(timespec='seconds')} "
-                    "Output directory for step XLSX exports (leave blank for default)"
+                    f"[{prompt_timestamp}] Output directory for step XLSX exports "
+                    "(leave blank for default)"
                     f"{prompt_suffix}: "
                 ).strip()
                 if response:
