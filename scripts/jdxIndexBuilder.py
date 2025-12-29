@@ -4014,6 +4014,11 @@ def main():
     if heartbeat_throttle <= 0:
         heartbeat_throttle = 30.0
     last_heartbeat_log: Dict[int, float] = {}
+    batch_commit_size = 500
+    batch_commit_interval = 30.0
+    batch_spectra = 0
+    last_commit_time = time.monotonic()
+    in_transaction = True
     con.execute("BEGIN TRANSACTION")
     try:
         while completed_tasks < total_tasks:
@@ -4103,8 +4108,25 @@ def main():
             step_entry = result.get("step_registry")
             if step_entry:
                 step_registry_collector.append(step_entry)
+            batch_spectra += 1
+            now = time.monotonic()
+            should_commit = batch_spectra >= batch_commit_size
+            should_commit = should_commit or (
+                batch_spectra > 0 and now - last_commit_time >= batch_commit_interval
+            )
+            if should_commit and in_transaction:
+                con.execute("COMMIT")
+                in_transaction = False
+                log_line(
+                    f"Committed batch spectra={batch_spectra} total_completed={completed_tasks}"
+                )
+                batch_spectra = 0
+                last_commit_time = time.monotonic()
+                con.execute("BEGIN TRANSACTION")
+                in_transaction = True
     finally:
-        con.execute("COMMIT")
+        if in_transaction:
+            con.execute("COMMIT")
 
     for proc in workers:
         proc.join(timeout=5)
