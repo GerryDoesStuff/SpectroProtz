@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit, threading
 from datetime import datetime
 from typing import Callable, List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -3385,6 +3385,7 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     file_path = progress.get("file") or "unknown"
     spectrum_id = progress.get("spectrum_id")
     stage = progress.get("stage") or "unknown"
+    worker_id = progress.get("worker_id")
     elapsed = progress.get("elapsed_sec")
     candidates = progress.get("candidates")
     refined = progress.get("refined")
@@ -3405,9 +3406,10 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     file_progress = ""
     if file_done is not None or file_total is not None:
         file_progress = f" file_progress=[{file_done_str}/{file_total_str}]"
+    worker_str = f" worker_id={worker_id}" if worker_id is not None else ""
     return (
         "Progress "
-        f"file={file_path} spectrum_id={spectrum_str} stage={stage} "
+        f"file={file_path} spectrum_id={spectrum_str} stage={stage}{worker_str} "
         f"elapsed_sec={elapsed_str} candidates={candidates_str} "
         f"refined={refined_str} skipped_due_to_timeout={skipped_str} "
         f"progress=[{completed_str}/{total_str}]{file_progress}"
@@ -3570,11 +3572,29 @@ def spectrum_worker(
     task_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
     args: argparse.Namespace,
+    worker_id: int,
 ) -> None:
     while True:
         task = task_queue.get()
         if task is None:
             break
+        stop_event = threading.Event()
+        heartbeat_thread = None
+        heartbeat_interval = float(getattr(args, "progress_interval_sec", 0) or 0)
+        if heartbeat_interval > 0:
+            def _emit_heartbeats() -> None:
+                payload = {
+                    "stage": "heartbeat",
+                    "worker_id": worker_id,
+                    "file_path": task.get("file_path"),
+                    "spectrum_id": task.get("spectrum_id"),
+                }
+                result_queue.put(payload)
+                while not stop_event.wait(timeout=heartbeat_interval):
+                    result_queue.put(payload)
+
+            heartbeat_thread = threading.Thread(target=_emit_heartbeats, daemon=True)
+            heartbeat_thread.start()
         try:
             result = process_spectrum_task(task, args)
         except Exception as exc:
@@ -3582,8 +3602,15 @@ def spectrum_worker(
                 "file_path": task.get("file_path"),
                 "file_id": task.get("file_id"),
                 "spectrum_id": task.get("spectrum_id"),
+                "worker_id": worker_id,
                 "error": str(exc),
             }
+        else:
+            result["worker_id"] = worker_id
+        finally:
+            stop_event.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=heartbeat_interval or 1.0)
         result_queue.put(result)
 
 
@@ -3882,10 +3909,10 @@ def main():
         except Exception:
             logger.debug("Failed to record ingest error for %s", file_path, exc_info=True)
 
-    for _ in range(max_workers):
+    for worker_id in range(max_workers):
         proc = multiprocessing.Process(
             target=spectrum_worker,
-            args=(task_queue, result_queue, args),
+            args=(task_queue, result_queue, args, worker_id),
             daemon=True,
         )
         proc.start()
@@ -3974,10 +4001,35 @@ def main():
         task_queue.put(None)
 
     completed_tasks = 0
+    heartbeat_throttle = float(getattr(args, "progress_interval_sec", 0) or 0)
+    if heartbeat_throttle <= 0:
+        heartbeat_throttle = 30.0
+    last_heartbeat_log: Dict[int, float] = {}
     con.execute("BEGIN TRANSACTION")
     try:
         while completed_tasks < total_tasks:
             result = result_queue.get()
+            if result.get("stage") == "heartbeat":
+                worker_id = result.get("worker_id")
+                now = time.monotonic()
+                if isinstance(worker_id, int):
+                    last_logged = last_heartbeat_log.get(worker_id, 0.0)
+                    if now - last_logged >= heartbeat_throttle:
+                        last_heartbeat_log[worker_id] = now
+                        log_line(
+                            format_progress_line(
+                                {
+                                    "file": result.get("file_path"),
+                                    "spectrum_id": result.get("spectrum_id"),
+                                    "stage": "heartbeat",
+                                    "worker_id": worker_id,
+                                    "elapsed_sec": round(now - start_time, 3),
+                                    "completed": completed_tasks,
+                                    "total": total_tasks,
+                                }
+                            )
+                        )
+                continue
             completed_tasks += 1
             if result.get("error"):
                 message = str(result.get("error"))
@@ -4013,6 +4065,7 @@ def main():
                         "file": file_path,
                         "spectrum_id": spectrum_id,
                         "stage": "spectrum_complete",
+                        "worker_id": result.get("worker_id"),
                         "elapsed_sec": round(time.monotonic() - start_time, 3),
                         "candidates": candidates,
                         "refined": refined,
