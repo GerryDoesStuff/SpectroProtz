@@ -3894,18 +3894,22 @@ def main():
                 }
             )
             total_tasks += 1
+        log_line(f"Indexing {path} spectra={processed_spectra}")
         file_state[path] = {
             "file_id": file_id,
             "n_spectra": processed_spectra,
             "max_points": max_points,
             "peaks": 0,
             "completed_spectra": 0,
+            "done_logged": False,
         }
         if processed_spectra == 0:
             con.execute(
                 "UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?",
                 [path, max_points, processed_spectra, file_id],
             )
+            file_state[path]["done_logged"] = True
+            log_line(f"Indexed {path} spectra=0")
 
     for _ in workers:
         task_queue.put(None)
@@ -3965,6 +3969,13 @@ def main():
             total_peaks += len(peaks_rows)
             if state is not None:
                 state["peaks"] = int(state.get("peaks", 0)) + len(peaks_rows)
+                if (
+                    not state.get("done_logged")
+                    and file_total is not None
+                    and file_done == file_total
+                ):
+                    state["done_logged"] = True
+                    log_line(f"Indexed {file_path} spectra={file_total}")
             step_entry = result.get("step_registry")
             if step_entry:
                 step_registry_collector.append(step_entry)
