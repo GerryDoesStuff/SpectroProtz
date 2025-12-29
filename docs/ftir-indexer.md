@@ -11,6 +11,9 @@ results plus headers in a DuckDB database for downstream lookup and analysis.
 - **Data directory**: A directory containing JCAMP-DX files (`.jdx` / `.dx`). The
   script scans recursively.
 - **Index directory**: A target directory where output artifacts are written.
+- **Existing index database (for skip detection)**: If `peaks.duckdb` exists in
+  the same directory as `scripts/jdxIndexBuilder.py`, the indexer loads it to
+  detect files that were already indexed and skips them automatically.
 
 **Outputs**
 - **DuckDB database**: `peaks.duckdb` in `index_dir`, containing tables for spectra,
@@ -33,6 +36,21 @@ results plus headers in a DuckDB database for downstream lookup and analysis.
    quality (R²).
 7. **Persist results**: Write spectra, peaks, and consensus clusters to DuckDB.
 8. **Optional exports**: If enabled, export step-by-step spectra to `.xlsx`.
+9. **Operational defaults**: CLI logs are timestamped and indexing runs with up
+   to four worker processes by default.
+
+## Behavior changes
+- **Timestamped CLI output**: Log messages include timestamps for easier
+  run-to-run comparison.
+- **Parallel indexing**: The indexer uses up to four worker processes to
+  accelerate ingestion when multiple cores are available.
+
+## Skip logic
+The indexer checks for `peaks.duckdb` in the same directory as
+`scripts/jdxIndexBuilder.py`. If present, it loads existing file identifiers
+(for example, SHA-1 hashes stored in the database) and automatically skips any
+input file that has already been indexed. This happens without prompting, which
+keeps repeat runs fast and prevents reprocessing known files.
 
 ## CLI arguments
 The following arguments are defined in `main()` of `scripts/jdxIndexBuilder.py`.
@@ -164,6 +182,17 @@ python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
   --no-prompt-export
 ```
 
+## Dependencies
+The indexer expects a Python environment with the following packages installed:
+- `duckdb`
+- `pandas`
+- `numpy`
+- `scipy`
+- `scikit-learn`
+- `pyarrow`
+
+Python 3.9+ is recommended to match the project’s supported runtime.
+
 ## Output artifacts
 - **`peaks.duckdb`**: Primary database stored under `index_dir`.
   - `spectra`: one row per JCAMP source file including promoted header fields.
@@ -182,6 +211,9 @@ python scripts/jdxIndexBuilder.py /path/to/jdx /path/to/index \
 - **Step plot exports**: When enabled, `.xlsx` files are written under
   `index_dir/debug_plots` (or `--export-step-plots-dir`) containing per-step
   spectra for each spectrum ID.
+- **Skip detection source**: The script also reads `peaks.duckdb` from the
+  script directory (alongside `scripts/jdxIndexBuilder.py`) to detect and skip
+  already-indexed files on subsequent runs.
 
 ## Interpreting results
 - **Consensus tables** (`file_consensus`, `global_consensus`) are designed for
