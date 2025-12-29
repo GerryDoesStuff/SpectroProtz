@@ -24,7 +24,7 @@ Notes
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit
 from datetime import datetime
-from typing import List, Tuple, Dict, Optional
+from typing import Callable, List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
 try:
     from scipy.signal import PeakPropertyWarning
@@ -3327,7 +3327,7 @@ def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
-def configure_warning_logging(peak_warning_limit: int = 5) -> None:
+def configure_warning_logging(peak_warning_limit: int = 5) -> Callable[[], int]:
     logging.captureWarnings(True)
     warning_counts: Dict[str, int] = {}
     suppressed_counts: Dict[str, int] = {}
@@ -3374,6 +3374,11 @@ def configure_warning_logging(peak_warning_limit: int = 5) -> None:
 
     warnings.showwarning = _showwarning
     atexit.register(_emit_peak_warning_summary)
+
+    def _get_suppressed_warning_count() -> int:
+        return sum(suppressed_counts.values())
+
+    return _get_suppressed_warning_count
 
 
 def format_progress_line(progress: Dict[str, object]) -> str:
@@ -3811,7 +3816,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    configure_warning_logging()
+    get_suppressed_warning_count = configure_warning_logging()
     existing_file_ids: set[str] = set()
     existing_paths: set[str] = set()
     existing_db_path = os.path.join(script_dir, "peaks.duckdb")
@@ -3858,7 +3863,11 @@ def main():
     workers: List[multiprocessing.Process] = []
     con = init_db(args.index_dir)
 
+    ingest_error_paths: set[str] = set()
+
     def persist_ingest_error(file_path: str, message: str) -> None:
+        if file_path:
+            ingest_error_paths.add(file_path)
         try:
             con.execute(
                 """
@@ -4064,6 +4073,19 @@ def main():
     log_line(
         f"Indexed spectra: {total_specs} | Peaks: {total_peaks} | "
         f"File clusters: {len(fc)} | Global: {len(gc)}"
+    )
+    indexed_files = len(file_state)
+    skipped_files = max(0, total_discovered - indexed_files)
+    log_line(
+        "Summary "
+        f"files_discovered={total_discovered} "
+        f"files_indexed={indexed_files} "
+        f"files_skipped={skipped_files} "
+        f"spectra_processed={total_specs} "
+        f"peaks_inserted={total_peaks} "
+        f"warnings_suppressed={get_suppressed_warning_count()} "
+        f"errors_recorded={len(ingest_error_paths)} "
+        f"elapsed_sec={time.monotonic() - start_time:.3f}"
     )
     con.close()
 if __name__=='__main__': main()
