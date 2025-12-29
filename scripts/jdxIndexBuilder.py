@@ -23,7 +23,10 @@ Notes
 
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import queue
+import multiprocessing
+import time
+from concurrent.futures import ProcessPoolExecutor, wait
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -82,6 +85,18 @@ class FitTimeoutError(TimeoutError):
     def __init__(self, seconds: float):
         self.seconds = seconds
         super().__init__(f"Fit timed out after {seconds:.1f}s")
+
+
+class SpectrumTimeoutError(TimeoutError):
+    """Raised when a spectrum preprocessing/fitting block exceeds the timeout."""
+
+    def __init__(self, seconds: float, spectrum_id: int, path: str):
+        self.seconds = seconds
+        self.spectrum_id = spectrum_id
+        self.path = path
+        super().__init__(
+            f"Spectrum {spectrum_id} in {path} timed out after {seconds:.1f}s"
+        )
 
 
 _FTIR_HEADER_KEYS = {
@@ -2782,11 +2797,13 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
 
 class _FileTimeoutGuard:
     def __init__(self, seconds: float, path: str, stage_getter):
-        self.seconds = seconds
+        self.seconds = float(seconds or 0.0)
         self.path = path
         self.stage_getter = stage_getter
-        self._enabled = bool(seconds and seconds > 0)
+        self._enabled = bool(self.seconds and self.seconds > 0)
         self._previous_handler = None
+        self._previous_timer = None
+        self._start_time = None
 
     def __enter__(self):
         if not self._enabled:
@@ -2796,6 +2813,8 @@ class _FileTimeoutGuard:
             self._enabled = False
             return self
         self._previous_handler = signal.getsignal(signal.SIGALRM)
+        self._previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        self._start_time = time.monotonic()
 
         def _handle_alarm(_signum, _frame):
             stage = self.stage_getter() if self.stage_getter else None
@@ -2807,7 +2826,12 @@ class _FileTimeoutGuard:
 
     def __exit__(self, exc_type, exc, tb):
         if self._enabled and hasattr(signal, "SIGALRM"):
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self._previous_timer is not None and self._start_time is not None:
+                elapsed = time.monotonic() - self._start_time
+                remaining = max(self._previous_timer[0] - elapsed, 0.0)
+                signal.setitimer(signal.ITIMER_REAL, remaining, self._previous_timer[1])
+            else:
+                signal.setitimer(signal.ITIMER_REAL, 0)
             if self._previous_handler is not None:
                 signal.signal(signal.SIGALRM, self._previous_handler)
         return False
@@ -2819,12 +2843,14 @@ class _FitTimeoutGuard:
         self._enabled = bool(self.seconds and self.seconds > 0 and hasattr(signal, "SIGALRM"))
         self._previous_handler = None
         self._previous_timer = None
+        self._start_time = None
 
     def __enter__(self):
         if not self._enabled:
             return self
         self._previous_handler = signal.getsignal(signal.SIGALRM)
         self._previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        self._start_time = time.monotonic()
 
         def _handle_alarm(_signum, _frame):
             raise FitTimeoutError(self.seconds)
@@ -2836,13 +2862,61 @@ class _FitTimeoutGuard:
     def __exit__(self, exc_type, exc, tb):
         if self._enabled and hasattr(signal, "SIGALRM"):
             if self._previous_timer is not None:
-                signal.setitimer(signal.ITIMER_REAL, *self._previous_timer)
+                elapsed = 0.0
+                if self._start_time is not None:
+                    elapsed = time.monotonic() - self._start_time
+                remaining = max(self._previous_timer[0] - elapsed, 0.0)
+                signal.setitimer(signal.ITIMER_REAL, remaining, self._previous_timer[1])
             if self._previous_handler is not None:
                 signal.signal(signal.SIGALRM, self._previous_handler)
         return False
 
 
-def index_file(path:str,con,args,failed_files=None,step_registry_collector: Optional[List[Dict[str, object]]] = None):
+class _SpectrumTimeoutGuard:
+    def __init__(self, seconds: float, spectrum_id: int, path: str):
+        self.seconds = float(seconds or 0.0)
+        self.spectrum_id = spectrum_id
+        self.path = path
+        self._enabled = bool(self.seconds and self.seconds > 0 and hasattr(signal, "SIGALRM"))
+        self._previous_handler = None
+        self._previous_timer = None
+        self._start_time = None
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        self._previous_handler = signal.getsignal(signal.SIGALRM)
+        self._previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        self._start_time = time.monotonic()
+
+        def _handle_alarm(_signum, _frame):
+            raise SpectrumTimeoutError(self.seconds, self.spectrum_id, self.path)
+
+        signal.signal(signal.SIGALRM, _handle_alarm)
+        signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._enabled and hasattr(signal, "SIGALRM"):
+            if self._previous_timer is not None:
+                elapsed = 0.0
+                if self._start_time is not None:
+                    elapsed = time.monotonic() - self._start_time
+                remaining = max(self._previous_timer[0] - elapsed, 0.0)
+                signal.setitimer(signal.ITIMER_REAL, remaining, self._previous_timer[1])
+            if self._previous_handler is not None:
+                signal.signal(signal.SIGALRM, self._previous_handler)
+        return False
+
+
+def index_file(
+    path: str,
+    con,
+    args,
+    failed_files=None,
+    step_registry_collector: Optional[List[Dict[str, object]]] = None,
+    heartbeat_callback=None,
+):
     def record_failure(message: str) -> None:
         if failed_files is not None:
             failed_files.append((path, message))
@@ -2898,9 +2972,13 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
             total_peaks=0
             processed_spectra=0
             max_points=0
+            spectra_seen=0
             y_units=headers.get('YUNITS','')
             resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
             fit_errors: List[Dict[str, object]] = []
+            spectrum_timeout_seconds = float(
+                getattr(args, "spectrum_timeout_seconds", 0) or 0
+            )
 
             con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
 
@@ -2911,151 +2989,166 @@ def index_file(path:str,con,args,failed_files=None,step_registry_collector: Opti
                 con.execute('DELETE FROM peaks WHERE file_id=?',[file_id])
 
                 for sid,y in enumerate(Y):
+                    spectra_seen += 1
+                    if heartbeat_callback is not None:
+                        heartbeat_callback(spectra_seen, len(Y), path)
+
                     x_clean,y_clean=sanitize_xy(x,y)
                     if x_clean.size==0 or y_clean.size==0:
                         continue
 
-                    processed_spectra+=1
-                    max_points=max(max_points,len(x_clean))
                     log_line(
                         f"Indexing spectrum {sid + 1}/{len(Y)} "
                         f"path={path} points={len(x_clean)}"
                     )
 
-                    set_stage(f"preprocess_spectrum_{sid}")
-                    y_for_processing=convert_y_for_processing(y_clean,y_units)
-                    step_metadata = {
-                        "file_id": file_id,
-                        "spectrum_id": sid,
-                        "y_units": y_units,
-                        "processing": {
-                            "sg_win": int(args.sg_win),
-                            "sg_poly": int(args.sg_poly),
-                            "sg_window_cm": float(args.sg_window_cm or 0.0),
-                            "als_lam": float(args.als_lam),
-                            "als_p": float(args.als_p),
-                            "baseline_method": str(args.baseline_method),
-                            "baseline_niter": int(args.baseline_niter),
-                            "baseline_piecewise": bool(args.baseline_piecewise),
-                            "baseline_ranges": args.baseline_ranges,
-                        },
-                    }
-                    step_registry: List[Dict[str, object]] = []
-                    _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
-                    _append_processing_step(
-                        step_registry,
-                        "absorbance_converted",
-                        x_clean,
-                        y_for_processing,
-                        step_metadata,
-                    )
-                    y_proc, noise_sigma = preprocess_with_noise(
-                        x_clean,
-                        y_for_processing,
-                        args.sg_win,
-                        args.sg_poly,
-                        args.als_lam,
-                        args.als_p,
-                        sg_window_cm=args.sg_window_cm,
-                        baseline_method=args.baseline_method,
-                        baseline_niter=args.baseline_niter,
-                        baseline_piecewise=args.baseline_piecewise,
-                        baseline_ranges=args.baseline_ranges,
-                        step_registry=step_registry,
-                        step_metadata=step_metadata,
-                    )
-                    set_stage(f"detect_peaks_spectrum_{sid}")
-                    peak_candidates=detect_peak_candidates(
-                        x_clean,
-                        y_proc,
-                        noise_sigma,
-                        args,
-                        resolution_cm=resolution_cm,
-                        file_path=path,
-                        spectrum_id=sid,
-                    )
-                    peak_overlay = [
-                        {
-                            "index": int(candidate["index"]),
-                            "x": float(x_clean[int(candidate["index"])]),
-                            "wavenumber": float(x_clean[int(candidate["index"])]),
-                            "y": float(y_proc[int(candidate["index"])]),
-                            "polarity": int(candidate.get("polarity", 1)),
-                            "score": float(candidate.get("score", 0.0)),
-                            "sources": sorted(candidate.get("sources", [])),
-                        }
-                        for candidate in peak_candidates
-                        if 0 <= int(candidate["index"]) < len(x_clean)
-                    ]
-                    _append_processing_step(
-                        step_registry,
-                        "candidate_peaks_overlay",
-                        x_clean,
-                        y_proc,
-                        step_metadata,
-                        extra_metadata={"candidates": peak_overlay},
-                    )
-                    set_stage(f"fit_peaks_spectrum_{sid}")
-                    refined = refine_peak_candidates(
-                        x_clean,
-                        y_proc,
-                        peak_candidates,
-                        args,
-                        y_abs=y_for_processing,
-                        file_path=path,
-                        spectrum_id=sid,
-                        fit_errors=fit_errors,
-                    )
-                    log_line(
-                        "Spectrum fit summary "
-                        f"path={path} spectrum_id={sid} "
-                        f"candidates={len(peak_candidates)} refined={len(refined)}"
-                    )
-                    refined_overlay = [
-                        {
-                            "index": int(fit.get("index", -1)),
-                            "wavenumber": float(fit.get("center", float("nan"))),
-                            "center": float(fit.get("center", float("nan"))),
-                            "polarity": int(fit.get("polarity", 1)),
-                            "r2": float(fit.get("r2", float("nan"))),
-                        }
-                        for fit in refined
-                    ]
-                    _append_processing_step(
-                        step_registry,
-                        "refined_peaks_overlay",
-                        x_clean,
-                        y_proc,
-                        step_metadata,
-                        extra_metadata={"peaks": refined_overlay},
-                    )
-                    set_stage(f"insert_peaks_spectrum_{sid}")
-                    pid = 0
-                    for fit in refined:
-                        con.execute(
-                            'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
-                            [
-                                file_id,
-                                sid,
-                                int(fit.get("candidate_id", pid)),
-                                int(fit.get("polarity", 1)),
-                                fit["center"],
-                                fit["fwhm"],
-                                fit["amplitude"],
-                                fit["area"],
-                                fit["r2"],
-                            ],
-                        )
-                        pid += 1
-                    total_peaks += pid
-                    if step_registry_collector is not None:
-                        step_registry_collector.append(
-                            {
+                    try:
+                        with _SpectrumTimeoutGuard(spectrum_timeout_seconds, sid, path):
+                            set_stage(f"preprocess_spectrum_{sid}")
+                            y_for_processing=convert_y_for_processing(y_clean,y_units)
+                            step_metadata = {
                                 "file_id": file_id,
                                 "spectrum_id": sid,
-                                "steps": step_registry,
+                                "y_units": y_units,
+                                "processing": {
+                                    "sg_win": int(args.sg_win),
+                                    "sg_poly": int(args.sg_poly),
+                                    "sg_window_cm": float(args.sg_window_cm or 0.0),
+                                    "als_lam": float(args.als_lam),
+                                    "als_p": float(args.als_p),
+                                    "baseline_method": str(args.baseline_method),
+                                    "baseline_niter": int(args.baseline_niter),
+                                    "baseline_piecewise": bool(args.baseline_piecewise),
+                                    "baseline_ranges": args.baseline_ranges,
+                                },
                             }
+                            step_registry: List[Dict[str, object]] = []
+                            _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
+                            _append_processing_step(
+                                step_registry,
+                                "absorbance_converted",
+                                x_clean,
+                                y_for_processing,
+                                step_metadata,
+                            )
+                            y_proc, noise_sigma = preprocess_with_noise(
+                                x_clean,
+                                y_for_processing,
+                                args.sg_win,
+                                args.sg_poly,
+                                args.als_lam,
+                                args.als_p,
+                                sg_window_cm=args.sg_window_cm,
+                                baseline_method=args.baseline_method,
+                                baseline_niter=args.baseline_niter,
+                                baseline_piecewise=args.baseline_piecewise,
+                                baseline_ranges=args.baseline_ranges,
+                                step_registry=step_registry,
+                                step_metadata=step_metadata,
+                            )
+                            set_stage(f"detect_peaks_spectrum_{sid}")
+                            peak_candidates=detect_peak_candidates(
+                                x_clean,
+                                y_proc,
+                                noise_sigma,
+                                args,
+                                resolution_cm=resolution_cm,
+                                file_path=path,
+                                spectrum_id=sid,
+                            )
+                            peak_overlay = [
+                                {
+                                    "index": int(candidate["index"]),
+                                    "x": float(x_clean[int(candidate["index"])]),
+                                    "wavenumber": float(x_clean[int(candidate["index"])]),
+                                    "y": float(y_proc[int(candidate["index"])]),
+                                    "polarity": int(candidate.get("polarity", 1)),
+                                    "score": float(candidate.get("score", 0.0)),
+                                    "sources": sorted(candidate.get("sources", [])),
+                                }
+                                for candidate in peak_candidates
+                                if 0 <= int(candidate["index"]) < len(x_clean)
+                            ]
+                            _append_processing_step(
+                                step_registry,
+                                "candidate_peaks_overlay",
+                                x_clean,
+                                y_proc,
+                                step_metadata,
+                                extra_metadata={"candidates": peak_overlay},
+                            )
+                            set_stage(f"fit_peaks_spectrum_{sid}")
+                            refined = refine_peak_candidates(
+                                x_clean,
+                                y_proc,
+                                peak_candidates,
+                                args,
+                                y_abs=y_for_processing,
+                                file_path=path,
+                                spectrum_id=sid,
+                                fit_errors=fit_errors,
+                            )
+                            log_line(
+                                "Spectrum fit summary "
+                                f"path={path} spectrum_id={sid} "
+                                f"candidates={len(peak_candidates)} refined={len(refined)}"
+                            )
+                            refined_overlay = [
+                                {
+                                    "index": int(fit.get("index", -1)),
+                                    "wavenumber": float(fit.get("center", float("nan"))),
+                                    "center": float(fit.get("center", float("nan"))),
+                                    "polarity": int(fit.get("polarity", 1)),
+                                    "r2": float(fit.get("r2", float("nan"))),
+                                }
+                                for fit in refined
+                            ]
+                            _append_processing_step(
+                                step_registry,
+                                "refined_peaks_overlay",
+                                x_clean,
+                                y_proc,
+                                step_metadata,
+                                extra_metadata={"peaks": refined_overlay},
+                            )
+                            set_stage(f"insert_peaks_spectrum_{sid}")
+                            pid = 0
+                            for fit in refined:
+                                con.execute(
+                                    'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
+                                    [
+                                        file_id,
+                                        sid,
+                                        int(fit.get("candidate_id", pid)),
+                                        int(fit.get("polarity", 1)),
+                                        fit["center"],
+                                        fit["fwhm"],
+                                        fit["amplitude"],
+                                        fit["area"],
+                                        fit["r2"],
+                                    ],
+                                )
+                                pid += 1
+                            total_peaks += pid
+                            if step_registry_collector is not None:
+                                step_registry_collector.append(
+                                    {
+                                        "file_id": file_id,
+                                        "spectrum_id": sid,
+                                        "steps": step_registry,
+                                    }
+                                )
+                            processed_spectra+=1
+                            max_points=max(max_points,len(x_clean))
+                    except SpectrumTimeoutError as exc:
+                        log_line(
+                            f"WARNING: {exc}",
+                            stream=sys.stderr,
                         )
+                        continue
+                    finally:
+                        if heartbeat_callback is not None:
+                            heartbeat_callback(spectra_seen, len(Y), path)
                 set_stage("update_spectra_summary")
                 con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
                 con.execute('COMMIT')
@@ -3173,16 +3266,71 @@ def get_worker_db_path(index_dir: str) -> str:
     return _WORKER_DB_PATH
 
 
+def shutdown_executor(executor: ProcessPoolExecutor) -> None:
+    executor.shutdown(wait=False, cancel_futures=True)
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+    for proc in processes.values():
+        try:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2)
+        except Exception:
+            logger.debug("Failed to terminate worker process", exc_info=True)
+
+
 def index_file_worker(
     path: str,
     index_dir: str,
     args: argparse.Namespace,
+    heartbeat_queue=None,
 ) -> Dict[str, object]:
     db_path = get_worker_db_path(index_dir)
     con = init_db(os.path.dirname(db_path), db_path=db_path)
     step_registry_collector: List[Dict[str, object]] = []
+    last_heartbeat_time = time.monotonic()
+    last_heartbeat_count = 0
+    heartbeat_every = int(getattr(args, "heartbeat_spectra_interval", 0) or 0)
+    heartbeat_seconds = float(getattr(args, "heartbeat_seconds", 0) or 0)
+    worker_pid = os.getpid()
+
+    def send_heartbeat(spectra_seen: int, total_spectra: int, file_path: str) -> None:
+        nonlocal last_heartbeat_time, last_heartbeat_count
+        if heartbeat_queue is None:
+            return
+        now = time.monotonic()
+        emit = False
+        if heartbeat_every and spectra_seen - last_heartbeat_count >= heartbeat_every:
+            emit = True
+        if heartbeat_seconds and now - last_heartbeat_time >= heartbeat_seconds:
+            emit = True
+        if not emit:
+            return
+        payload = {
+            "pid": worker_pid,
+            "path": file_path,
+            "spectra_seen": int(spectra_seen),
+            "total_spectra": int(total_spectra),
+            "timestamp": timestamp_now(),
+        }
+        try:
+            heartbeat_queue.put(payload)
+            last_heartbeat_time = now
+            last_heartbeat_count = spectra_seen
+        except Exception:
+            logger.debug("Failed to emit heartbeat for %s", file_path, exc_info=True)
+
+    if heartbeat_queue is not None:
+        send_heartbeat(0, 0, path)
     try:
-        n_s, n_p = index_file(path, con, args, step_registry_collector=step_registry_collector)
+        n_s, n_p = index_file(
+            path,
+            con,
+            args,
+            step_registry_collector=step_registry_collector,
+            heartbeat_callback=send_heartbeat,
+        )
     finally:
         con.close()
     return {
@@ -3334,6 +3482,34 @@ def main():
         help='Abort indexing a single file after this many seconds (0 disables).',
     )
     ap.add_argument(
+        '--spectrum-timeout-seconds',
+        type=float,
+        default=0.0,
+        dest='spectrum_timeout_seconds',
+        help='Abort preprocessing/fitting a single spectrum after this many seconds (0 disables).',
+    )
+    ap.add_argument(
+        '--heartbeat-spectra-interval',
+        type=int,
+        default=50,
+        dest='heartbeat_spectra_interval',
+        help='Emit a heartbeat after this many spectra per worker (0 disables).',
+    )
+    ap.add_argument(
+        '--heartbeat-seconds',
+        type=float,
+        default=30.0,
+        dest='heartbeat_seconds',
+        help='Emit a heartbeat if this many seconds elapse since the last one (0 disables).',
+    )
+    ap.add_argument(
+        '--worker-silence-seconds',
+        type=float,
+        default=180.0,
+        dest='worker_silence_seconds',
+        help='Restart workers if no heartbeat is seen within this window (0 disables).',
+    )
+    ap.add_argument(
         '--export-step-plots',
         action='store_true',
         dest='export_step_plots',
@@ -3455,27 +3631,96 @@ def main():
     total_specs=0;total_peaks=0
     step_registry_collector: List[Dict[str, object]] = []
     worker_db_paths: set[str] = set()
+    failed_files: List[Tuple[str, str]] = []
     max_workers = min(4, os.cpu_count() or 1)
     log_line(
         "Using per-worker DuckDB files; worker results will be merged into "
         f"{os.path.join(args.index_dir, 'peaks.duckdb')}."
     )
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for idx,p in enumerate(files_to_index,1):
-            log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
-            future = executor.submit(index_file_worker, p, args.index_dir, args)
-            futures[future] = p
-        for future in as_completed(futures):
-            result = future.result()
-            total_specs += int(result.get("spectra", 0) or 0)
-            total_peaks += int(result.get("peaks", 0) or 0)
-            db_path = result.get("db_path")
-            if db_path:
-                worker_db_paths.add(str(db_path))
-            steps = result.get("step_registry") or []
-            if steps:
-                step_registry_collector.extend(steps)
+    manager = multiprocessing.Manager()
+    heartbeat_queue = manager.Queue()
+    heartbeat_poll_interval = 1.0
+    worker_silence_seconds = float(getattr(args, "worker_silence_seconds", 0) or 0)
+    pending_paths = list(files_to_index)
+    in_flight: Dict[object, str] = {}
+    last_heartbeat: Dict[str, float] = {}
+    submitted_count = 0
+    executor = ProcessPoolExecutor(max_workers=max_workers)
+
+    def submit_next() -> None:
+        nonlocal submitted_count
+        while pending_paths and len(in_flight) < max_workers:
+            path = pending_paths.pop(0)
+            submitted_count += 1
+            log_line(f"[{submitted_count}/{total_files}] Indexing {path}", flush=True)
+            future = executor.submit(index_file_worker, path, args.index_dir, args, heartbeat_queue)
+            in_flight[future] = path
+            last_heartbeat[path] = time.monotonic()
+
+    try:
+        while pending_paths or in_flight:
+            submit_next()
+            if not in_flight:
+                continue
+            done, _ = wait(in_flight, timeout=heartbeat_poll_interval)
+            try:
+                while True:
+                    heartbeat = heartbeat_queue.get_nowait()
+                    path = heartbeat.get("path")
+                    if path:
+                        last_heartbeat[path] = time.monotonic()
+            except queue.Empty:
+                pass
+
+            for future in done:
+                path = in_flight.pop(future, None)
+                if path:
+                    last_heartbeat.pop(path, None)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    message = str(exc)
+                    if path:
+                        failed_files.append((path, message))
+                    log_line(f"Worker failed for {path}: {exc}", stream=sys.stderr)
+                    continue
+                total_specs += int(result.get("spectra", 0) or 0)
+                total_peaks += int(result.get("peaks", 0) or 0)
+                db_path = result.get("db_path")
+                if db_path:
+                    worker_db_paths.add(str(db_path))
+                steps = result.get("step_registry") or []
+                if steps:
+                    step_registry_collector.extend(steps)
+
+            if worker_silence_seconds > 0 and in_flight:
+                now = time.monotonic()
+                silent_paths = [
+                    path
+                    for path in in_flight.values()
+                    if now - last_heartbeat.get(path, now) > worker_silence_seconds
+                ]
+                if silent_paths:
+                    for path in silent_paths:
+                        message = (
+                            f"Worker heartbeat timed out after {worker_silence_seconds:.1f}s"
+                        )
+                        failed_files.append((path, message))
+                        log_line(f"WARNING: {message} path={path}", stream=sys.stderr)
+                    retry_paths = [
+                        path for path in in_flight.values() if path not in silent_paths
+                    ]
+                    pending_paths = retry_paths + pending_paths
+                    in_flight.clear()
+                    last_heartbeat = {
+                        path: last_heartbeat[path]
+                        for path in last_heartbeat
+                        if path in pending_paths
+                    }
+                    shutdown_executor(executor)
+                    executor = ProcessPoolExecutor(max_workers=max_workers)
+    finally:
+        shutdown_executor(executor)
     if worker_db_paths:
         main_db_path = os.path.join(args.index_dir, "peaks.duckdb")
         log_line(
@@ -3523,6 +3768,20 @@ def main():
                 plot_max_points=args.plot_max_points,
             )
     con=init_db(args.index_dir)
+    if failed_files:
+        try:
+            con.executemany(
+                """
+                INSERT INTO ingest_errors (file_path, error)
+                VALUES (?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    error=excluded.error,
+                    occurred_at=now()
+                """,
+                failed_files,
+            )
+        except Exception:
+            logger.debug("Failed to persist heartbeat failures", exc_info=True)
     log_line("Building file-level consensus clusters...", flush=True)
     fc=build_file_consensus(con,args)
     log_line("Building global consensus clusters...", flush=True)
