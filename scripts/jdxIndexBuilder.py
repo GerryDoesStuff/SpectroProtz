@@ -22,7 +22,7 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, warnings
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
@@ -2357,14 +2357,19 @@ def detect_peak_candidates(
         )
 
     if max_candidates > 0 and len(merged) > max_candidates:
+        original_count = len(merged)
         merged = sorted(
             merged,
-            key=lambda c: (
-                int(c.get("priority", 0) or 0),
-                float(c.get("prominence", c.get("score", 0.0))),
-            ),
+            key=lambda c: float(c.get("score", 0.0)),
             reverse=True,
         )[:max_candidates]
+        logger.info(
+            "Peak candidate cap applied path=%s spectrum_id=%s kept=%d dropped=%d",
+            file_path or "unknown",
+            spectrum_id if spectrum_id is not None else "unknown",
+            len(merged),
+            max(0, original_count - len(merged)),
+        )
         merged.sort(key=lambda c: c["index"])
     for candidate_id, candidate in enumerate(merged):
         candidate["candidate_id"] = int(candidate_id)
@@ -2443,13 +2448,46 @@ def refine_peak_candidates(
     fit_maxfev = max(1, min(fit_maxfev, 20000))
     fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
     multi_fit_min_span_cm = float(_get_param(args, "multi_fit_min_span_cm", 10.0) or 0.0)
+    flat_max_threshold = float(
+        _get_param(args, "flat_max_amplitude", max(min_absorbance_threshold * 0.5, 0.0))
+    )
+    flat_variance_threshold = float(
+        _get_param(args, "flat_variance_threshold", (min_absorbance_threshold * 0.1) ** 2)
+    )
+    max_abs = float(np.nanmax(np.abs(y_proc))) if y_proc.size else 0.0
+    variance = float(np.nanvar(y_proc)) if y_proc.size else 0.0
+    if (
+        (flat_max_threshold > 0 and max_abs <= flat_max_threshold)
+        or (flat_variance_threshold > 0 and variance <= flat_variance_threshold)
+    ):
+        log_line(
+            "Skipping peak fitting for flat spectrum "
+            f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'} "
+            f"max_abs={max_abs:.4g} variance={variance:.4g} "
+            f"thresholds=(max_abs={flat_max_threshold:.4g}, variance={flat_variance_threshold:.4g})",
+            stream=sys.stderr,
+        )
+        return []
     results: List[Dict[str, object]] = []
     timeout_skips = 0
+    spectrum_timeout_skips = 0
     total_candidates = len(candidates)
     progress_every = int(_get_param(args, "fit_progress_every", 50) or 0)
     progress_every = max(progress_every, 0)
     processed_candidates = 0
     next_progress = progress_every if progress_every else None
+    spectrum_deadline = (
+        time.monotonic() + fit_timeout_sec if fit_timeout_sec and fit_timeout_sec > 0 else None
+    )
+
+    def _remaining_spectrum_time() -> Optional[float]:
+        if spectrum_deadline is None:
+            return None
+        return spectrum_deadline - time.monotonic()
+
+    def _spectrum_timed_out() -> bool:
+        remaining = _remaining_spectrum_time()
+        return remaining is not None and remaining <= 0
 
     def mark_candidate_processed(count: int = 1) -> None:
         nonlocal processed_candidates, next_progress
@@ -2525,7 +2563,11 @@ def refine_peak_candidates(
             sources,
         )
 
+    spectrum_timed_out = False
     for polarity in (1, -1):
+        if _spectrum_timed_out():
+            spectrum_timed_out = True
+            break
         group = [c for c in candidates if int(c["polarity"]) == polarity]
         if not group:
             continue
@@ -2535,6 +2577,9 @@ def refine_peak_candidates(
             fit_y_abs = np.asarray(y_abs, dtype=float)
         clusters = _cluster_candidates_by_window(group, window=fit_window)
         for cluster in clusters:
+            if _spectrum_timed_out():
+                spectrum_timed_out = True
+                break
             has_plateau = any(c.get("plateau_bounds") is not None for c in cluster)
             cluster_indices = [int(c["index"]) for c in cluster]
             span_start = max(min(cluster_indices) - fit_window, 0)
@@ -2552,6 +2597,13 @@ def refine_peak_candidates(
                 and (multi_fit_min_span_cm <= 0.0 or cluster_span_cm >= multi_fit_min_span_cm)
             )
             if allow_multi_fit:
+                remaining = _remaining_spectrum_time()
+                if remaining is not None and remaining <= 0:
+                    spectrum_timed_out = True
+                    break
+                fit_timeout_value = (
+                    min(fit_timeout_sec, max(0.0, remaining)) if remaining is not None else fit_timeout_sec
+                )
                 curvature_centers = _curvature_seed_centers(
                     xs_cluster,
                     ys_cluster,
@@ -2574,7 +2626,7 @@ def refine_peak_candidates(
                             centers,
                             model,
                             maxfev=fit_maxfev,
-                            fit_timeout_sec=fit_timeout_sec,
+                            fit_timeout_sec=fit_timeout_value,
                         )
                 except (RuntimeError, OptimizeWarning, ValueError, FitTimeoutError) as exc:
                     for candidate in cluster:
@@ -2626,6 +2678,9 @@ def refine_peak_candidates(
                     mark_candidate_processed(len(cluster))
                     continue
             for candidate in cluster:
+                if _spectrum_timed_out():
+                    spectrum_timed_out = True
+                    break
                 idx = int(candidate["index"])
                 plateau_bounds = candidate.get("plateau_bounds")
                 x0_guess = float(x[idx])
@@ -2644,6 +2699,13 @@ def refine_peak_candidates(
                 fit = None
                 fit_timed_out = False
                 try:
+                    remaining = _remaining_spectrum_time()
+                    if remaining is not None and remaining <= 0:
+                        spectrum_timed_out = True
+                        break
+                    fit_timeout_value = (
+                        min(fit_timeout_sec, max(0.0, remaining)) if remaining is not None else fit_timeout_sec
+                    )
                     with warnings.catch_warnings():
                         warnings.simplefilter("error", OptimizeWarning)
                         fit = fit_peak(
@@ -2655,7 +2717,7 @@ def refine_peak_candidates(
                             center_bounds=center_bounds,
                             x0_guess=x0_guess,
                             maxfev=fit_maxfev,
-                            fit_timeout_sec=fit_timeout_sec,
+                            fit_timeout_sec=fit_timeout_value,
                             raise_on_error=True,
                         )
                 except (RuntimeError, OptimizeWarning, ValueError, FitTimeoutError) as exc:
@@ -2722,6 +2784,20 @@ def refine_peak_candidates(
                     result["area"] = float(result.get("area", 0.0)) * -1
                 results.append(result)
                 mark_candidate_processed()
+            if spectrum_timed_out:
+                break
+        if spectrum_timed_out:
+            break
+
+    if spectrum_timed_out:
+        remaining_candidates = max(0, total_candidates - processed_candidates)
+        spectrum_timeout_skips += remaining_candidates
+        log_line(
+            "Peak fit spectrum timeout "
+            f"skipped={spectrum_timeout_skips} candidates "
+            f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}",
+            stream=sys.stderr,
+        )
 
     results.sort(key=lambda r: (int(r.get("index", 0)), int(r.get("candidate_id", 0))))
     if timeout_skips:
