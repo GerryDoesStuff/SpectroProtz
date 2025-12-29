@@ -48,6 +48,7 @@ from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
+_WORKER_DB_PATH: Optional[str] = None
 
 
 class UnsupportedSpectrumError(RuntimeError):
@@ -2730,9 +2731,10 @@ def refine_peak_candidates(
         )
     return results
 
-def init_db(outdir:str):
-    os.makedirs(outdir,exist_ok=True)
-    con=duckdb.connect(os.path.join(outdir,'peaks.duckdb'))
+def init_db(outdir: str, db_path: Optional[str] = None):
+    os.makedirs(outdir, exist_ok=True)
+    resolved_path = db_path or os.path.join(outdir, "peaks.duckdb")
+    con = duckdb.connect(resolved_path)
     con.execute('''CREATE TABLE IF NOT EXISTS spectra(
         file_id TEXT PRIMARY KEY,
         path TEXT,
@@ -3156,12 +3158,28 @@ def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
     print(f"{timestamp} {msg}", file=stream, flush=flush)
 
 
+def get_worker_db_path(index_dir: str) -> str:
+    global _WORKER_DB_PATH
+    if _WORKER_DB_PATH is None:
+        os.makedirs(index_dir, exist_ok=True)
+        pid = os.getpid()
+        db_path = os.path.join(index_dir, f"peaks_worker_{pid}.duckdb")
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+        _WORKER_DB_PATH = db_path
+    return _WORKER_DB_PATH
+
+
 def index_file_worker(
     path: str,
     index_dir: str,
     args: argparse.Namespace,
 ) -> Dict[str, object]:
-    con = init_db(index_dir)
+    db_path = get_worker_db_path(index_dir)
+    con = init_db(os.path.dirname(db_path), db_path=db_path)
     step_registry_collector: List[Dict[str, object]] = []
     try:
         n_s, n_p = index_file(path, con, args, step_registry_collector=step_registry_collector)
@@ -3169,6 +3187,7 @@ def index_file_worker(
         con.close()
     return {
         "path": path,
+        "db_path": db_path,
         "spectra": n_s,
         "peaks": n_p,
         "step_registry": step_registry_collector,
@@ -3435,7 +3454,12 @@ def main():
     )
     total_specs=0;total_peaks=0
     step_registry_collector: List[Dict[str, object]] = []
+    worker_db_paths: set[str] = set()
     max_workers = min(4, os.cpu_count() or 1)
+    log_line(
+        "Using per-worker DuckDB files; worker results will be merged into "
+        f"{os.path.join(args.index_dir, 'peaks.duckdb')}."
+    )
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for idx,p in enumerate(files_to_index,1):
@@ -3446,9 +3470,44 @@ def main():
             result = future.result()
             total_specs += int(result.get("spectra", 0) or 0)
             total_peaks += int(result.get("peaks", 0) or 0)
+            db_path = result.get("db_path")
+            if db_path:
+                worker_db_paths.add(str(db_path))
             steps = result.get("step_registry") or []
             if steps:
                 step_registry_collector.extend(steps)
+    if worker_db_paths:
+        main_db_path = os.path.join(args.index_dir, "peaks.duckdb")
+        log_line(
+            f"Merging {len(worker_db_paths)} worker DuckDB file(s) into {main_db_path}."
+        )
+        con = init_db(args.index_dir)
+        try:
+            for idx, db_path in enumerate(sorted(worker_db_paths), 1):
+                if not os.path.isfile(db_path):
+                    log_line(f"Skipping missing worker DB {db_path}", stream=sys.stderr)
+                    continue
+                schema_name = f"worker_{idx}"
+                escaped_path = db_path.replace("'", "''")
+                con.execute(f"ATTACH '{escaped_path}' AS {schema_name}")
+                con.execute(
+                    f"INSERT OR REPLACE INTO spectra SELECT * FROM {schema_name}.spectra"
+                )
+                con.execute(
+                    f"INSERT OR REPLACE INTO peaks SELECT * FROM {schema_name}.peaks"
+                )
+                con.execute(
+                    f"INSERT OR REPLACE INTO ingest_errors "
+                    f"SELECT * FROM {schema_name}.ingest_errors"
+                )
+                con.execute(f"DETACH {schema_name}")
+        finally:
+            con.close()
+        for db_path in worker_db_paths:
+            try:
+                os.remove(db_path)
+            except OSError:
+                log_line(f"Failed to remove worker DB {db_path}", stream=sys.stderr)
     if args.export_step_plots and step_registry_collector:
         export_dir = args.export_step_plots_dir or os.path.join(args.index_dir, "debug_plots")
         for entry in step_registry_collector:
