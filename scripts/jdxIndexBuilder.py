@@ -2462,7 +2462,8 @@ def refine_peak_candidates(
             log_line(
                 "Peak fit progress "
                 f"{processed_candidates}/{total_candidates} candidates "
-                f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}"
+                f"path={file_path or 'unknown'} spectrum_id={spectrum_id if spectrum_id is not None else 'unknown'}",
+                stream=sys.stderr,
             )
             next_progress += progress_every
 
@@ -3462,14 +3463,22 @@ def main():
     )
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        for idx,p in enumerate(files_to_index,1):
-            log_line(f"[{idx}/{total_files}] Indexing {p}", flush=True)
+        for p in files_to_index:
             future = executor.submit(index_file_worker, p, args.index_dir, args)
             futures[future] = p
+        completed = 0
         for future in as_completed(futures):
             result = future.result()
-            total_specs += int(result.get("spectra", 0) or 0)
-            total_peaks += int(result.get("peaks", 0) or 0)
+            completed += 1
+            path = result.get("path") or futures.get(future, "unknown")
+            spectra_count = int(result.get("spectra", 0) or 0)
+            peak_count = int(result.get("peaks", 0) or 0)
+            log_line(
+                f"[{completed}/{total_files}] Indexed {path} "
+                f"(spectra={spectra_count} peaks={peak_count})"
+            )
+            total_specs += spectra_count
+            total_peaks += peak_count
             db_path = result.get("db_path")
             if db_path:
                 worker_db_paths.add(str(db_path))
