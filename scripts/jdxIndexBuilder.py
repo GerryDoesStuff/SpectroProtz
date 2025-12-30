@@ -4148,8 +4148,10 @@ def main():
         heartbeat_throttle = 30.0
     last_heartbeat_log: Dict[int, float] = {}
     batch_commit_size = 250
+    commit_interval_sec = 600.0
     in_transaction = True
     con.execute("BEGIN TRANSACTION")
+    last_commit_time = time.monotonic()
     try:
         while completed_tasks < total_tasks:
             result = result_queue.get()
@@ -4242,13 +4244,21 @@ def main():
             if step_entry:
                 step_registry_collector.append(step_entry)
             batch_count += 1
-            if batch_count >= batch_commit_size and in_transaction:
+            now = time.monotonic()
+            if (
+                in_transaction
+                and (
+                    batch_count >= batch_commit_size
+                    or (now - last_commit_time) >= commit_interval_sec
+                )
+            ):
                 con.execute("COMMIT")
                 in_transaction = False
                 log_line(
                     f"Committed batch spectra={batch_count} total_completed={completed_tasks}"
                 )
                 batch_count = 0
+                last_commit_time = now
                 con.execute("BEGIN TRANSACTION")
                 in_transaction = True
     finally:
