@@ -3407,8 +3407,11 @@ def format_progress_line(progress: Dict[str, object]) -> str:
     if file_done is not None or file_total is not None:
         file_progress = f" file_progress=[{file_done_str}/{file_total_str}]"
     worker_str = f" worker_id={worker_id}" if worker_id is not None else ""
+    tag = "[PROGRESS]"
+    if stage == "heartbeat":
+        tag = "[HEARTBEAT]"
     return (
-        "Progress "
+        f"{tag} Progress "
         f"file={file_path} spectrum_id={spectrum_str} stage={stage}{worker_str} "
         f"elapsed_sec={elapsed_str} candidates={candidates_str} "
         f"refined={refined_str} skipped_due_to_timeout={skipped_str} "
@@ -3929,6 +3932,7 @@ def main():
 
     file_state: Dict[str, Dict[str, object]] = {}
     total_tasks = 0
+    log_line("[ENQUEUE] === Enqueueing spectra (parsing files) ===")
     for path in files_to_index:
         current_stage = "parse_headers"
         timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
@@ -3989,7 +3993,7 @@ def main():
                 }
             )
             total_tasks += 1
-        log_line(f"Indexing {path} spectra={processed_spectra}")
+        log_line(f"[ENQUEUE] Indexing {path} spectra={processed_spectra}")
         file_state[path] = {
             "file_id": file_id,
             "n_spectra": processed_spectra,
@@ -4004,11 +4008,12 @@ def main():
                 [path, max_points, processed_spectra, file_id],
             )
             file_state[path]["done_logged"] = True
-            log_line(f"Indexed {path} spectra=0")
+            log_line(f"[COMPLETE] Indexed {path} spectra=0")
 
     for _ in workers:
         task_queue.put(None)
 
+    log_line("[PROGRESS] === Processing spectra (worker progress) ===")
     completed_tasks = 0
     heartbeat_throttle = float(getattr(args, "progress_interval_sec", 0) or 0)
     if heartbeat_throttle <= 0:
@@ -4102,7 +4107,7 @@ def main():
                 ):
                     state["done_logged"] = True
                     log_line(
-                        f"File completed path={file_path} spectra={file_total} "
+                        f"[COMPLETE] File completed path={file_path} spectra={file_total} "
                         f"peaks={state.get('peaks', 0)}"
                     )
             step_entry = result.get("step_registry")
