@@ -2834,6 +2834,130 @@ def refine_peak_candidates(
         )
     return results, timeout_skips + spectrum_timeout_skips
 
+
+_PEAK_RETRY_RELAXATIONS = (
+    {
+        "prominence_factor": 0.6,
+        "noise_sigma_multiplier_factor": 0.8,
+        "min_absorbance_factor": 0.7,
+        "min_distance_factor": 0.9,
+        "fit_window_factor": 1.2,
+        "max_peak_candidates_factor": 2,
+        "max_peak_candidates_floor": 50,
+    },
+    {
+        "prominence_factor": 0.4,
+        "noise_sigma_multiplier_factor": 0.6,
+        "min_absorbance_factor": 0.5,
+        "min_distance_factor": 0.8,
+        "fit_window_factor": 1.4,
+        "max_peak_candidates_factor": 3,
+        "max_peak_candidates_floor": 100,
+    },
+)
+
+
+def _args_to_dict(args: object) -> Dict[str, object]:
+    if isinstance(args, dict):
+        return dict(args)
+    if hasattr(args, "__dict__"):
+        return dict(vars(args))
+    return {}
+
+
+def _apply_peak_retry_params(
+    base_params: Dict[str, object],
+    attempt: int,
+) -> Dict[str, object]:
+    params = dict(base_params)
+    if attempt <= 0:
+        return params
+    relax = _PEAK_RETRY_RELAXATIONS[attempt - 1]
+
+    def _scale(name: str, factor: float, default: float, minimum: float = 0.0) -> None:
+        value = float(params.get(name, default))
+        params[name] = max(value * factor, minimum)
+
+    _scale("prominence", relax["prominence_factor"], 0.003, minimum=np.finfo(float).eps)
+    _scale("noise_sigma_multiplier", relax["noise_sigma_multiplier_factor"], 1.5, minimum=0.1)
+    _scale("min_absorbance_threshold", relax["min_absorbance_factor"], 0.05, minimum=0.0)
+    _scale("min_distance", relax["min_distance_factor"], 0.8, minimum=0.0)
+    fit_window = int(params.get("fit_window_pts", 70) or 70)
+    params["fit_window_pts"] = max(3, int(math.ceil(fit_window * relax["fit_window_factor"])))
+
+    base_max_candidates = int(base_params.get("max_peak_candidates", 0) or 0)
+    if base_max_candidates <= 0:
+        params["max_peak_candidates"] = int(relax["max_peak_candidates_floor"])
+    else:
+        params["max_peak_candidates"] = max(
+            base_max_candidates,
+            int(math.ceil(base_max_candidates * relax["max_peak_candidates_factor"])),
+        )
+    return params
+
+
+def detect_and_refine_with_retries(
+    x: np.ndarray,
+    y_proc: np.ndarray,
+    noise_sigma: float,
+    args: object,
+    *,
+    y_abs: np.ndarray | None = None,
+    resolution_cm: float | None = None,
+    file_path: str | None = None,
+    spectrum_id: int | None = None,
+    fit_errors: Optional[List[Dict[str, object]]] = None,
+    progress_callback: Optional[callable] = None,
+    min_peaks: int = 2,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], int, int]:
+    base_params = _args_to_dict(args)
+    attempts = 1 + len(_PEAK_RETRY_RELAXATIONS)
+    peak_candidates: List[Dict[str, object]] = []
+    refined: List[Dict[str, object]] = []
+    skipped_due_to_timeout = 0
+    attempt_used = 0
+    for attempt in range(attempts):
+        params = _apply_peak_retry_params(base_params, attempt)
+        if attempt > 0:
+            logger.info(
+                "Retrying peak detection path=%s spectrum_id=%s attempt=%d prominence=%.4g "
+                "noise_sigma_multiplier=%.3g min_absorbance_threshold=%.4g min_distance=%.4g "
+                "fit_window_pts=%s max_peak_candidates=%s",
+                file_path or "unknown",
+                spectrum_id if spectrum_id is not None else "unknown",
+                attempt,
+                float(params.get("prominence", 0.0) or 0.0),
+                float(params.get("noise_sigma_multiplier", 0.0) or 0.0),
+                float(params.get("min_absorbance_threshold", 0.0) or 0.0),
+                float(params.get("min_distance", 0.0) or 0.0),
+                params.get("fit_window_pts"),
+                params.get("max_peak_candidates"),
+            )
+        peak_candidates = detect_peak_candidates(
+            x,
+            y_proc,
+            noise_sigma,
+            params,
+            resolution_cm=resolution_cm,
+            file_path=file_path,
+            spectrum_id=spectrum_id,
+        )
+        refined, skipped_due_to_timeout = refine_peak_candidates(
+            x,
+            y_proc,
+            peak_candidates,
+            params,
+            y_abs=y_abs,
+            file_path=file_path,
+            spectrum_id=spectrum_id,
+            fit_errors=fit_errors,
+            progress_callback=progress_callback,
+        )
+        attempt_used = attempt + 1
+        if len(refined) >= min_peaks:
+            break
+    return peak_candidates, refined, skipped_due_to_timeout, attempt_used
+
 def init_db(outdir: str, db_path: Optional[str] = None):
     os.makedirs(outdir, exist_ok=True)
     resolved_path = db_path or os.path.join(outdir, "peaks.duckdb")
@@ -3124,14 +3248,19 @@ def index_file(
                         step_metadata=step_metadata,
                     )
                     set_stage(f"detect_peaks_spectrum_{sid}")
-                    peak_candidates=detect_peak_candidates(
-                        x_clean,
-                        y_proc,
-                        noise_sigma,
-                        args,
-                        resolution_cm=resolution_cm,
-                        file_path=path,
-                        spectrum_id=sid,
+                    peak_candidates, refined, skipped_due_to_timeout, attempts_used = (
+                        detect_and_refine_with_retries(
+                            x_clean,
+                            y_proc,
+                            noise_sigma,
+                            args,
+                            y_abs=y_for_processing,
+                            resolution_cm=resolution_cm,
+                            file_path=path,
+                            spectrum_id=sid,
+                            fit_errors=fit_errors,
+                            progress_callback=progress_callback,
+                        )
                     )
                     peak_overlay = [
                         {
@@ -3155,23 +3284,21 @@ def index_file(
                         extra_metadata={"candidates": peak_overlay},
                     )
                     set_stage(f"fit_peaks_spectrum_{sid}")
-                    refined, skipped_due_to_timeout = refine_peak_candidates(
-                        x_clean,
-                        y_proc,
-                        peak_candidates,
-                        args,
-                        y_abs=y_for_processing,
-                        file_path=path,
-                        spectrum_id=sid,
-                        fit_errors=fit_errors,
-                        progress_callback=progress_callback,
-                    )
                     log_line(
                         "Spectrum fit summary "
                         f"path={path} spectrum_id={sid} "
                         f"candidates={len(peak_candidates)} refined={len(refined)} "
+                        f"attempts={attempts_used} "
                         f"skipped_due_to_timeout={skipped_due_to_timeout}"
                     )
+                    if len(refined) < 2:
+                        min_peaks_message = (
+                            "Minimum peak count not met "
+                            f"path={path} spectrum_id={sid} "
+                            f"peaks={len(refined)} attempts={attempts_used}"
+                        )
+                        log_line(min_peaks_message, stream=sys.stderr)
+                        persist_ingest_error(min_peaks_message)
                     emit_progress(
                         "spectrum_complete",
                         spectrum_id=sid,
@@ -3474,14 +3601,17 @@ def process_spectrum_task(
         step_registry=step_registry if args.export_step_plots else None,
         step_metadata=step_metadata,
     )
-    peak_candidates = detect_peak_candidates(
+    peak_candidates, refined, skipped_due_to_timeout, attempts_used = detect_and_refine_with_retries(
         x,
         y_proc,
         noise_sigma,
         args,
+        y_abs=y_for_processing,
         resolution_cm=resolution_cm,
         file_path=path,
         spectrum_id=spectrum_id,
+        fit_errors=None,
+        progress_callback=None,
     )
     if args.export_step_plots:
         peak_overlay = [
@@ -3505,18 +3635,14 @@ def process_spectrum_task(
             step_metadata,
             extra_metadata={"candidates": peak_overlay},
         )
-    fit_errors: List[Dict[str, object]] = []
-    refined, skipped_due_to_timeout = refine_peak_candidates(
-        x,
-        y_proc,
-        peak_candidates,
-        args,
-        y_abs=y_for_processing,
-        file_path=path,
-        spectrum_id=spectrum_id,
-        fit_errors=fit_errors,
-        progress_callback=None,
-    )
+    ingest_error_message = None
+    if len(refined) < 2:
+        ingest_error_message = (
+            "Minimum peak count not met "
+            f"path={path} spectrum_id={spectrum_id} "
+            f"peaks={len(refined)} attempts={attempts_used}"
+        )
+        log_line(ingest_error_message, stream=sys.stderr)
     if args.export_step_plots:
         refined_overlay = [
             {
@@ -3559,6 +3685,7 @@ def process_spectrum_task(
         "candidates": len(peak_candidates),
         "refined": len(refined),
         "skipped_due_to_timeout": skipped_due_to_timeout,
+        "ingest_error": ingest_error_message,
         "step_registry": (
             {
                 "file_id": file_id,
@@ -4065,6 +4192,9 @@ def main():
                     peaks_rows,
                 )
             file_path = str(result.get("file_path"))
+            ingest_error_message = result.get("ingest_error")
+            if ingest_error_message:
+                persist_ingest_error(file_path, str(ingest_error_message))
             spectrum_id = result.get("spectrum_id")
             candidates = result.get("candidates")
             refined = result.get("refined")
