@@ -4015,14 +4015,12 @@ def main():
 
     log_line("[PROGRESS] === Processing spectra (worker progress) ===")
     completed_tasks = 0
+    batch_count = 0
     heartbeat_throttle = float(getattr(args, "progress_interval_sec", 0) or 0)
     if heartbeat_throttle <= 0:
         heartbeat_throttle = 30.0
     last_heartbeat_log: Dict[int, float] = {}
-    batch_commit_size = 500
-    batch_commit_interval = 30.0
-    batch_spectra = 0
-    last_commit_time = time.monotonic()
+    batch_commit_size = 250
     in_transaction = True
     con.execute("BEGIN TRANSACTION")
     try:
@@ -4113,25 +4111,22 @@ def main():
             step_entry = result.get("step_registry")
             if step_entry:
                 step_registry_collector.append(step_entry)
-            batch_spectra += 1
-            now = time.monotonic()
-            should_commit = batch_spectra >= batch_commit_size
-            should_commit = should_commit or (
-                batch_spectra > 0 and now - last_commit_time >= batch_commit_interval
-            )
-            if should_commit and in_transaction:
+            batch_count += 1
+            if batch_count >= batch_commit_size and in_transaction:
                 con.execute("COMMIT")
                 in_transaction = False
                 log_line(
-                    f"Committed batch spectra={batch_spectra} total_completed={completed_tasks}"
+                    f"Committed batch spectra={batch_count} total_completed={completed_tasks}"
                 )
-                batch_spectra = 0
-                last_commit_time = time.monotonic()
+                batch_count = 0
                 con.execute("BEGIN TRANSACTION")
                 in_transaction = True
     finally:
-        if in_transaction:
+        if in_transaction and batch_count:
             con.execute("COMMIT")
+            log_line(
+                f"Committed batch spectra={batch_count} total_completed={completed_tasks}"
+            )
 
     for proc in workers:
         proc.join(timeout=5)
