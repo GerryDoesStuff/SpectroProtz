@@ -3361,7 +3361,7 @@ def index_file(
             return processed_spectra, total_peaks, progress_events
     except Exception as exc:
         if isinstance(exc, FileTimeoutError):
-            message = f"Timeout: {exc}"
+            message = f"Timeout: after {exc.seconds:.0f}s at stage {exc.stage}"
             logger.error("File timed out %s: %s", path, exc)
         else:
             message = str(exc)
@@ -3879,7 +3879,7 @@ def main():
     ap.add_argument(
         '--file-timeout-seconds',
         type=float,
-        default=0.0,
+        default=300.0,
         dest='file_timeout_seconds',
         help='Abort indexing a single file after this many seconds (0 disables).',
     )
@@ -4086,7 +4086,7 @@ def main():
                     continue
         except Exception as exc:
             if isinstance(exc, FileTimeoutError):
-                message = f"Timeout: {exc}"
+                message = f"Timeout: after {exc.seconds:.0f}s at stage {exc.stage}"
                 logger.error("File timed out %s: %s", path, exc)
             else:
                 message = str(exc)
