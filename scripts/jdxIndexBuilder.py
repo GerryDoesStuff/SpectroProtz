@@ -2461,7 +2461,7 @@ def refine_peak_candidates(
     min_absorbance_threshold = float(_get_param(args, "min_absorbance_threshold", 0.05))
     fit_maxfev = int(_get_param(args, "fit_maxfev", 10000) or 10000)
     fit_maxfev = max(1, min(fit_maxfev, 20000))
-    fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 0.0) or 0.0)
+    fit_timeout_sec = float(_get_param(args, "fit_timeout_sec", 900.0) or 0.0)
     multi_fit_min_span_cm = float(_get_param(args, "multi_fit_min_span_cm", 10.0) or 0.0)
     flat_max_threshold = float(
         _get_param(args, "flat_max_amplitude", max(min_absorbance_threshold * 0.5, 0.0))
@@ -3871,7 +3871,7 @@ def main():
         help='Minimum cluster span (cm^-1) required for multi-peak fitting.',
     )
     ap.add_argument('--fit-maxfev',type=int,default=10000,dest='fit_maxfev')
-    ap.add_argument('--fit-timeout-sec',type=float,default=0.0,dest='fit_timeout_sec')
+    ap.add_argument('--fit-timeout-sec',type=float,default=900.0,dest='fit_timeout_sec')
     ap.add_argument('--file-min-samples',type=int,default=2);ap.add_argument('--file-eps-factor',type=float,default=0.5);ap.add_argument('--file-eps-min',type=float,default=2.0)
     ap.add_argument('--global-min-samples',type=int,default=2);ap.add_argument('--global-eps-abs',type=float,default=4.0)
     ap.add_argument('--detect-negative-peaks',action='store_true',dest='detect_negative_peaks',help='Also detect negative peaks by searching inverted spectra.')
