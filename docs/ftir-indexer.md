@@ -109,7 +109,7 @@ Defaults are shown in parentheses.
 ### Behavior toggles and safety guards
 - `--detect-negative-peaks` (false) — also detect negative peaks by inverting spectra.
 - `--strict` (false) — raise exceptions instead of skipping unsupported files.
-- `--file-timeout-seconds` (0.0) — abort indexing a single file after this many seconds.
+- `--file-timeout-seconds` (300.0) — abort indexing a single file after this many seconds.
 
 ### Step-plot export controls
 - `--export-step-plots` (false) — export per-step spectra workbooks.
