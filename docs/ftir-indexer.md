@@ -97,7 +97,7 @@ Defaults are shown in parentheses.
 - `--min-r2` (0.75)
 - `--fit-window-pts` (70)
 - `--fit-maxfev` (10000)
-- `--fit-timeout-sec` (0.0)
+- `--fit-timeout-sec` (900.0)
 
 ### Consensus clustering
 - `--file-min-samples` (2)
