@@ -655,6 +655,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _connect_recipe_editor(self):
         self.recipeDock.module.currentTextChanged.connect(self._on_module_changed)
+        self.recipeDock.module_changed.connect(self._on_recipe_module_changed)
         self.recipeDock.smooth_enable.toggled.connect(self._on_recipe_widget_changed)
         self.recipeDock.smooth_window.valueChanged.connect(self._on_recipe_widget_changed)
         self.recipeDock.config_changed.connect(self._on_recipe_config_changed)
@@ -1872,6 +1873,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not module_id:
             return
         self._select_module(module_id, user_initiated=True)
+
+    def _on_recipe_module_changed(self, _module_text: str) -> None:
+        self.previewDock.reset_axis_label_cache()
+        self._on_recipe_config_changed()
 
     def _on_mode_selector_changed(self, index: int):
         if self._updating_ui:

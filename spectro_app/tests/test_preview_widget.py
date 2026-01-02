@@ -219,6 +219,42 @@ def test_peaks_toggle_preserved_with_preserve_view(qt_app):
         qt_app.processEvents()
 
 
+def test_axis_labels_update_on_module_change(qt_app):
+    widget = preview_widget.SpectraPlotWidget()
+    try:
+        wavelength = np.array([400.0, 500.0, 600.0], dtype=float)
+        intensity = np.array([0.2, 0.4, 0.1], dtype=float)
+        uvvis = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"axis_key": "wavelength", "axis_unit": "nm"},
+        )
+
+        assert widget.set_spectra([uvvis])
+        qt_app.processEvents()
+
+        bottom_axis = widget.plot.plotItem.getAxis("bottom")
+        assert bottom_axis.labelText == "Wavelength"
+        assert bottom_axis.labelUnits == "nm"
+
+        widget.reset_axis_label_cache()
+
+        ftir = Spectrum(
+            wavelength=wavelength,
+            intensity=intensity,
+            meta={"axis_key": "wavenumber", "axis_unit": "cm^-1"},
+        )
+        assert widget.set_spectra([ftir], preserve_view=True)
+        qt_app.processEvents()
+
+        bottom_axis = widget.plot.plotItem.getAxis("bottom")
+        assert bottom_axis.labelText == "Wavenumber"
+        assert bottom_axis.labelUnits == "cm^-1"
+    finally:
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
 def test_blank_role_spectra_are_excluded(qt_app):
     widget = preview_widget.SpectraPlotWidget()
     try:
