@@ -316,7 +316,8 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
                 arr = entry
         else:
             arr = entry
-        intensity_source = safe_getattr(arr, "values") or safe_getattr(arr, "data")
+        values = safe_getattr(arr, "values")
+        intensity_source = values if values is not None else safe_getattr(arr, "data")
         if intensity_source is None:
             raise ValueError(
                 "SpectroChemPy dataset missing y-values (expected .values or .data); "
@@ -326,7 +327,8 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
 
         axis = None
         axis_unit = None
-        y_unit = normalize_unit(getattr(arr, "units", None) or getattr(arr, "unit", None))
+        y_units = getattr(arr, "units", None)
+        y_unit = normalize_unit(y_units if y_units is not None else getattr(arr, "unit", None))
         x_obj = safe_getattr(arr, "x")
         if x_obj is None:
             coordset = safe_getattr(arr, "coordset")
@@ -337,7 +339,8 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
                 "cannot build spectrum."
             )
         axis = to_numeric_array(strip_magnitude(x_obj))
-        axis_unit = normalize_unit(getattr(x_obj, "units", None) or getattr(x_obj, "unit", None))
+        axis_units = getattr(x_obj, "units", None)
+        axis_unit = normalize_unit(axis_units if axis_units is not None else getattr(x_obj, "unit", None))
 
         meta: Dict[str, object] = {
             "source": "opus",
