@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 import numpy as np
 
 from spectro_app.engine.peak_detection import detect_peaks_for_features, resolve_peak_config
-from spectro_app.engine.plugin_api import Spectrum
+from spectro_app.engine.plugin_api import BatchResult, Spectrum
 from spectro_app.plugins.uvvis import pipeline as uvvis_pipeline
 
 
@@ -164,7 +164,7 @@ def _generic_analyze(
     return specs_with_peaks, qc_rows
 
 
-def run_pipeline(
+def run_processing(
     plugin,
     specs: Iterable[Spectrum],
     recipe: Mapping[str, object],
@@ -179,3 +179,13 @@ def run_pipeline(
     preprocessed = _core_peak_detection(preprocessed, peak_cfg, axis_key="wavelength")
     return plugin.analyze(preprocessed, recipe)
 
+
+def run_pipeline(
+    plugin,
+    specs: Iterable[Spectrum],
+    recipe: Mapping[str, object],
+    *,
+    export_recipe: Mapping[str, object] | None = None,
+) -> BatchResult:
+    processed, qc = run_processing(plugin, specs, recipe)
+    return plugin.export(processed, qc, dict(export_recipe or recipe))

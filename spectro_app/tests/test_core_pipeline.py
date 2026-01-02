@@ -11,7 +11,7 @@ def test_core_pipeline_detects_peaks_for_non_uvvis_plugin():
     intensity = np.exp(-0.5 * ((x_axis - 300.0) / 8.0) ** 2)
     spectrum = Spectrum(wavelength=x_axis, intensity=intensity, meta={"role": "sample"})
 
-    processed, qc_rows = core_pipeline.run_pipeline(
+    processed, qc_rows = core_pipeline.run_processing(
         plugin,
         [spectrum],
         {"features": {"peaks": {"enabled": True}}},

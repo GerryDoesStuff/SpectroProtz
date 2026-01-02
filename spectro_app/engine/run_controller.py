@@ -88,24 +88,19 @@ class BatchRunnable(QRunnable):
                 raise RuntimeError("; ".join(errs))
             self.signals.progress.emit(20)
 
-            self._emit_message("Preprocessing spectra...")
-            self._raise_if_cancelled()
-            specs = self.plugin.preprocess(specs, flattened_recipe)
-            self.signals.progress.emit(40)
-
-            self._emit_message("Analyzing spectra...")
-            self._raise_if_cancelled()
-            specs, qc = core_pipeline.run_pipeline(self.plugin, specs, flattened_recipe)
-            self.signals.progress.emit(70)
-
-            self._emit_message("Exporting results...")
+            self._emit_message("Running pipeline...")
             self._raise_if_cancelled()
             export_recipe = (
                 _sanitize_export_for_preview(flattened_recipe)
                 if self._preview_export_disabled
                 else flattened_recipe
             )
-            result = self.plugin.export(specs, qc, export_recipe)
+            result = core_pipeline.run_pipeline(
+                self.plugin,
+                specs,
+                flattened_recipe,
+                export_recipe=export_recipe,
+            )
             self.signals.progress.emit(100)
             self.signals.finished.emit(result)
         except Exception as e:
