@@ -36,6 +36,8 @@ the Y axis and `x`/`coordset.x` for the X axis. If SpectroChemPy cannot parse an
 OPUS file or those accessors are missing, the application surfaces the raw
 exception (type + message) in the UI and records the full traceback in the
 log folder. Logs are accessible via **Tools → Open Log Folder**.
+Accessor selection is done with explicit `None` checks so Pint-backed arrays
+never trigger boolean evaluation while loading spectra.
 
 OPUS ingestion accepts both `.opus` files and Bruker-style numeric suffixes
 such as `.0`, `.1`, or `.000`, routing them through the same OPUS reader for
