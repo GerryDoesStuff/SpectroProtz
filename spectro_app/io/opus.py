@@ -356,7 +356,7 @@ def _records_from_brukeropusreader(data: object, path: str | Path) -> List[Dict[
     return records
 
 
-def load_opus_records_via_external_readers(path: str | Path) -> List[Dict[str, object]]:
+def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
     errors: List[str] = []
     try:
         from spectrochempy import read_opus as scp_read_opus
@@ -367,7 +367,6 @@ def load_opus_records_via_external_readers(path: str | Path) -> List[Dict[str, o
             records = _records_from_spectrochempy(scp_read_opus(str(path)), path)
             if records:
                 return records
-            raise ValueError("spectrochempy.read_opus returned no spectra.")
         except Exception as exc:
             errors.append(f"spectrochempy.read_opus failed: {exc}")
 
@@ -380,22 +379,24 @@ def load_opus_records_via_external_readers(path: str | Path) -> List[Dict[str, o
             records = _records_from_brukeropusreader(bruker_read_file(str(path)), path)
             if records:
                 return records
-            raise ValueError("brukeropusreader.read_file returned no spectra.")
         except Exception as exc:
             errors.append(f"brukeropusreader.read_file failed: {exc}")
 
-    try:
-        return read_opus_records(path)
-    except Exception as exc:
-        errors.append(f"fallback read_opus_records failed: {exc}")
-        error_message = "Unable to read OPUS file with available readers:\n" + "\n".join(
+    if errors:
+        error_message = "External OPUS readers unavailable or failed:\n" + "\n".join(
             f"- {error}" for error in errors
         )
-        raise ValueError(error_message) from exc
+        raise ValueError(error_message)
+    return []
 
 
 def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List[Spectrum]:
-    records = load_opus_records_via_external_readers(path)
+    try:
+        records = read_opus_records_external(path)
+    except ValueError:
+        records = []
+    if not records:
+        records = read_opus_records(path)
     spectra: List[Spectrum] = []
     for record in records:
         meta = dict(record.get("meta", {}))
