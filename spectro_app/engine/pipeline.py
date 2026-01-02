@@ -412,6 +412,39 @@ def apply_solvent_subtraction(
     corrected[apply_mask] = y[apply_mask] - fitted[apply_mask]
     overlap_min = float(np.min(x[apply_mask]))
     overlap_max = float(np.max(x[apply_mask]))
+    residual = y[apply_mask] - fitted[apply_mask]
+    sse = float(np.sum(residual * residual))
+    rmse = float(np.sqrt(sse / residual.size)) if residual.size else None
+    negative_fraction = None
+    negative_area = None
+    if residual.size:
+        corrected_overlap = corrected[apply_mask]
+        negative_fraction = float(np.mean(corrected_overlap < 0.0))
+        order = np.argsort(x[apply_mask])
+        sorted_x = x[apply_mask][order]
+        sorted_corrected = corrected_overlap[order]
+        negative_area = float(
+            np.trapz(np.minimum(sorted_corrected, 0.0), sorted_x)
+        )
+    derivative_corr = None
+    if residual.size >= 3:
+        derivative = np.gradient(fitted[apply_mask], x[apply_mask])
+        valid = np.isfinite(residual) & np.isfinite(derivative)
+        if np.count_nonzero(valid) >= 3:
+            corr = np.corrcoef(residual[valid], derivative[valid])
+            derivative_corr = float(corr[0, 1])
+    condition_number = None
+    fit_design = ref_matrix[fit_mask]
+    if fit_design.size and fit_design.shape[0] >= fit_design.shape[1]:
+        design_matrix = fit_design
+        if offset_used:
+            design_matrix = np.column_stack(
+                [design_matrix, np.ones(design_matrix.shape[0], dtype=float)]
+            )
+        try:
+            condition_number = float(np.linalg.cond(design_matrix))
+        except np.linalg.LinAlgError:
+            condition_number = None
 
     meta = dict(spec.meta or {})
     solvent_meta = dict(meta.get("solvent_subtraction") or {})
@@ -450,6 +483,49 @@ def apply_solvent_subtraction(
             "target_axis": "sample_axis",
         },
     }
+    warning_thresholds = {
+        "min_overlap_points": 10,
+        "max_negative_fraction": 0.1,
+        "max_derivative_corr_abs": 0.7,
+        "max_condition_number": 1.0e6,
+        "max_normalized_rmse": 0.5,
+    }
+    warnings = []
+    overlap_points = int(np.count_nonzero(apply_mask))
+    if overlap_points < warning_thresholds["min_overlap_points"]:
+        warnings.append(
+            f"Low overlap coverage (points={overlap_points}, "
+            f"threshold={warning_thresholds['min_overlap_points']})."
+        )
+    if negative_fraction is not None and negative_fraction > warning_thresholds["max_negative_fraction"]:
+        warnings.append(
+            "Potential oversubtraction "
+            f"(negative_fraction={negative_fraction:.3f}, "
+            f"threshold={warning_thresholds['max_negative_fraction']})."
+        )
+    if derivative_corr is not None and abs(derivative_corr) > warning_thresholds["max_derivative_corr_abs"]:
+        warnings.append(
+            "Residuals correlated with reference derivative "
+            f"(corr={derivative_corr:.3f}, "
+            f"threshold={warning_thresholds['max_derivative_corr_abs']})."
+        )
+    if condition_number is not None and condition_number > warning_thresholds["max_condition_number"]:
+        warnings.append(
+            "Ill-conditioned multi-reference fit "
+            f"(condition_number={condition_number:.2e}, "
+            f"threshold={warning_thresholds['max_condition_number']:.2e})."
+        )
+    if rmse is not None and residual.size:
+        signal_std = float(np.std(y[apply_mask])) if residual.size else 0.0
+        normalized_rmse = float(rmse / signal_std) if signal_std else None
+        if normalized_rmse is not None and normalized_rmse > warning_thresholds["max_normalized_rmse"]:
+            warnings.append(
+                "High normalized RMSE over overlap "
+                f"(normalized_rmse={normalized_rmse:.3f}, "
+                f"threshold={warning_thresholds['max_normalized_rmse']})."
+            )
+    else:
+        normalized_rmse = None
 
     if ref_names and not solvent_meta.get("reference_name"):
         solvent_meta["reference_name"] = ref_names[0] if len(ref_names) == 1 else ref_names
@@ -472,10 +548,25 @@ def apply_solvent_subtraction(
             "fit_scale": bool(fit_scale),
             "include_offset": bool(include_offset),
             "ridge_alpha": float(ridge_alpha) if ridge_alpha is not None else None,
+            "weights": None,
             "interpolation": "linear",
             "overlap_min": float(overlap_min),
             "overlap_max": float(overlap_max),
+            "overlap_points": overlap_points,
             "shift_compensation": shift_meta,
+            "diagnostics": {
+                "sse": sse,
+                "rmse": rmse,
+                "normalized_rmse": normalized_rmse,
+            },
+            "oversubtraction": {
+                "negative_fraction": negative_fraction,
+                "negative_area": negative_area,
+            },
+            "residual_derivative_corr": derivative_corr,
+            "condition_number": condition_number,
+            "warning_thresholds": warning_thresholds,
+            "warnings": warnings,
         }
     )
     meta["solvent_subtraction"] = solvent_meta
