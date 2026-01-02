@@ -390,8 +390,11 @@ def _records_from_brukeropusreader(data: object, path: str | Path) -> List[Dict[
     return records
 
 
-def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
+def read_opus_records_external(
+    path: str | Path, *, technique: str | None = None
+) -> List[Dict[str, object]]:
     errors: List[str] = []
+    prefer_spectrochempy_only = (technique or "").lower() == "ftir"
     try:
         from spectrochempy import read_opus as scp_read_opus
     except Exception as exc:
@@ -401,9 +404,11 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
             records = _records_from_spectrochempy(scp_read_opus(str(path)), path)
             if records:
                 return records
-        except ValueError:
-            raise
+            if prefer_spectrochempy_only:
+                raise ValueError("spectrochempy.read_opus returned no spectra.")
         except Exception as exc:
+            if prefer_spectrochempy_only:
+                raise ValueError(f"spectrochempy.read_opus failed: {exc}") from exc
             errors.append(f"spectrochempy.read_opus failed: {exc}")
 
     try:
@@ -430,7 +435,7 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
 
 def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List[Spectrum]:
     # Always use external readers; do not fall back to the minimal parser.
-    records = read_opus_records_external(path)
+    records = read_opus_records_external(path, technique=technique)
     if not records:
         return []
     spectra: List[Spectrum] = []
