@@ -286,6 +286,17 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
             return value
         return [value]
 
+    def safe_getattr(value: object, name: str) -> object | None:
+        try:
+            return getattr(value, name)
+        except Exception:
+            return None
+
+    def strip_magnitude(value: object) -> object:
+        if hasattr(value, "magnitude"):
+            return getattr(value, "magnitude")
+        return value
+
     records: List[Dict[str, object]] = []
     for index, entry in enumerate(iter_datasets(dataset)):
         if entry is None:
@@ -297,30 +308,27 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
                 arr = entry
         else:
             arr = entry
-        intensity_source = None
-        if hasattr(arr, "values"):
-            intensity_source = getattr(arr, "values")
-        elif hasattr(arr, "data"):
-            intensity_source = getattr(arr, "data")
+        intensity_source = safe_getattr(arr, "values") or safe_getattr(arr, "data")
         if intensity_source is None:
             raise ValueError(
-                f"spectrochempy entry {index} has no intensity values on .values or .data."
+                "SpectroChemPy dataset missing y-values (expected .values or .data); "
+                "cannot build spectrum."
             )
-        intensity = to_numeric_array(intensity_source)
+        intensity = to_numeric_array(strip_magnitude(intensity_source))
 
         axis = None
         axis_unit = None
         y_unit = normalize_unit(getattr(arr, "units", None) or getattr(arr, "unit", None))
-        try:
-            x_obj = arr.x
-        except Exception:
-            x_obj = None
+        x_obj = safe_getattr(arr, "x")
         if x_obj is None:
-            coordset = getattr(arr, "coordset", None)
-            x_obj = getattr(coordset, "x", None) if coordset is not None else None
+            coordset = safe_getattr(arr, "coordset")
+            x_obj = safe_getattr(coordset, "x") if coordset is not None else None
         if x_obj is None:
-            raise ValueError(f"spectrochempy entry {index} has no x axis on .x or .coordset.x.")
-        axis = to_numeric_array(x_obj)
+            raise ValueError(
+                "SpectroChemPy dataset missing x-axis (expected .x or .coordset.x); "
+                "cannot build spectrum."
+            )
+        axis = to_numeric_array(strip_magnitude(x_obj))
         axis_unit = normalize_unit(getattr(x_obj, "units", None) or getattr(x_obj, "unit", None))
 
         meta: Dict[str, object] = {
