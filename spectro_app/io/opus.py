@@ -246,15 +246,20 @@ def read_opus_records(path: str | Path) -> List[Dict[str, object]]:
     return records
 
 
-def _normalize_axis_unit(axis_unit: object | None) -> str | None:
-    if axis_unit is None:
+def normalize_unit(unit: object | None) -> str | None:
+    if unit is None:
         return None
-    if isinstance(axis_unit, str):
-        return axis_unit
     try:
-        return str(axis_unit)
+        text = str(unit).strip()
     except Exception:
         return None
+    if not text:
+        return None
+    mapping = {
+        "1 / centimeter": "cm^-1",
+        "absorbance": "Absorbance",
+    }
+    return mapping.get(text.lower(), text)
 
 
 def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
@@ -266,19 +271,6 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
         elif hasattr(value, "values"):
             value = getattr(value, "values")
         return np.asarray(value, dtype=float)
-
-    def normalize_unit(unit: object | None) -> str | None:
-        if unit is None:
-            return None
-        try:
-            text = str(unit).strip()
-        except Exception:
-            return None
-        mapping = {
-            "1 / centimeter": "cm^-1",
-            "absorbance": "Absorbance",
-        }
-        return mapping.get(text.lower(), text)
 
     def iter_datasets(value: object) -> Iterable[object]:
         if isinstance(value, (list, tuple)):
@@ -328,26 +320,44 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
 
 def _records_from_brukeropusreader(data: object, path: str | Path) -> List[Dict[str, object]]:
     def record_from_mapping(mapping: Dict[str, object]) -> Dict[str, object] | None:
-        intensity = (
-            mapping.get("y")
-            or mapping.get("intensity")
-            or mapping.get("spectrum")
-            or mapping.get("spec")
-            or mapping.get("data")
-        )
-        if intensity is None:
-            return None
-        axis = mapping.get("x") or mapping.get("wavenumber") or mapping.get("wavelength") or mapping.get("axis")
-        if axis is None:
-            axis = np.arange(len(intensity), dtype=float)
-        axis_unit = _normalize_axis_unit(
-            mapping.get("axis_unit") or mapping.get("x_unit") or mapping.get("xunit")
-        )
+        if all(key in mapping for key in ("FXV", "LXV", "NPT", "AB")):
+            fxv = mapping.get("FXV")
+            lxv = mapping.get("LXV")
+            npt = mapping.get("NPT")
+            intensity = np.asarray(mapping.get("AB"), dtype=float)
+            try:
+                count = int(npt)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"brukeropusreader NPT is not an integer: {npt}") from exc
+            if intensity.size != count:
+                raise ValueError(
+                    f"brukeropusreader AB length {intensity.size} does not match NPT {count}"
+                )
+            axis = np.linspace(float(fxv), float(lxv), count)
+            axis_unit = normalize_unit(mapping.get("XUN"))
+            y_unit = normalize_unit(mapping.get("YUN"))
+        else:
+            intensity = (
+                mapping.get("y")
+                or mapping.get("intensity")
+                or mapping.get("spectrum")
+                or mapping.get("spec")
+                or mapping.get("data")
+            )
+            if intensity is None:
+                return None
+            axis = mapping.get("x") or mapping.get("wavenumber") or mapping.get("wavelength") or mapping.get("axis")
+            if axis is None:
+                axis = np.arange(len(intensity), dtype=float)
+            axis_unit = normalize_unit(mapping.get("axis_unit") or mapping.get("x_unit") or mapping.get("xunit"))
+            y_unit = normalize_unit(mapping.get("y_unit") or mapping.get("yunit"))
+
         meta: Dict[str, object] = {
             "source": "opus",
             "source_file": str(path),
             "axis_key": "wavenumber",
             "axis_unit": axis_unit or "cm^-1",
+            "y_unit": y_unit,
             "external_reader": "brukeropusreader",
         }
         extra_meta = mapping.get("meta") or mapping.get("metadata") or mapping.get("params")
