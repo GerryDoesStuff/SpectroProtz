@@ -252,7 +252,8 @@ class MainWindow(QtWidgets.QMainWindow):
             handler.setFormatter(formatter)
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)
-        logger.exception("Preview failed for %s: %s", path, exc)
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.exception("Preview failed for %s: %s", path, detail)
 
     def _init_docks(self):
         self.fileDock = FileQueueDock(self)
@@ -1564,8 +1565,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 hint = f"\n\n{optional_hint}\n{availability}"
             message = str(exc)
-            if not message:
-                message = repr(exc)
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",

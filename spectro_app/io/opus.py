@@ -430,7 +430,11 @@ def read_opus_records_external(
                 raise ValueError("spectrochempy.read_opus returned no spectra.")
         except Exception as exc:
             logger.exception("spectrochempy.read_opus failed for %s", path)
-            raise
+            exc_type = type(exc).__name__
+            exc_message = str(exc)
+            raise RuntimeError(
+                f"spectrochempy.read_opus failed ({exc_type}): {exc_message}"
+            ) from exc
 
     try:
         from brukeropusreader import read_file as bruker_read_file
