@@ -222,67 +222,176 @@ def smooth_spectrum(*args: Any, **kwargs: Any) -> Spectrum:
 
 def apply_solvent_subtraction(
     spec: Spectrum,
-    reference: Spectrum,
+    reference: Spectrum | Sequence[Spectrum],
     *,
     reference_id: str | None = None,
     scale: float | None = None,
     fit_scale: bool = True,
+    ridge_alpha: float | None = None,
+    include_offset: bool = False,
 ) -> Spectrum:
     x = np.asarray(spec.wavelength, dtype=float)
     y = np.asarray(spec.intensity, dtype=float)
-    ref_x = np.asarray(reference.wavelength, dtype=float)
-    ref_y = np.asarray(reference.intensity, dtype=float)
-
-    if x.size == 0 or ref_x.size == 0:
+    references = list(reference) if isinstance(reference, Sequence) else [reference]
+    if not references:
+        return spec
+    ref_specs = [ref for ref in references if ref is not None]
+    if not ref_specs:
         return spec
 
-    ref_order = np.argsort(ref_x)
-    ref_x_sorted = ref_x[ref_order]
-    ref_y_sorted = ref_y[ref_order]
-
-    x_order = np.argsort(x)
-    x_sorted = x[x_order]
-    ref_interp_sorted = np.interp(
-        x_sorted,
-        ref_x_sorted,
-        ref_y_sorted,
-        left=np.nan,
-        right=np.nan,
-    )
-    ref_interp = np.empty_like(ref_interp_sorted)
-    ref_interp[x_order] = ref_interp_sorted
-
-    mask = np.isfinite(ref_interp) & np.isfinite(y)
-    if not np.any(mask):
+    if x.size == 0:
         return spec
 
-    if fit_scale or scale is None:
-        denom = float(np.dot(ref_interp[mask], ref_interp[mask]))
+    def _interp_reference(target_x: np.ndarray, ref_spec: Spectrum) -> np.ndarray:
+        ref_x = np.asarray(ref_spec.wavelength, dtype=float)
+        ref_y = np.asarray(ref_spec.intensity, dtype=float)
+        if ref_x.size == 0:
+            return np.full_like(target_x, np.nan, dtype=float)
+        ref_order = np.argsort(ref_x)
+        ref_x_sorted = ref_x[ref_order]
+        ref_y_sorted = ref_y[ref_order]
+        x_order = np.argsort(target_x)
+        x_sorted = target_x[x_order]
+        ref_interp_sorted = np.interp(
+            x_sorted,
+            ref_x_sorted,
+            ref_y_sorted,
+            left=np.nan,
+            right=np.nan,
+        )
+        ref_interp = np.empty_like(ref_interp_sorted)
+        ref_interp[x_order] = ref_interp_sorted
+        return ref_interp
+
+    def _axis_limits(axis: np.ndarray) -> Tuple[float, float] | None:
+        valid = axis[np.isfinite(axis)]
+        if valid.size == 0:
+            return None
+        return float(np.min(valid)), float(np.max(valid))
+
+    target_limits = _axis_limits(x)
+    if target_limits is None:
+        return spec
+    ref_limits = []
+    for ref in ref_specs:
+        ref_axis = np.asarray(ref.wavelength, dtype=float)
+        limits = _axis_limits(ref_axis)
+        if limits is None:
+            return spec
+        ref_limits.append(limits)
+
+    overlap_min = max([target_limits[0]] + [limits[0] for limits in ref_limits])
+    overlap_max = min([target_limits[1]] + [limits[1] for limits in ref_limits])
+    if overlap_min >= overlap_max:
+        return spec
+
+    overlap_mask = (x >= overlap_min) & (x <= overlap_max)
+    if not np.any(overlap_mask):
+        return spec
+
+    ref_interp_list = [_interp_reference(x, ref) for ref in ref_specs]
+    ref_matrix = np.column_stack(ref_interp_list)
+    fit_mask = overlap_mask & np.isfinite(y)
+    if ref_matrix.shape[1] == 1:
+        fit_mask &= np.isfinite(ref_matrix[:, 0])
+    else:
+        fit_mask &= np.all(np.isfinite(ref_matrix), axis=1)
+    if not np.any(fit_mask):
+        return spec
+
+    ref_count = ref_matrix.shape[1]
+    offset_used = bool(include_offset)
+    coef = None
+    offset = 0.0
+    if ref_count == 1 and not offset_used and not (fit_scale or scale is None):
+        scale_val = float(scale)
+        coef = np.array([scale_val], dtype=float)
+    elif ref_count == 1 and not offset_used:
+        denom = float(np.dot(ref_matrix[fit_mask, 0], ref_matrix[fit_mask, 0]))
         if denom == 0.0:
             return spec
-        scale = float(np.dot(y[mask], ref_interp[mask]) / denom)
+        scale_val = float(np.dot(y[fit_mask], ref_matrix[fit_mask, 0]) / denom)
+        coef = np.array([scale_val], dtype=float)
+    else:
+        design = ref_matrix[fit_mask]
+        if offset_used:
+            design = np.column_stack([design, np.ones(design.shape[0], dtype=float)])
+        target = y[fit_mask]
+        ridge = None
+        if ref_count > 1 and ridge_alpha is not None:
+            ridge_val = float(ridge_alpha)
+            if ridge_val > 0.0:
+                ridge = ridge_val
+        if ridge is None:
+            coef, *_ = np.linalg.lstsq(design, target, rcond=None)
+        else:
+            gram = design.T @ design
+            if offset_used:
+                penalty = np.diag([ridge] * ref_count + [0.0])
+            else:
+                penalty = np.diag([ridge] * ref_count)
+            try:
+                coef = np.linalg.solve(gram + penalty, design.T @ target)
+            except np.linalg.LinAlgError:
+                coef, *_ = np.linalg.lstsq(gram + penalty, design.T @ target, rcond=None)
+        if offset_used:
+            offset = float(coef[-1])
+            coef = np.asarray(coef[:-1], dtype=float)
 
+    fitted = ref_matrix @ coef
+    if offset_used:
+        fitted = fitted + offset
+    fitted = np.asarray(fitted, dtype=float)
+    valid_ref_mask = np.all(np.isfinite(ref_matrix), axis=1)
+    apply_mask = fit_mask & valid_ref_mask
     corrected = y.copy()
-    corrected[mask] = y[mask] - float(scale) * ref_interp[mask]
+    corrected[apply_mask] = y[apply_mask] - fitted[apply_mask]
 
     meta = dict(spec.meta or {})
     solvent_meta = dict(meta.get("solvent_subtraction") or {})
-    reference_meta = dict(reference.meta or {})
-    if reference_meta.get("reference_name") and not solvent_meta.get("reference_name"):
-        solvent_meta["reference_name"] = reference_meta.get("reference_name")
-    if reference_meta.get("reference_tags") and not solvent_meta.get("reference_tags"):
-        solvent_meta["reference_tags"] = reference_meta.get("reference_tags")
-    if reference_meta.get("reference_metadata") and not solvent_meta.get("reference_metadata"):
-        solvent_meta["reference_metadata"] = reference_meta.get("reference_metadata")
-    if reference_meta.get("source_path") and not solvent_meta.get("reference_source"):
-        solvent_meta["reference_source"] = reference_meta.get("source_path")
+    ref_names = []
+    ref_tags = []
+    ref_metadata = []
+    ref_sources = []
+    ref_ids = []
+    for ref in ref_specs:
+        reference_meta = dict(ref.meta or {})
+        if reference_meta.get("reference_name"):
+            ref_names.append(reference_meta.get("reference_name"))
+        if reference_meta.get("reference_tags"):
+            ref_tags.append(reference_meta.get("reference_tags"))
+        if reference_meta.get("reference_metadata"):
+            ref_metadata.append(reference_meta.get("reference_metadata"))
+        if reference_meta.get("source_path"):
+            ref_sources.append(reference_meta.get("source_path"))
+        ref_ident = _reference_identifier(ref)
+        if ref_ident:
+            ref_ids.append(ref_ident)
+
+    if ref_names and not solvent_meta.get("reference_name"):
+        solvent_meta["reference_name"] = ref_names[0] if len(ref_names) == 1 else ref_names
+    if ref_tags and not solvent_meta.get("reference_tags"):
+        solvent_meta["reference_tags"] = ref_tags[0] if len(ref_tags) == 1 else ref_tags
+    if ref_metadata and not solvent_meta.get("reference_metadata"):
+        solvent_meta["reference_metadata"] = ref_metadata[0] if len(ref_metadata) == 1 else ref_metadata
+    if ref_sources and not solvent_meta.get("reference_source"):
+        solvent_meta["reference_source"] = ref_sources[0] if len(ref_sources) == 1 else ref_sources
     solvent_meta.update(
         {
             "enabled": True,
-            "reference_id": reference_id,
-            "scale": float(scale) if scale is not None else None,
-            "overlap_min": float(np.min(x[mask])),
-            "overlap_max": float(np.max(x[mask])),
+            "reference_id": reference_id or (ref_ids[0] if len(ref_ids) == 1 else None),
+            "reference_ids": ref_ids if len(ref_ids) > 1 else None,
+            "reference_count": int(ref_count),
+            "scale_input": float(scale) if scale is not None else None,
+            "scale": float(coef[0]) if coef is not None and coef.size == 1 else None,
+            "coefficients": [float(val) for val in coef] if coef is not None and coef.size > 1 else None,
+            "offset": float(offset) if offset_used else None,
+            "fit_scale": bool(fit_scale),
+            "include_offset": bool(include_offset),
+            "ridge_alpha": float(ridge_alpha) if ridge_alpha is not None else None,
+            "interpolation": "linear",
+            "overlap_min": float(overlap_min),
+            "overlap_max": float(overlap_max),
         }
     )
     meta["solvent_subtraction"] = solvent_meta
