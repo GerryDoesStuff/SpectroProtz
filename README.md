@@ -24,8 +24,9 @@ A typical workflow uses a virtual environment so the above packages can be
 installed without affecting system Python.
 
 ### Optional OPUS readers
-SpectroProtz includes a built-in OPUS parser, but for more robust coverage you
-can install one of the optional readers below:
+SpectroProtz loads OPUS spectra through external readers to ensure the axis and
+intensity arrays are populated with SpectroChemPy’s default dataset accessors.
+Install one (or both) of the optional readers below to enable OPUS imports:
 
 - **spectrochempy** (adds `spectrochempy.read_opus`)
 - **brukeropusreader** (adds `brukeropusreader.read_file`)
