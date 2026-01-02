@@ -81,3 +81,33 @@ def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) ->
 
     message = str(excinfo.value)
     assert "External OPUS readers unavailable or failed" in message
+
+
+def test_load_opus_spectra_ftir_stops_on_spectrochempy_error(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    spectrochempy = ModuleType("spectrochempy")
+
+    def read_opus(_: str) -> None:
+        calls.append(("spectrochempy", "read_opus"))
+        raise RuntimeError("spectrochempy boom")
+
+    spectrochempy.read_opus = read_opus
+    monkeypatch.setitem(__import__("sys").modules, "spectrochempy", spectrochempy)
+
+    brukeropusreader = ModuleType("brukeropusreader")
+
+    def read_file(_: str) -> None:
+        calls.append(("brukeropusreader", "read_file"))
+        return None
+
+    brukeropusreader.read_file = read_file
+    monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
+
+    opus_path = tmp_path / "ftir-broken.opus"
+    opus_path.write_bytes(b"unused")
+
+    with pytest.raises(ValueError) as excinfo:
+        opus_reader.load_opus_spectra(opus_path, technique="ftir")
+
+    assert calls == [("spectrochempy", "read_opus")]
+    assert "spectrochempy.read_opus failed: spectrochempy boom" in str(excinfo.value)
