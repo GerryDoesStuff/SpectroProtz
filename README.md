@@ -39,7 +39,18 @@ log folder. Logs are accessible via **Tools → Open Log Folder**.
 
 OPUS ingestion accepts both `.opus` files and Bruker-style numeric suffixes
 such as `.0`, `.1`, or `.000`, routing them through the same OPUS reader for
-FTIR, Raman, and UV-Vis workflows.
+FTIR and Raman workflows.
+
+## Supported techniques and file formats
+SpectroProtz focuses on FTIR, Raman, and UV-Vis processing. The current import
+coverage includes:
+
+- **FTIR:** JCAMP-DX (`.jdx`) and OPUS (`.opus`, Bruker numeric suffixes) when
+  SpectroChemPy is available.
+- **Raman:** CSV/TXT tabular exports and OPUS (`.opus`, Bruker numeric suffixes)
+  when SpectroChemPy is available.
+- **UV-Vis:** Thermo Helios `.dsp` files, generic CSV/TXT delimited text, and
+  Excel (`.xls`, `.xlsx`) workbooks.
 
 ## Setup
 From a fresh checkout:
