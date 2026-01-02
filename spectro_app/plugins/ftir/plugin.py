@@ -14,6 +14,8 @@ class FtirPlugin(SpectroscopyPlugin):
         spectra = []
         for path in paths:
             if str(path).lower().endswith(".opus"):
+                # Allow load_opus_spectra errors to propagate so callers can
+                # surface the real parsing failure.
                 spectra.extend(load_opus_spectra(path, technique="ftir"))
         if not spectra:
             raise ValueError("No OPUS spectra were loaded from the provided paths.")
