@@ -80,4 +80,4 @@ def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) ->
         opus_reader.load_opus_spectra(opus_path)
 
     message = str(excinfo.value)
-    assert "OPUS load failed: install spectrochempy or brukeropusreader" in message
+    assert "External OPUS readers unavailable or failed" in message

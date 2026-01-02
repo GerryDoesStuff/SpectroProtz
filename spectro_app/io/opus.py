@@ -401,6 +401,8 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
             records = _records_from_spectrochempy(scp_read_opus(str(path)), path)
             if records:
                 return records
+        except ValueError:
+            raise
         except Exception as exc:
             errors.append(f"spectrochempy.read_opus failed: {exc}")
 
@@ -413,6 +415,8 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
             records = _records_from_brukeropusreader(bruker_read_file(str(path)), path)
             if records:
                 return records
+        except ValueError:
+            raise
         except Exception as exc:
             errors.append(f"brukeropusreader.read_file failed: {exc}")
 
@@ -425,6 +429,7 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
 
 
 def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List[Spectrum]:
+    # Always use external readers; do not fall back to the minimal parser.
     records = read_opus_records_external(path)
     if not records:
         return []
