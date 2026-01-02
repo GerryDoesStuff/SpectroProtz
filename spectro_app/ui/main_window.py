@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -42,6 +43,8 @@ from spectro_app.ui.menus import build_menus
 
 if TYPE_CHECKING:  # pragma: no cover - imported only for typing
     from spectro_app.ui.dialogs.ftir_indexer import FtirIndexerDialog
+
+logger = logging.getLogger(__name__)
 
 
 class _ExportLayoutDialog(QtWidgets.QDialog):
@@ -230,6 +233,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._select_module(self._recipe_data["module"])
         self.status.showMessage("Ready")
         self._update_action_states()
+
+    def _log_preview_exception(self, path: str, exc: Exception) -> None:
+        log_dir = self._log_dir or Path.home() / "SpectroApp" / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        log_path = log_dir / "preview_errors.log"
+        handler_exists = False
+        for handler in logger.handlers:
+            if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path:
+                handler_exists = True
+                break
+        if not handler_exists:
+            handler = logging.FileHandler(log_path, encoding="utf-8")
+            formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+        logger.exception("Preview failed for %s: %s", path, exc)
 
     def _init_docks(self):
         self.fileDock = FileQueueDock(self)
@@ -1524,6 +1547,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             spectra = plugin.load([str_path])
         except Exception as exc:
+            self._log_preview_exception(str_path, exc)
             hint = ""
             if candidate.suffix.lower() == ".opus":
                 status = opus_optional_reader_status()
@@ -1539,10 +1563,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{'available' if status['brukeropusreader'] else 'missing'}."
                 )
                 hint = f"\n\n{optional_hint}\n{availability}"
+            message = str(exc)
+            if not message:
+                message = repr(exc)
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
-                f"{exc}{hint}",
+                f"{message}{hint}",
             )
             return
 
@@ -1561,6 +1588,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._raw_preview_window.plot_spectra(spectra)
         except Exception as exc:
+            self._log_preview_exception(str_path, exc)
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
