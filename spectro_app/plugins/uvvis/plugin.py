@@ -2947,8 +2947,13 @@ class UvVisPlugin(SpectroscopyPlugin):
         peak_cfg: Dict[str, object],
         *,
         channels: Mapping[str, object] | None = None,
+        existing_peaks: Sequence[Mapping[str, object]] | None = None,
     ) -> List[Dict[str, object]]:
         config = resolve_peak_config(peak_cfg)
+        if not bool(config.get("enabled", True)):
+            return []
+        if existing_peaks is not None:
+            return [dict(peak) for peak in existing_peaks]
         return detect_peaks_for_features(
             wl,
             intensity,
@@ -3844,11 +3849,17 @@ class UvVisPlugin(SpectroscopyPlugin):
             )
             band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
             integrals = self._compute_integrals(wl, intensity, integral_cfg)
+            existing_peaks = None
+            if isinstance(spec.meta, Mapping):
+                features = spec.meta.get("features")
+                if isinstance(features, Mapping) and isinstance(features.get("peaks"), Sequence):
+                    existing_peaks = features.get("peaks")
             peaks = self._compute_peak_metrics(
                 wl,
                 intensity,
                 peak_cfg,
                 channels=spec.meta.get("channels") if isinstance(spec.meta, Mapping) else None,
+                existing_peaks=existing_peaks,
             )
             isosbestic_checks = self._compute_isosbestic_checks(wl, intensity, isosbestic_cfg)
             timestamp = self._parse_timestamp(spec.meta)
