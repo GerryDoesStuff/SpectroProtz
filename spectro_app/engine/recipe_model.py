@@ -147,6 +147,23 @@ class Recipe:
             if threshold is not None and float(threshold) <= 0:
                 errs.append("Join detection threshold must be positive")
 
+        solvent_cfg = self.params.get("solvent_subtraction")
+        if isinstance(solvent_cfg, dict):
+            ref_id = solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
+            if ref_id is not None:
+                ref_text = str(ref_id).strip()
+                if not ref_text:
+                    errs.append("Solvent reference id must be non-empty when provided")
+            scale_val = solvent_cfg.get("scale")
+            if scale_val is not None:
+                try:
+                    float(scale_val)
+                except (TypeError, ValueError):
+                    errs.append("Solvent subtraction scale must be numeric")
+            fit_scale_val = solvent_cfg.get("fit_scale")
+            if fit_scale_val is not None and not isinstance(fit_scale_val, bool):
+                errs.append("Solvent subtraction fit_scale must be true or false")
+
         blank_cfg = self.params.get("blank", {})
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
         require_blank = blank_cfg.get("require", subtract)

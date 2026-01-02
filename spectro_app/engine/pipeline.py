@@ -28,6 +28,7 @@ __all__ = [
     "stitch_regions",
     "despike_spectrum",
     "smooth_spectrum",
+    "apply_solvent_subtraction",
     "average_replicates",
     "replicate_key",
     "blank_identifier",
@@ -219,6 +220,72 @@ def smooth_spectrum(*args: Any, **kwargs: Any) -> Spectrum:
     return uvvis_pipeline.smooth_spectrum(*args, **kwargs)
 
 
+def apply_solvent_subtraction(
+    spec: Spectrum,
+    reference: Spectrum,
+    *,
+    reference_id: str | None = None,
+    scale: float | None = None,
+    fit_scale: bool = True,
+) -> Spectrum:
+    x = np.asarray(spec.wavelength, dtype=float)
+    y = np.asarray(spec.intensity, dtype=float)
+    ref_x = np.asarray(reference.wavelength, dtype=float)
+    ref_y = np.asarray(reference.intensity, dtype=float)
+
+    if x.size == 0 or ref_x.size == 0:
+        return spec
+
+    ref_order = np.argsort(ref_x)
+    ref_x_sorted = ref_x[ref_order]
+    ref_y_sorted = ref_y[ref_order]
+
+    x_order = np.argsort(x)
+    x_sorted = x[x_order]
+    ref_interp_sorted = np.interp(
+        x_sorted,
+        ref_x_sorted,
+        ref_y_sorted,
+        left=np.nan,
+        right=np.nan,
+    )
+    ref_interp = np.empty_like(ref_interp_sorted)
+    ref_interp[x_order] = ref_interp_sorted
+
+    mask = np.isfinite(ref_interp) & np.isfinite(y)
+    if not np.any(mask):
+        return spec
+
+    if fit_scale or scale is None:
+        denom = float(np.dot(ref_interp[mask], ref_interp[mask]))
+        if denom == 0.0:
+            return spec
+        scale = float(np.dot(y[mask], ref_interp[mask]) / denom)
+
+    corrected = y.copy()
+    corrected[mask] = y[mask] - float(scale) * ref_interp[mask]
+
+    meta = dict(spec.meta or {})
+    solvent_meta = dict(meta.get("solvent_subtraction") or {})
+    solvent_meta.update(
+        {
+            "enabled": True,
+            "reference_id": reference_id,
+            "scale": float(scale) if scale is not None else None,
+            "overlap_min": float(np.min(x[mask])),
+            "overlap_max": float(np.max(x[mask])),
+        }
+    )
+    meta["solvent_subtraction"] = solvent_meta
+    meta["solvent_subtracted"] = True
+
+    return Spectrum(
+        wavelength=x.copy(),
+        intensity=corrected.copy(),
+        meta=meta,
+    )
+
+
 average_replicates = uvvis_pipeline.average_replicates
 replicate_key = uvvis_pipeline.replicate_key
 blank_identifier = uvvis_pipeline.blank_identifier
@@ -244,6 +311,35 @@ def _normalize_identifier(value: object | None) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_role(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
+def _reference_identifier(spec: Spectrum) -> str | None:
+    meta = spec.meta if isinstance(spec.meta, Mapping) else {}
+    for key in ("reference_id", "sample_id", "id", "label", "name"):
+        ident = _normalize_identifier(meta.get(key))
+        if ident:
+            return ident
+    return None
+
+
+def _select_reference(
+    references: Sequence[Spectrum],
+    reference_id: str | None,
+) -> Spectrum | None:
+    if not reference_id:
+        return None
+    for ref in references:
+        ident = _reference_identifier(ref)
+        if ident and ident == reference_id:
+            return ref
+    return None
 
 
 def _blank_candidates(
@@ -327,7 +423,9 @@ def run_pipeline(
     despike_cfg = dict(recipe.get("despike", {})) if recipe else {}
     blank_cfg = dict(recipe.get("blank", {})) if recipe else {}
     baseline_cfg = dict(recipe.get("baseline", {})) if recipe else {}
+    solvent_cfg = dict(recipe.get("solvent_subtraction", {})) if recipe else {}
     smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
+    module_id = str(recipe.get("module", "") or "").strip().lower()
 
     preprocess: List[Spectrum] = []
     for spec in specs_list:
@@ -382,7 +480,31 @@ def run_pipeline(
         preprocess.append(working)
 
     blanks = [spec for spec in preprocess if spec.meta.get("role") == "blank"]
-    samples = [spec for spec in preprocess if spec.meta.get("role") != "blank"]
+    reference_role_set = {"reference", "solvent", "solvent_reference"}
+    solvent_enabled = module_id == "ftir" and bool(solvent_cfg.get("enabled"))
+    solvent_reference_id = _normalize_identifier(
+        solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
+    )
+    solvent_references = (
+        [
+            spec
+            for spec in preprocess
+            if _normalize_role(spec.meta.get("role")) in reference_role_set
+        ]
+        if solvent_enabled
+        else []
+    )
+    solvent_reference = _select_reference(solvent_references, solvent_reference_id)
+
+    if solvent_enabled:
+        samples = [
+            spec
+            for spec in preprocess
+            if spec.meta.get("role") not in {"blank"}
+            and _normalize_role(spec.meta.get("role")) not in reference_role_set
+        ]
+    else:
+        samples = [spec for spec in preprocess if spec.meta.get("role") != "blank"]
 
     subtract_blank_flag = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
     require_blank = blank_cfg.get("require", subtract_blank_flag)
@@ -409,6 +531,15 @@ def run_pipeline(
             }
             params["anchor"] = baseline_cfg.get("anchor")
             working = apply_baseline(working, str(baseline_cfg.get("method")), axis=axis, **params)
+
+        if solvent_enabled and solvent_reference is not None:
+            working = apply_solvent_subtraction(
+                working,
+                solvent_reference,
+                reference_id=solvent_reference_id,
+                scale=solvent_cfg.get("scale"),
+                fit_scale=solvent_cfg.get("fit_scale", True),
+            )
 
         if smoothing_cfg.get("enabled"):
             join_indices = working.meta.get("join_indices")
