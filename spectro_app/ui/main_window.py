@@ -1,6 +1,8 @@
 import copy
 import json
 import logging
+import traceback
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -234,26 +236,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("Ready")
         self._update_action_states()
 
-    def _log_preview_exception(self, path: str, exc: Exception) -> None:
+    def _ensure_log_dir(self) -> tuple[Optional[Path], Optional[Exception]]:
         log_dir = self._log_dir or Path.home() / "SpectroApp" / "logs"
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
+        except OSError as exc:
+            if hasattr(self, "loggerDock"):
+                self.loggerDock.append_line(
+                    f"Error: Unable to create log folder: {exc}"
+                )
+            return None, exc
+        self._log_dir = log_dir
+        self.appctx.settings.setValue("logDir", str(log_dir))
+        return log_dir, None
+
+    def _log_preview_exception(
+        self, paths: List[str], exc: Exception, trace: str
+    ) -> None:
+        timestamp = datetime.now().isoformat(sep=" ", timespec="seconds")
+        cleaned_paths = [path for path in paths if path] or ["<unknown>"]
+        detail = f"{type(exc).__name__}: {exc}"
+        trace_text = trace.strip() or "<no traceback available>"
+        entry_lines = [
+            "Preview error captured.",
+            f"Timestamp: {timestamp}",
+            f"File paths: {', '.join(cleaned_paths)}",
+            f"Exception: {detail}",
+            "Traceback:",
+        ]
+        if hasattr(self, "loggerDock"):
+            self.loggerDock.append_line("")
+            for line in entry_lines:
+                self.loggerDock.append_line(line)
+            for trace_line in trace_text.splitlines() or ["<no traceback available>"]:
+                self.loggerDock.append_line(trace_line)
+            self.loggerDock.append_line("")
+
+        log_dir, _log_error = self._ensure_log_dir()
+        if log_dir is None:
             return
         log_path = log_dir / "preview_errors.log"
-        handler_exists = False
-        for handler in logger.handlers:
-            if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path:
-                handler_exists = True
-                break
-        if not handler_exists:
-            handler = logging.FileHandler(log_path, encoding="utf-8")
-            formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-        detail = f"{type(exc).__name__}: {exc}"
-        logger.exception("Preview failed for %s: %s", path, detail)
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(entry_lines))
+                handle.write("\n")
+                handle.write(trace_text)
+                handle.write("\n" + ("-" * 80) + "\n")
+        except OSError as log_exc:  # pragma: no cover - filesystem error path
+            if hasattr(self, "loggerDock"):
+                self.loggerDock.append_line(
+                    f"Error: Unable to write preview error log: {log_exc}"
+                )
 
     def _init_docks(self):
         self.fileDock = FileQueueDock(self)
@@ -1054,16 +1087,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def on_open_log_folder(self):
-        log_dir = self._log_dir or Path.home() / "SpectroApp" / "logs"
-        try:
-            log_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:  # pragma: no cover - filesystem error path
+        log_dir, log_error = self._ensure_log_dir()
+        if log_dir is None:  # pragma: no cover - filesystem error path
             QtWidgets.QMessageBox.critical(
-                self, "Log Folder", f"Unable to create log folder:\n{exc}"
+                self,
+                "Log Folder",
+                f"Unable to create log folder:\n{log_error}",
             )
             return
-        self._log_dir = log_dir
-        self.appctx.settings.setValue("logDir", str(log_dir))
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(log_dir)))
         self.status.showMessage(f"Opened log folder: {log_dir}", 5000)
 
@@ -1548,7 +1579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             spectra = plugin.load([str_path])
         except Exception as exc:
-            self._log_preview_exception(str_path, exc)
+            self._log_preview_exception([str_path], exc, traceback.format_exc())
             hint = ""
             if candidate.suffix.lower() == ".opus":
                 status = opus_optional_reader_status()
@@ -1565,10 +1596,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 hint = f"\n\n{optional_hint}\n{availability}"
             message = str(exc)
+            log_hint = "\n\nSee Tools → Open Log Folder for preview_errors.log."
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
-                f"{message}{hint}",
+                f"{message}{hint}{log_hint}",
             )
             return
 
@@ -1587,7 +1619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._raw_preview_window.plot_spectra(spectra)
         except Exception as exc:
-            self._log_preview_exception(str_path, exc)
+            self._log_preview_exception([str_path], exc, traceback.format_exc())
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
