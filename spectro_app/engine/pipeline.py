@@ -424,7 +424,7 @@ def apply_solvent_subtraction(
         sorted_x = x[apply_mask][order]
         sorted_corrected = corrected_overlap[order]
         negative_area = float(
-            np.trapz(np.minimum(sorted_corrected, 0.0), sorted_x)
+            np.trapezoid(np.minimum(sorted_corrected, 0.0), sorted_x)
         )
     derivative_corr = None
     if residual.size >= 3:
