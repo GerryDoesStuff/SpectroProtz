@@ -180,6 +180,7 @@ class FileQueueDock(QDockWidget):
     inspect_requested = QtCore.pyqtSignal(str)
     preview_requested = QtCore.pyqtSignal(str)
     locate_requested = QtCore.pyqtSignal(str)
+    save_solvent_reference_requested = QtCore.pyqtSignal(str)
     overrides_changed = QtCore.pyqtSignal(dict)
     clear_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal(list)
@@ -539,6 +540,8 @@ class FileQueueDock(QDockWidget):
         standard_role_action = role_menu.addAction("Standard")
         edit_blank_id_action = menu.addAction("Edit Blank ID…")
         menu.addSeparator()
+        solvent_reference_action = menu.addAction("Save as FTIR Solvent Reference…")
+        menu.addSeparator()
         remove_action = menu.addAction("Remove from Queue")
         menu.addSeparator()
         locate_action = menu.addAction("Show in File Manager")
@@ -552,6 +555,7 @@ class FileQueueDock(QDockWidget):
         entry = self._entry_for_path(selected_path) if selected_path else None
         is_blank = bool(entry and (entry.role == "blank"))
         edit_blank_id_action.setEnabled(enabled and is_blank)
+        solvent_reference_action.setEnabled(enabled)
 
         action = menu.exec(event.globalPos()) if menu.actions() else None
         if not action or not selected_path:
@@ -573,6 +577,8 @@ class FileQueueDock(QDockWidget):
             self._set_role_override(path, "standard")
         elif action is edit_blank_id_action:
             self._edit_blank_id(path)
+        elif action is solvent_reference_action:
+            self.save_solvent_reference_requested.emit(path)
         elif action is locate_action:
             self.locate_requested.emit(path)
         elif action is remove_action:
