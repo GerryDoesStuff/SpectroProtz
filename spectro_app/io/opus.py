@@ -258,6 +258,28 @@ def _normalize_axis_unit(axis_unit: object | None) -> str | None:
 
 
 def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
+    def to_numeric_array(value: object) -> np.ndarray:
+        if hasattr(value, "magnitude"):
+            value = getattr(value, "magnitude")
+        elif hasattr(value, "data"):
+            value = getattr(value, "data")
+        elif hasattr(value, "values"):
+            value = getattr(value, "values")
+        return np.asarray(value, dtype=float)
+
+    def normalize_unit(unit: object | None) -> str | None:
+        if unit is None:
+            return None
+        try:
+            text = str(unit).strip()
+        except Exception:
+            return None
+        mapping = {
+            "1 / centimeter": "cm^-1",
+            "absorbance": "Absorbance",
+        }
+        return mapping.get(text.lower(), text)
+
     def iter_datasets(value: object) -> Iterable[object]:
         if isinstance(value, (list, tuple)):
             return value
@@ -267,21 +289,22 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
     for entry in iter_datasets(dataset):
         if entry is None:
             continue
-        intensity = getattr(entry, "data", entry)
-        intensity = np.asarray(intensity, dtype=float)
+        arr = entry.squeeze()
+        intensity = to_numeric_array(arr)
 
         axis = None
         axis_unit = None
-        axis_source = getattr(entry, "x", None)
-        if axis_source is None:
-            axes = getattr(entry, "axes", None)
-            if axes:
-                axis_source = axes[0]
-        if axis_source is None:
-            axis_source = getattr(entry, "axis", None)
-        if axis_source is not None:
-            axis = getattr(axis_source, "data", axis_source)
-            axis_unit = _normalize_axis_unit(getattr(axis_source, "units", None))
+        y_unit = normalize_unit(getattr(arr, "units", None) or getattr(arr, "unit", None))
+        try:
+            x_obj = arr.x
+        except Exception:
+            x_obj = None
+        if x_obj is None:
+            coordset = getattr(arr, "coordset", None)
+            x_obj = getattr(coordset, "x", None) if coordset is not None else None
+        if x_obj is not None:
+            axis = to_numeric_array(x_obj)
+            axis_unit = normalize_unit(getattr(x_obj, "units", None) or getattr(x_obj, "unit", None))
 
         if axis is None:
             axis = np.arange(intensity.size, dtype=float)
@@ -291,6 +314,7 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
             "source_file": str(path),
             "axis_key": "wavenumber",
             "axis_unit": axis_unit or "cm^-1",
+            "y_unit": y_unit,
             "external_reader": "spectrochempy",
         }
         extra_meta = getattr(entry, "meta", None)
