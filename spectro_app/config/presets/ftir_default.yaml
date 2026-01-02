@@ -1,3 +1,8 @@
 module: "ftir"
-params: {}
+params:
+  solvent_subtraction:
+    enabled: false
+    reference_id: null
+    fit_scale: true
+    scale: 1.0
 version: "0.1.0"
