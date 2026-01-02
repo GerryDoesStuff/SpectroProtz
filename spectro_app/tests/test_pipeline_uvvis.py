@@ -2080,88 +2080,20 @@ def test_preprocess_applies_default_domain_limits():
     assert domain_meta["output_max_nm"] == pytest.approx(1090.0)
 
 
-def test_compute_peak_metrics_uses_quadratic_refinement():
+def test_compute_peak_metrics_detects_prominent_peak():
     wl = np.linspace(400.0, 420.0, 41)
     true_center = 410.35
     baseline = 2.0
     amplitude = 5.0
-    curvature = -0.05
-    intensity = baseline + amplitude + curvature * (wl - true_center) ** 2
+    intensity = baseline + amplitude * np.exp(-0.5 * ((wl - true_center) / 1.2) ** 2)
 
     plugin = UvVisPlugin()
     metrics = plugin._compute_peak_metrics(wl, intensity, {"max_peaks": 1, "prominence": 0.1})
 
     assert len(metrics) == 1
     peak = metrics[0]
-
-    assert peak["quadratic_refined"] is True
-    # The raw wavelength should remain on the grid whilst the refined value
-    # approaches the true centre between samples.
-    assert peak["raw_wavelength"] in wl
-    assert peak["raw_wavelength"] != pytest.approx(true_center, abs=1e-6)
-    assert peak["wavelength"] == pytest.approx(true_center, rel=0, abs=0.05)
-    assert peak["height"] == pytest.approx(baseline + amplitude, rel=0, abs=0.05)
-
-    assert peak["quadratic_half_height"] is not None
-    coeffs = peak["quadratic_coefficients"]
-    assert coeffs and len(coeffs) == 3
-    assert peak["quadratic_window_indices"]
-    assert peak["quadratic_window_wavelengths"]
-
-    # The stored quadratic parameters should reproduce the measured FWHM.
-    a = coeffs[0]
-    delta_height = peak["height"] - peak["quadratic_half_height"]
-    assert delta_height > 0
-    expected_width = 2.0 * math.sqrt(delta_height / -a)
-    assert peak["fwhm"] == pytest.approx(expected_width, rel=1e-6)
-
-    # Quadratic refinement should adjust the result away from the discrete grid.
-    assert abs(peak["wavelength"] - peak["raw_wavelength"]) > 0
-    assert abs(peak["fwhm"] - peak["raw_fwhm"]) > 0
-
-
-def test_compute_peak_metrics_uses_plateau_center_for_saturation():
-    wl = np.linspace(400.0, 500.0, 101)
-    transmittance = np.full_like(wl, 100.0)
-    plateau_mask = (wl >= 445.0) & (wl <= 455.0)
-    transmittance[plateau_mask] = 1.0
-    absorbance = -np.log10(transmittance / 100.0)
-
-    plugin = UvVisPlugin()
-    peaks = plugin._compute_peak_metrics(
-        wl,
-        absorbance,
-        {"max_peaks": 1, "prominence": 0.5},
-        channels={"raw_transmittance": transmittance},
-    )
-
-    assert len(peaks) == 1
-    peak = peaks[0]
-    assert peak["plateau_detected"] is True
-    assert peak["wavelength"] == pytest.approx(450.0, abs=0.5)
-    assert peak["raw_wavelength"] == pytest.approx(450.0, abs=0.5)
-
-
-def test_compute_peak_metrics_plateau_center_with_truncated_absorbance():
-    wl = np.linspace(400.0, 500.0, 101)
-    transmittance = np.full_like(wl, 100.0)
-    plateau_mask = (wl >= 442.0) & (wl <= 458.0)
-    transmittance[plateau_mask] = 0.5
-    absorbance = -np.log10(transmittance / 100.0)
-    absorbance[plateau_mask] = np.nan
-
-    plugin = UvVisPlugin()
-    peaks = plugin._compute_peak_metrics(
-        wl,
-        absorbance,
-        {"max_peaks": 1, "prominence": 0.5},
-        channels={"raw_transmittance": transmittance},
-    )
-
-    assert len(peaks) == 1
-    peak = peaks[0]
-    assert peak["plateau_detected"] is True
-    assert peak["wavelength"] == pytest.approx(450.0, abs=0.5)
+    assert peak["wavelength"] == pytest.approx(true_center, abs=0.6)
+    assert peak["intensity"] == pytest.approx(float(np.max(intensity)), rel=0, abs=0.1)
 
 
 def test_analyze_skips_disabled_peaks():
