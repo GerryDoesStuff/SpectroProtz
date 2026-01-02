@@ -1,4 +1,5 @@
 from spectro_app.engine.plugin_api import SpectroscopyPlugin, Spectrum, BatchResult
+from spectro_app.io.opus import load_opus_spectra
 from spectro_app.engine.peak_detection import detect_peaks_for_features, resolve_peak_config
 import numpy as np
 
@@ -8,9 +9,15 @@ class FtirPlugin(SpectroscopyPlugin):
     xlabel = "Wavenumber (cm⁻¹)"
 
     def detect(self, paths):
-        return any(str(p).lower().endswith((".csv", ".txt")) for p in paths)
+        return any(str(p).lower().endswith((".csv", ".txt", ".opus")) for p in paths)
 
     def load(self, paths):
+        spectra = []
+        for path in paths:
+            if str(path).lower().endswith(".opus"):
+                spectra.extend(load_opus_spectra(path, technique="ftir"))
+        if spectra:
+            return spectra
         wn = np.linspace(4000, 400, 1801)
         inten = np.zeros_like(wn)
         return [
