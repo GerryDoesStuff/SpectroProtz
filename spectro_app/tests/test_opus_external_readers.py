@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from types import ModuleType
+
+import numpy as np
+import pytest
+
+from spectro_app.io import opus as opus_reader
+
+
+class _DummyAxis:
+    def __init__(self, data: np.ndarray, units: str) -> None:
+        self.data = data
+        self.units = units
+
+
+class _DummyDataset:
+    def __init__(self) -> None:
+        self.data = np.array([1.0, 2.0], dtype=float)
+        self.x = _DummyAxis(np.array([100.0, 200.0], dtype=float), "cm^-1")
+        self.meta = {"name": "fixture"}
+
+
+def test_load_opus_spectra_prefers_spectrochempy(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    spectrochempy = ModuleType("spectrochempy")
+
+    def read_opus(path: str) -> _DummyDataset:
+        calls.append(("spectrochempy", path))
+        return _DummyDataset()
+
+    spectrochempy.read_opus = read_opus
+    monkeypatch.setitem(__import__("sys").modules, "spectrochempy", spectrochempy)
+
+    brukeropusreader = ModuleType("brukeropusreader")
+
+    def read_file(path: str) -> dict[str, object]:
+        calls.append(("brukeropusreader", path))
+        return {}
+
+    brukeropusreader.read_file = read_file
+    monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
+
+    def fail_internal(_: str) -> list[dict[str, object]]:
+        raise AssertionError("internal parser should not be used when spectrochempy succeeds")
+
+    monkeypatch.setattr(opus_reader, "read_opus_records", fail_internal)
+
+    opus_path = tmp_path / "fixture.opus"
+    opus_path.write_bytes(b"unused")
+
+    spectra = opus_reader.load_opus_spectra(opus_path)
+
+    assert calls == [("spectrochempy", str(opus_path))]
+    assert len(spectra) == 1
+    assert spectra[0].meta["external_reader"] == "spectrochempy"
+
+
+def test_load_opus_spectra_falls_back_to_internal_reader(monkeypatch, tmp_path) -> None:
+    spectrochempy = ModuleType("spectrochempy")
+    monkeypatch.setitem(__import__("sys").modules, "spectrochempy", spectrochempy)
+
+    brukeropusreader = ModuleType("brukeropusreader")
+    monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
+
+    fallback_calls: list[str] = []
+
+    def fake_read_opus_records(path: str) -> list[dict[str, object]]:
+        fallback_calls.append(path)
+        return [
+            {
+                "wavelength": np.array([1.0, 2.0], dtype=float),
+                "intensity": np.array([3.0, 4.0], dtype=float),
+                "meta": {"axis_key": "wavenumber", "axis_unit": "cm^-1"},
+            }
+        ]
+
+    monkeypatch.setattr(opus_reader, "read_opus_records", fake_read_opus_records)
+
+    opus_path = tmp_path / "fallback.opus"
+    opus_path.write_bytes(b"unused")
+
+    spectra = opus_reader.load_opus_spectra(opus_path)
+
+    assert fallback_calls == [opus_path]
+    assert len(spectra) == 1
+    assert spectra[0].meta["axis_key"] == "wavenumber"
+
+
+def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) -> None:
+    spectrochempy = ModuleType("spectrochempy")
+
+    def read_opus(_: str) -> None:
+        raise RuntimeError("spectrochempy boom")
+
+    spectrochempy.read_opus = read_opus
+    monkeypatch.setitem(__import__("sys").modules, "spectrochempy", spectrochempy)
+
+    brukeropusreader = ModuleType("brukeropusreader")
+
+    def read_file(_: str) -> None:
+        raise RuntimeError("brukeropusreader boom")
+
+    brukeropusreader.read_file = read_file
+    monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
+
+    def fail_internal(_: str) -> list[dict[str, object]]:
+        raise ValueError("internal boom")
+
+    monkeypatch.setattr(opus_reader, "read_opus_records", fail_internal)
+
+    opus_path = tmp_path / "broken.opus"
+    opus_path.write_bytes(b"unused")
+
+    with pytest.raises(ValueError) as excinfo:
+        opus_reader.load_opus_spectra(opus_path)
+
+    message = str(excinfo.value)
+    assert "Unable to read OPUS file with available readers" in message
+    assert "spectrochempy.read_opus failed: spectrochempy boom" in message
+    assert "brukeropusreader.read_file failed: brukeropusreader boom" in message
+    assert "fallback read_opus_records failed: internal boom" in message
