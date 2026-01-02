@@ -391,12 +391,9 @@ def read_opus_records_external(path: str | Path) -> List[Dict[str, object]]:
 
 
 def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List[Spectrum]:
-    try:
-        records = read_opus_records_external(path)
-    except Exception as exc:
-        raise ValueError("OPUS load failed: install spectrochempy or brukeropusreader") from exc
+    records = read_opus_records_external(path)
     if not records:
-        raise ValueError("OPUS load failed: install spectrochempy or brukeropusreader")
+        return []
     spectra: List[Spectrum] = []
     for record in records:
         meta = dict(record.get("meta", {}))
