@@ -238,8 +238,156 @@ def read_opus_records(path: str | Path) -> List[Dict[str, object]]:
     return records
 
 
+def _normalize_axis_unit(axis_unit: object | None) -> str | None:
+    if axis_unit is None:
+        return None
+    if isinstance(axis_unit, str):
+        return axis_unit
+    try:
+        return str(axis_unit)
+    except Exception:
+        return None
+
+
+def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
+    def iter_datasets(value: object) -> Iterable[object]:
+        if isinstance(value, (list, tuple)):
+            return value
+        return [value]
+
+    records: List[Dict[str, object]] = []
+    for entry in iter_datasets(dataset):
+        if entry is None:
+            continue
+        intensity = getattr(entry, "data", entry)
+        intensity = np.asarray(intensity, dtype=float)
+
+        axis = None
+        axis_unit = None
+        axis_source = getattr(entry, "x", None)
+        if axis_source is None:
+            axes = getattr(entry, "axes", None)
+            if axes:
+                axis_source = axes[0]
+        if axis_source is None:
+            axis_source = getattr(entry, "axis", None)
+        if axis_source is not None:
+            axis = getattr(axis_source, "data", axis_source)
+            axis_unit = _normalize_axis_unit(getattr(axis_source, "units", None))
+
+        if axis is None:
+            axis = np.arange(intensity.size, dtype=float)
+
+        meta: Dict[str, object] = {
+            "source": "opus",
+            "source_file": str(path),
+            "axis_key": "wavenumber",
+            "axis_unit": axis_unit or "cm^-1",
+            "external_reader": "spectrochempy",
+        }
+        extra_meta = getattr(entry, "meta", None)
+        if extra_meta is None:
+            extra_meta = getattr(entry, "metadata", None)
+        if isinstance(extra_meta, dict) and extra_meta:
+            meta["external_meta"] = dict(extra_meta)
+        records.append({"wavelength": np.asarray(axis, dtype=float), "intensity": intensity, "meta": meta})
+    return records
+
+
+def _records_from_brukeropusreader(data: object, path: str | Path) -> List[Dict[str, object]]:
+    def record_from_mapping(mapping: Dict[str, object]) -> Dict[str, object] | None:
+        intensity = (
+            mapping.get("y")
+            or mapping.get("intensity")
+            or mapping.get("spectrum")
+            or mapping.get("spec")
+            or mapping.get("data")
+        )
+        if intensity is None:
+            return None
+        axis = mapping.get("x") or mapping.get("wavenumber") or mapping.get("wavelength") or mapping.get("axis")
+        if axis is None:
+            axis = np.arange(len(intensity), dtype=float)
+        axis_unit = _normalize_axis_unit(
+            mapping.get("axis_unit") or mapping.get("x_unit") or mapping.get("xunit")
+        )
+        meta: Dict[str, object] = {
+            "source": "opus",
+            "source_file": str(path),
+            "axis_key": "wavenumber",
+            "axis_unit": axis_unit or "cm^-1",
+            "external_reader": "brukeropusreader",
+        }
+        extra_meta = mapping.get("meta") or mapping.get("metadata") or mapping.get("params")
+        if isinstance(extra_meta, dict) and extra_meta:
+            meta["external_meta"] = dict(extra_meta)
+        return {
+            "wavelength": np.asarray(axis, dtype=float),
+            "intensity": np.asarray(intensity, dtype=float),
+            "meta": meta,
+        }
+
+    records: List[Dict[str, object]] = []
+    if isinstance(data, dict):
+        spectra = data.get("spectra")
+        if isinstance(spectra, list):
+            for entry in spectra:
+                if isinstance(entry, dict):
+                    record = record_from_mapping(entry)
+                    if record:
+                        records.append(record)
+        record = record_from_mapping(data)
+        if record:
+            records.append(record)
+    elif isinstance(data, (list, tuple)):
+        for entry in data:
+            if isinstance(entry, dict):
+                record = record_from_mapping(entry)
+                if record:
+                    records.append(record)
+    return records
+
+
+def load_opus_records_via_external_readers(path: str | Path) -> List[Dict[str, object]]:
+    errors: List[str] = []
+    try:
+        from spectrochempy import read_opus as scp_read_opus
+    except Exception as exc:
+        errors.append(f"spectrochempy.read_opus not available: {exc}")
+    else:
+        try:
+            records = _records_from_spectrochempy(scp_read_opus(str(path)), path)
+            if records:
+                return records
+            raise ValueError("spectrochempy.read_opus returned no spectra.")
+        except Exception as exc:
+            errors.append(f"spectrochempy.read_opus failed: {exc}")
+
+    try:
+        from brukeropusreader import read_file as bruker_read_file
+    except Exception as exc:
+        errors.append(f"brukeropusreader.read_file not available: {exc}")
+    else:
+        try:
+            records = _records_from_brukeropusreader(bruker_read_file(str(path)), path)
+            if records:
+                return records
+            raise ValueError("brukeropusreader.read_file returned no spectra.")
+        except Exception as exc:
+            errors.append(f"brukeropusreader.read_file failed: {exc}")
+
+    try:
+        return read_opus_records(path)
+    except Exception as exc:
+        errors.append(f"fallback read_opus_records failed: {exc}")
+        error_message = "Unable to read OPUS file with available readers:\n" + "\n".join(
+            f"- {error}" for error in errors
+        )
+        raise ValueError(error_message) from exc
+
+
 def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List[Spectrum]:
-    records = read_opus_records(path)
+    records = load_opus_records_via_external_readers(path)
     spectra: List[Spectrum] = []
     for record in records:
         meta = dict(record.get("meta", {}))
@@ -253,4 +401,3 @@ def load_opus_spectra(path: str | Path, *, technique: str | None = None) -> List
             )
         )
     return spectra
-
