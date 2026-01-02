@@ -3847,12 +3847,17 @@ class UvVisPlugin(SpectroscopyPlugin):
             )
             band_ratios = self._compute_band_ratios(wl, intensity, ratio_cfg)
             integrals = self._compute_integrals(wl, intensity, integral_cfg)
-            peaks = self._compute_peak_metrics(
-                wl,
-                intensity,
-                peak_cfg,
-                channels=spec.meta.get("channels") if isinstance(spec.meta, Mapping) else None,
-            )
+            features_meta = spec.meta.get("features") if isinstance(spec.meta, Mapping) else None
+            peaks = None
+            if isinstance(features_meta, Mapping):
+                peaks = features_meta.get("peaks")
+            if peaks is None:
+                peaks = self._compute_peak_metrics(
+                    wl,
+                    intensity,
+                    peak_cfg,
+                    channels=spec.meta.get("channels") if isinstance(spec.meta, Mapping) else None,
+                )
             isosbestic_checks = self._compute_isosbestic_checks(wl, intensity, isosbestic_cfg)
             timestamp = self._parse_timestamp(spec.meta)
             if kinetics_time_field:

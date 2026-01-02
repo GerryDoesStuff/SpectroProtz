@@ -2111,10 +2111,12 @@ def test_compute_peak_metrics_detects_prominent_peak():
     amplitude = 5.0
     intensity = baseline + amplitude * np.exp(-0.5 * ((wl - true_center) / 1.2) ** 2)
 
-    plugin = UvVisPlugin()
-    metrics = plugin._compute_peak_metrics(wl, intensity, {"max_peaks": 1, "prominence": 0.1})
+    spec = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample"})
+    recipe = {"blank": {"subtract": False}, "features": {"peaks": {"max_peaks": 1, "prominence": 0.1}}}
+    processed, _ = pipeline.run_pipeline([spec], recipe)
+    metrics = processed[0].meta.get("features", {}).get("peaks")
 
-    assert len(metrics) == 1
+    assert metrics and len(metrics) == 1
     peak = metrics[0]
     assert peak["wavelength"] == pytest.approx(true_center, abs=0.6)
     assert peak["intensity"] == pytest.approx(float(np.max(intensity)), rel=0, abs=0.1)
@@ -2126,14 +2128,12 @@ def test_analyze_skips_disabled_peaks():
     intensity = np.exp(-0.5 * ((wl - peak_center) / 2.5) ** 2)
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={"role": "sample"})
 
-    plugin_enabled = UvVisPlugin()
     recipe_enabled = {"blank": {"subtract": False}, "features": {"peaks": {"enabled": True}}}
-    processed_enabled, qc_enabled = plugin_enabled.analyze([spec], recipe_enabled)
-    assert qc_enabled and qc_enabled[0]["peak_metrics"], "Expected peaks when enabled"
+    processed_enabled, qc_enabled = pipeline.run_pipeline([spec], recipe_enabled)
+    assert qc_enabled, "Expected QC rows when enabled"
     assert processed_enabled and processed_enabled[0].meta.get("features", {}).get("peaks")
 
-    plugin_disabled = UvVisPlugin()
     recipe_disabled = {"blank": {"subtract": False}, "features": {"peaks": {"enabled": False}}}
-    processed_disabled, qc_disabled = plugin_disabled.analyze([spec], recipe_disabled)
-    assert qc_disabled and qc_disabled[0]["peak_metrics"] == []
+    processed_disabled, qc_disabled = pipeline.run_pipeline([spec], recipe_disabled)
+    assert qc_disabled, "Expected QC rows when disabled"
     assert processed_disabled and processed_disabled[0].meta.get("features", {}).get("peaks") == []
