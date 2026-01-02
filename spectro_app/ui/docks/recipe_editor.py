@@ -79,6 +79,7 @@ class CollapsibleSection(QWidget):
 
 class RecipeEditorDock(QDockWidget):
     config_changed = QtCore.pyqtSignal()
+    module_changed = QtCore.pyqtSignal(str)
     _CUSTOM_SENTINEL = "__custom__"
     _JOIN_WINDOWS_GLOBAL_KEY = "__global__"
 
@@ -1225,6 +1226,12 @@ class RecipeEditorDock(QDockWidget):
             self.drift_max_residual.textChanged,
         ):
             signal.connect(self._update_model_from_ui)
+        self.module.currentTextChanged.connect(self._on_module_changed)
+
+    def _on_module_changed(self, text: str) -> None:
+        if self._updating:
+            return
+        self.module_changed.emit(text)
 
     def set_available_modules(self, modules: list[tuple[str, str]] | None) -> None:
         cleaned: list[tuple[str, str]] = []

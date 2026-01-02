@@ -109,6 +109,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._selection_color = QtGui.QColor("#d62728")
         self._selection_pen = pg.mkPen(color=self._selection_color, width=4)
         self._exporters_available: bool = _EXPORTERS_AVAILABLE
+        self._axis_label_cache: Optional[tuple[str, str]] = None
 
         self._build_ui()
 
@@ -240,6 +241,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         """Populate the plot with spectra and return ``True`` if data was shown."""
 
         self._hidden_labels.clear()
+        self._apply_axis_labels(spectra, force=True)
 
         preserved_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         preserved_auto_range: Optional[tuple[object, object]] = None
@@ -481,6 +483,41 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     view_box.setRange(xRange=x_range, yRange=y_range, padding=0)
 
         return True
+
+    def reset_axis_label_cache(self) -> None:
+        self._axis_label_cache = None
+
+    def _apply_axis_labels(self, spectra: Sequence[Spectrum], *, force: bool = False) -> None:
+        axis_key = "wavelength"
+        unit_label = "nm"
+        for spec in spectra:
+            meta = getattr(spec, "meta", {}) or {}
+            if not isinstance(meta, dict):
+                continue
+            axis_key = str(meta.get("axis_key") or meta.get("axis_type") or axis_key)
+            unit_label = str(meta.get("axis_unit") or meta.get("axis_units") or unit_label)
+            break
+
+        axis_key = axis_key.strip().lower()
+        unit_label = unit_label.strip()
+
+        label = "Wavelength"
+        if axis_key == "wavenumber":
+            label = "Wavenumber"
+        elif axis_key:
+            label = axis_key.replace("_", " ").title()
+
+        units = unit_label or ("cm⁻¹" if axis_key == "wavenumber" else "nm")
+
+        cache_key = (label, units)
+        if not force and self._axis_label_cache == cache_key:
+            return
+        self._axis_label_cache = cache_key
+
+        if pg is None:  # pragma: no cover - only when dependency missing
+            return
+        self.plot.setLabel("bottom", label, units=units)
+        self.plot.setLabel("left", "Intensity", units="a.u.")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1185,6 +1222,10 @@ class PreviewDock(QDockWidget):
         """Reset the preview area to its empty state."""
         self.tabs.clear()
         self._add_message_tab("Preview", "Waiting for results…")
+
+    def reset_axis_label_cache(self) -> None:
+        if self._spectra_widget is not None:
+            self._spectra_widget.reset_axis_label_cache()
 
     def prepare_for_job(self) -> None:
         """Ensure the dock is ready for a new job without clearing previews.
