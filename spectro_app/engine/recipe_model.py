@@ -163,6 +163,17 @@ class Recipe:
             fit_scale_val = solvent_cfg.get("fit_scale")
             if fit_scale_val is not None and not isinstance(fit_scale_val, bool):
                 errs.append("Solvent subtraction fit_scale must be true or false")
+            shift_cfg = solvent_cfg.get("shift_compensation")
+            if isinstance(shift_cfg, dict):
+                shift_enabled = shift_cfg.get("enabled")
+                if shift_enabled is not None and not isinstance(shift_enabled, bool):
+                    errs.append("Shift compensation enabled must be true or false")
+                for key in ("min", "max", "step"):
+                    if key in shift_cfg and shift_cfg.get(key) is not None:
+                        try:
+                            float(shift_cfg.get(key))
+                        except (TypeError, ValueError):
+                            errs.append(f"Shift compensation {key} must be numeric")
 
         blank_cfg = self.params.get("blank", {})
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))

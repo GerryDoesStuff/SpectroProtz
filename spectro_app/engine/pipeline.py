@@ -229,6 +229,7 @@ def apply_solvent_subtraction(
     fit_scale: bool = True,
     ridge_alpha: float | None = None,
     include_offset: bool = False,
+    shift_compensation: Mapping[str, Any] | None = None,
 ) -> Spectrum:
     x = np.asarray(spec.wavelength, dtype=float)
     y = np.asarray(spec.intensity, dtype=float)
@@ -242,13 +243,15 @@ def apply_solvent_subtraction(
     if x.size == 0:
         return spec
 
-    def _interp_reference(target_x: np.ndarray, ref_spec: Spectrum) -> np.ndarray:
+    def _interp_reference(
+        target_x: np.ndarray, ref_spec: Spectrum, *, shift: float = 0.0
+    ) -> np.ndarray:
         ref_x = np.asarray(ref_spec.wavelength, dtype=float)
         ref_y = np.asarray(ref_spec.intensity, dtype=float)
         if ref_x.size == 0:
             return np.full_like(target_x, np.nan, dtype=float)
         ref_order = np.argsort(ref_x)
-        ref_x_sorted = ref_x[ref_order]
+        ref_x_sorted = ref_x[ref_order] + float(shift)
         ref_y_sorted = ref_y[ref_order]
         x_order = np.argsort(target_x)
         x_sorted = target_x[x_order]
@@ -280,8 +283,23 @@ def apply_solvent_subtraction(
             return spec
         ref_limits.append(limits)
 
-    overlap_min = max([target_limits[0]] + [limits[0] for limits in ref_limits])
-    overlap_max = min([target_limits[1]] + [limits[1] for limits in ref_limits])
+    shift_cfg = dict(shift_compensation or {})
+    shift_enabled = bool(shift_cfg.get("enabled", True))
+    shift_min = float(shift_cfg.get("min", -2.0))
+    shift_max = float(shift_cfg.get("max", 2.0))
+    shift_step = float(shift_cfg.get("step", 0.1))
+    if shift_min > shift_max:
+        shift_min, shift_max = shift_max, shift_min
+    if shift_step <= 0:
+        shift_step = 0.1
+    if shift_enabled:
+        ref_min_candidates = [limits[0] + shift_min for limits in ref_limits]
+        ref_max_candidates = [limits[1] + shift_max for limits in ref_limits]
+    else:
+        ref_min_candidates = [limits[0] for limits in ref_limits]
+        ref_max_candidates = [limits[1] for limits in ref_limits]
+    overlap_min = max([target_limits[0]] + ref_min_candidates)
+    overlap_max = min([target_limits[1]] + ref_max_candidates)
     if overlap_min >= overlap_max:
         return spec
 
@@ -289,30 +307,29 @@ def apply_solvent_subtraction(
     if not np.any(overlap_mask):
         return spec
 
-    ref_interp_list = [_interp_reference(x, ref) for ref in ref_specs]
-    ref_matrix = np.column_stack(ref_interp_list)
-    fit_mask = overlap_mask & np.isfinite(y)
-    if ref_matrix.shape[1] == 1:
-        fit_mask &= np.isfinite(ref_matrix[:, 0])
-    else:
-        fit_mask &= np.all(np.isfinite(ref_matrix), axis=1)
-    if not np.any(fit_mask):
-        return spec
-
-    ref_count = ref_matrix.shape[1]
+    ref_count = len(ref_specs)
     offset_used = bool(include_offset)
-    coef = None
-    offset = 0.0
-    if ref_count == 1 and not offset_used and not (fit_scale or scale is None):
-        scale_val = float(scale)
-        coef = np.array([scale_val], dtype=float)
-    elif ref_count == 1 and not offset_used:
-        denom = float(np.dot(ref_matrix[fit_mask, 0], ref_matrix[fit_mask, 0]))
-        if denom == 0.0:
-            return spec
-        scale_val = float(np.dot(y[fit_mask], ref_matrix[fit_mask, 0]) / denom)
-        coef = np.array([scale_val], dtype=float)
+    if shift_enabled:
+        candidates = np.arange(shift_min, shift_max + (shift_step / 2.0), shift_step)
+        if candidates.size == 0:
+            candidates = np.array([0.0], dtype=float)
     else:
+        candidates = np.array([0.0], dtype=float)
+
+    def _fit_coefficients(
+        ref_matrix: np.ndarray, fit_mask: np.ndarray
+    ) -> tuple[np.ndarray | None, float]:
+        if not np.any(fit_mask):
+            return None, 0.0
+        if ref_count == 1 and not offset_used and not (fit_scale or scale is None):
+            scale_val = float(scale)
+            return np.array([scale_val], dtype=float), 0.0
+        if ref_count == 1 and not offset_used:
+            denom = float(np.dot(ref_matrix[fit_mask, 0], ref_matrix[fit_mask, 0]))
+            if denom == 0.0:
+                return None, 0.0
+            scale_val = float(np.dot(y[fit_mask], ref_matrix[fit_mask, 0]) / denom)
+            return np.array([scale_val], dtype=float), 0.0
         design = ref_matrix[fit_mask]
         if offset_used:
             design = np.column_stack([design, np.ones(design.shape[0], dtype=float)])
@@ -335,17 +352,66 @@ def apply_solvent_subtraction(
             except np.linalg.LinAlgError:
                 coef, *_ = np.linalg.lstsq(gram + penalty, design.T @ target, rcond=None)
         if offset_used:
-            offset = float(coef[-1])
-            coef = np.asarray(coef[:-1], dtype=float)
+            return np.asarray(coef[:-1], dtype=float), float(coef[-1])
+        return np.asarray(coef, dtype=float), 0.0
 
+    best = {
+        "shift": 0.0,
+        "error": None,
+        "ref_matrix": None,
+        "fit_mask": None,
+        "coef": None,
+        "offset": 0.0,
+    }
+    for shift in candidates:
+        ref_interp_list = [_interp_reference(x, ref, shift=shift) for ref in ref_specs]
+        ref_matrix = np.column_stack(ref_interp_list)
+        fit_mask = overlap_mask & np.isfinite(y)
+        if ref_matrix.shape[1] == 1:
+            fit_mask &= np.isfinite(ref_matrix[:, 0])
+        else:
+            fit_mask &= np.all(np.isfinite(ref_matrix), axis=1)
+        coef, offset = _fit_coefficients(ref_matrix, fit_mask)
+        if coef is None:
+            continue
+        fitted = ref_matrix @ coef
+        if offset_used:
+            fitted = fitted + offset
+        residual = y[fit_mask] - fitted[fit_mask]
+        error = float(np.mean(residual * residual)) if residual.size else None
+        if error is None:
+            continue
+        if best["error"] is None or error < best["error"]:
+            best.update(
+                {
+                    "shift": float(shift),
+                    "error": error,
+                    "ref_matrix": ref_matrix,
+                    "fit_mask": fit_mask,
+                    "coef": coef,
+                    "offset": offset,
+                }
+            )
+
+    if best["coef"] is None or best["ref_matrix"] is None or best["fit_mask"] is None:
+        return spec
+
+    ref_matrix = best["ref_matrix"]
+    fit_mask = best["fit_mask"]
+    coef = best["coef"]
+    offset = best["offset"]
     fitted = ref_matrix @ coef
     if offset_used:
         fitted = fitted + offset
     fitted = np.asarray(fitted, dtype=float)
     valid_ref_mask = np.all(np.isfinite(ref_matrix), axis=1)
     apply_mask = fit_mask & valid_ref_mask
+    if not np.any(apply_mask):
+        return spec
     corrected = y.copy()
     corrected[apply_mask] = y[apply_mask] - fitted[apply_mask]
+    overlap_min = float(np.min(x[apply_mask]))
+    overlap_max = float(np.max(x[apply_mask]))
 
     meta = dict(spec.meta or {})
     solvent_meta = dict(meta.get("solvent_subtraction") or {})
@@ -367,6 +433,23 @@ def apply_solvent_subtraction(
         ref_ident = _reference_identifier(ref)
         if ref_ident:
             ref_ids.append(ref_ident)
+
+    shift_meta = {
+        "enabled": bool(shift_enabled),
+        "selected_shift": float(best["shift"]),
+        "min": float(shift_min),
+        "max": float(shift_max),
+        "step": float(shift_step),
+        "candidates": int(candidates.size),
+        "optimizer": "grid",
+        "residual": float(best["error"]) if best["error"] is not None else None,
+        "interpolation": "linear",
+        "resampling": {
+            "method": "linear",
+            "reference_axis": "shifted",
+            "target_axis": "sample_axis",
+        },
+    }
 
     if ref_names and not solvent_meta.get("reference_name"):
         solvent_meta["reference_name"] = ref_names[0] if len(ref_names) == 1 else ref_names
@@ -392,6 +475,7 @@ def apply_solvent_subtraction(
             "interpolation": "linear",
             "overlap_min": float(overlap_min),
             "overlap_max": float(overlap_max),
+            "shift_compensation": shift_meta,
         }
     )
     meta["solvent_subtraction"] = solvent_meta
@@ -657,6 +741,7 @@ def run_pipeline(
                 reference_id=solvent_reference_id,
                 scale=solvent_cfg.get("scale"),
                 fit_scale=solvent_cfg.get("fit_scale", True),
+                shift_compensation=solvent_cfg.get("shift_compensation"),
             )
 
         if smoothing_cfg.get("enabled"):
