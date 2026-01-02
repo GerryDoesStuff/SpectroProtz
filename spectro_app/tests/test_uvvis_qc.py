@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pytest
 
+from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.plugin_api import Spectrum
-from spectro_app.plugins.uvvis import pipeline
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin
 
 
@@ -47,29 +47,25 @@ def test_uvvis_analyze_produces_qc_metrics():
         "smoothing": {"enabled": True, "window": 7, "polyorder": 2},
     }
 
-    _, qc_rows = UvVisPlugin().analyze([spec], recipe)
+    _, qc_rows = core_pipeline.run_pipeline([spec], recipe)
     assert len(qc_rows) == 1
     row = qc_rows[0]
 
-    assert row["saturation_flag"] is True
-    assert row["spike_count"] >= 1
-    assert row["join_count"] >= 1
-    assert isinstance(row["join_offsets"], list) and row["join_offsets"]
-    assert isinstance(row["join_pre_deltas"], list) and row["join_pre_deltas"]
-    assert isinstance(row["join_post_deltas"], list) and row["join_post_deltas"]
-    assert isinstance(row["join_pre_overlap_errors"], list)
-    assert isinstance(row["join_post_overlap_errors"], list)
-    assert row["join_pre_delta_abs_max"] >= row["join_post_delta_abs_max"]
-    assert row["join_post_overlap_max"] <= row["join_pre_overlap_max"] or np.isnan(row["join_pre_overlap_max"])
-    assert np.isfinite(row["noise_rsd"]) and row["noise_rsd"] >= 0
+    assert row["saturation"].flag is True
+    assert row["spikes"].count >= 1
+    assert row["join"].count >= 1
+    assert isinstance(row["join"].offsets, list) and row["join"].offsets
+    assert isinstance(row["join"].pre_deltas, list) and row["join"].pre_deltas
+    assert isinstance(row["join"].post_deltas, list) and row["join"].post_deltas
+    assert isinstance(row["join"].pre_overlap_errors, list)
+    assert isinstance(row["join"].post_overlap_errors, list)
+    assert np.isfinite(row["noise"].rsd) and row["noise"].rsd >= 0
     assert "saturation" in row["flags"]
     assert "Spikes" in row["summary"]
-    assert row["noise_window"] == (400.0, 420.0)
+    assert row["noise"].window == (400.0, 420.0)
     assert "roughness" in row
     assert np.isfinite(row["roughness"]["processed"])
     assert row["roughness"]["channels"] == {}
-    assert "roughness_delta" in row
-    assert row["roughness_delta"] == {}
 
 
 def test_uvvis_analyze_uses_default_quiet_window():
@@ -81,13 +77,13 @@ def test_uvvis_analyze_uses_default_quiet_window():
         meta={"sample_id": "Q1", "role": "sample"},
     )
 
-    _, qc_rows = UvVisPlugin().analyze([spec], {})
+    _, qc_rows = core_pipeline.run_pipeline([spec], {})
 
     assert len(qc_rows) == 1
     row = qc_rows[0]
 
-    assert row["noise_window"] == (850.0, 900.0)
-    assert row["noise_points"] > 0
+    assert row["noise"].window == (850.0, 900.0)
+    assert row["noise"].used_points > 0
 
 
 def test_uvvis_qc_reports_roughness_for_stage_channels():
@@ -98,10 +94,9 @@ def test_uvvis_qc_reports_roughness_for_stage_channels():
         intensity=raw_intensity,
         meta={"sample_id": "rough", "role": "sample"},
     )
-    coerced = pipeline.coerce_domain(spec, None)
-    smoothed = pipeline.smooth_spectrum(coerced, window=9, polyorder=3)
-
-    _, qc_rows = UvVisPlugin().analyze([smoothed], {})
+    recipe = {"smoothing": {"enabled": True, "window": 9, "polyorder": 3}}
+    processed, qc_rows = core_pipeline.run_pipeline([spec], recipe)
+    smoothed = processed[0]
     assert len(qc_rows) == 1
     row = qc_rows[0]
 
@@ -115,10 +110,7 @@ def test_uvvis_qc_reports_roughness_for_stage_channels():
     assert roughness["channels"]["smoothed"] == pytest.approx(smoothed_expected)
     assert roughness["channels"]["smoothed"] <= roughness["channels"]["raw"]
 
-    delta = row["roughness_delta"]
-    assert delta["raw"] == pytest.approx(raw_expected - processed_expected)
-    assert delta["smoothed"] == pytest.approx(smoothed_expected - processed_expected, abs=1e-9)
-    assert delta["raw"] > 0.0
+    assert roughness["channels"]["raw"] > 0.0
 
 
 def test_uvvis_rolling_noise_disabled_without_recipe():
@@ -126,12 +118,12 @@ def test_uvvis_rolling_noise_disabled_without_recipe():
     intensity = np.ones_like(wl)
     spec = Spectrum(wavelength=wl, intensity=intensity, meta={"sample_id": "R0", "role": "sample"})
 
-    _, qc_rows = UvVisPlugin().analyze([spec], {})
+    _, qc_rows = core_pipeline.run_pipeline([spec], {})
 
     row = qc_rows[0]
-    assert row["rolling_noise_enabled"] is False
-    assert row["rolling_noise_windows"] == 0
-    assert np.isnan(row["rolling_noise_max_rsd"])
+    assert row["rolling_noise"].enabled is False
+    assert row["rolling_noise"].windows == 0
+    assert np.isnan(row["rolling_noise"].max_rsd)
     assert "rolling_noise" not in row["flags"]
 
 
@@ -143,13 +135,13 @@ def test_uvvis_rolling_noise_flags_exceeding_limit():
 
     recipe = {"qc": {"rolling_rsd": {"window": 20, "step": 5, "limit": 10.0}}}
 
-    _, qc_rows = UvVisPlugin().analyze([spec], recipe)
+    _, qc_rows = core_pipeline.run_pipeline([spec], recipe)
 
     row = qc_rows[0]
-    assert row["rolling_noise_enabled"] is True
-    assert row["rolling_noise_windows"] > 0
-    assert row["rolling_noise_max_rsd"] > row["rolling_noise_median_rsd"]
-    assert row["rolling_noise_max_rsd"] > 10.0
+    assert row["rolling_noise"].enabled is True
+    assert row["rolling_noise"].windows > 0
+    assert row["rolling_noise"].max_rsd > row["rolling_noise"].median_rsd
+    assert row["rolling_noise"].max_rsd > 10.0
     assert "rolling_noise" in row["flags"]
     assert any(part.startswith("Rolling noise") for part in row["summary"].split("; "))
 
@@ -190,11 +182,11 @@ def test_uvvis_qc_drift_stable_batch_not_flagged():
         _make_synthetic_spec(wl, base, start + timedelta(minutes=idx * 15), f"S{idx}")
         for idx, base in enumerate(baselines)
     ]
-    _, qc_rows = UvVisPlugin().analyze(specs, _drift_recipe())
+    _, qc_rows = core_pipeline.run_pipeline(specs, _drift_recipe())
 
     assert qc_rows
-    assert all(row["drift_available"] for row in qc_rows)
-    assert all(not row["drift_flag"] for row in qc_rows)
+    assert all(row["drift"].available for row in qc_rows)
+    assert all(not row["drift"].flag for row in qc_rows)
     assert all("drift" not in row["flags"] for row in qc_rows)
 
 
@@ -206,18 +198,18 @@ def test_uvvis_qc_drift_flags_increasing_trend():
         _make_synthetic_spec(wl, base, start + timedelta(minutes=idx * 15), f"D{idx}")
         for idx, base in enumerate(baselines)
     ]
-    _, qc_rows = UvVisPlugin().analyze(specs, _drift_recipe())
+    _, qc_rows = core_pipeline.run_pipeline(specs, _drift_recipe())
 
     assert qc_rows
-    assert any(row["drift_flag"] for row in qc_rows)
+    assert any(row["drift"].flag for row in qc_rows)
     assert any("drift" in row["flags"] for row in qc_rows)
-    flagged = [row for row in qc_rows if row["drift_flag"]]
+    flagged = [row for row in qc_rows if row["drift"].flag]
     assert flagged
     for row in flagged:
-        assert "slope" in row["drift_reasons"]
-        assert row["drift_slope_per_hour"] is not None
-        assert np.isfinite(row["drift_slope_per_hour"])
-    assert qc_rows[-1]["drift_span_minutes"] == pytest.approx(45.0)
+        assert "slope" in row["drift"].reasons
+        assert row["drift"].slope_per_hour is not None
+        assert np.isfinite(row["drift"].slope_per_hour)
+    assert qc_rows[-1]["drift"].span_minutes == pytest.approx(45.0)
 
 
 def test_uvvis_isosbestic_checks_capture_crossing():

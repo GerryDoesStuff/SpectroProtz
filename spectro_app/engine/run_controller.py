@@ -3,6 +3,7 @@ import copy
 from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from typing import Iterable, Optional
 
+from spectro_app.engine import pipeline as core_pipeline
 
 PREVIEW_EXPORT_DISABLED_FLAG = "_preview_export_disabled"
 
@@ -89,12 +90,12 @@ class BatchRunnable(QRunnable):
 
             self._emit_message("Preprocessing spectra...")
             self._raise_if_cancelled()
-            specs = self.plugin.preprocess(specs, flattened_recipe)
+            specs, qc = core_pipeline.run_pipeline(specs, flattened_recipe)
             self.signals.progress.emit(40)
 
-            self._emit_message("Analyzing spectra...")
+            self._emit_message("Finalizing results...")
             self._raise_if_cancelled()
-            specs, qc = self.plugin.analyze(specs, flattened_recipe)
+            specs, qc = self.plugin.enrich(specs, qc, flattened_recipe)
             self.signals.progress.emit(70)
 
             self._emit_message("Exporting results...")

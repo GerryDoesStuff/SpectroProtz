@@ -36,5 +36,13 @@ class SpectroscopyPlugin:
     def analyze(self, specs: List[Spectrum], recipe: Dict[str, Any]) -> Tuple[List[Spectrum], List[Dict[str, Any]]]:
         return specs, []
 
+    def enrich(
+        self,
+        specs: List[Spectrum],
+        qc_rows: List[Dict[str, Any]],
+        recipe: Dict[str, Any],
+    ) -> Tuple[List[Spectrum], List[Dict[str, Any]]]:
+        return specs, qc_rows
+
     def export(self, specs: List[Spectrum], qc: List[Dict[str, Any]], recipe: Dict[str, Any]) -> BatchResult:
         return BatchResult(processed=specs, qc_table=qc, figures={}, audit=[])

@@ -7,7 +7,7 @@ import pytest
 
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.engine.run_controller import _flatten_recipe
-from spectro_app.plugins.uvvis import pipeline
+from spectro_app.engine import pipeline
 from spectro_app.plugins.uvvis.plugin import UvVisPlugin, disable_blank_requirement
 
 
@@ -107,6 +107,30 @@ def test_normalise_exclusion_windows_accepts_multiple_forms():
         {"lower_nm": 420.0, "upper_nm": 430.0},
         {"lower_nm": 440.0, "upper_nm": 450.0},
     ]
+
+
+def test_core_pipeline_accepts_wavenumber_windows():
+    wn = np.linspace(1200.0, 800.0, 81)
+    intensity = np.sin(np.linspace(0.0, 2.0, wn.size))
+    spec = Spectrum(
+        wavelength=wn,
+        intensity=intensity,
+        meta={"axis_key": "wavenumber", "axis_unit": "cm^-1", "role": "sample"},
+    )
+    recipe = {
+        "despike": {
+            "enabled": True,
+            "window": 5,
+            "exclusions": [{"lower_cm": 1050.0, "upper_cm": 1100.0}],
+            "noise_scale_multiplier": 0.0,
+        }
+    }
+
+    processed, qc_rows = pipeline.run_pipeline([spec], recipe)
+
+    assert len(processed) == 1
+    assert qc_rows
+    assert processed[0].meta["axis_key"] == "wavenumber"
 
 
 def test_subtract_blank_records_channel():
