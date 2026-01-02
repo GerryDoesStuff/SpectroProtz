@@ -23,6 +23,23 @@ Ensure your environment matches the expectations declared in
 A typical workflow uses a virtual environment so the above packages can be
 installed without affecting system Python.
 
+### Optional OPUS readers
+SpectroProtz includes a built-in OPUS parser, but for more robust coverage you
+can install one of the optional readers below:
+
+- **spectrochempy** (adds `spectrochempy.read_opus`)
+- **brukeropusreader** (adds `brukeropusreader.read_file`)
+
+Install either package (or both) in the same environment as the app:
+
+```bash
+pip install spectrochempy
+```
+
+```bash
+pip install brukeropusreader
+```
+
 ## Setup
 From a fresh checkout:
 

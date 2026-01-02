@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 from struct import error as struct_error
 from struct import unpack
@@ -32,6 +33,13 @@ SERIES_BLOCKS = ("AB", "ScSm", "IgSm", "PhSm", "ScRf", "IgRf")
 
 class UnknownBlockType(Exception):
     pass
+
+
+def opus_optional_reader_status() -> Dict[str, bool]:
+    return {
+        "spectrochempy": find_spec("spectrochempy") is not None,
+        "brukeropusreader": find_spec("brukeropusreader") is not None,
+    }
 
 
 @dataclass(frozen=True)
