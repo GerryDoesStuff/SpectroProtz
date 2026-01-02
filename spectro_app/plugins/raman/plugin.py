@@ -2,7 +2,7 @@ import numpy as np
 
 from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.plugin_api import SpectroscopyPlugin, Spectrum, BatchResult
-from spectro_app.io.opus import load_opus_spectra
+from spectro_app.io.opus import is_opus_path, load_opus_spectra
 
 class RamanPlugin(SpectroscopyPlugin):
     id = "raman"
@@ -10,12 +10,15 @@ class RamanPlugin(SpectroscopyPlugin):
     xlabel = "Raman shift (cm⁻¹)"
 
     def detect(self, paths):
-        return any(str(p).lower().endswith((".csv", ".txt", ".opus")) for p in paths)
+        return any(
+            str(p).lower().endswith((".csv", ".txt")) or is_opus_path(p)
+            for p in paths
+        )
 
     def load(self, paths):
         spectra = []
         for path in paths:
-            if str(path).lower().endswith(".opus"):
+            if is_opus_path(path):
                 spectra.extend(load_opus_spectra(path, technique="raman"))
         if spectra:
             return spectra

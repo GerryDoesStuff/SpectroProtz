@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
+import re
 from struct import error as struct_error
 from struct import unpack
 from typing import Callable, Dict, Iterable, List, Tuple
@@ -33,9 +34,16 @@ SERIES_BLOCKS = ("AB", "ScSm", "IgSm", "PhSm", "ScRf", "IgRf")
 
 logger = logging.getLogger(__name__)
 
+_OPUS_SUFFIX_RE = re.compile(r"\.(?:opus\.)?\d+$")
+
 
 class UnknownBlockType(Exception):
     pass
+
+
+def is_opus_path(path: str | Path) -> bool:
+    path_str = str(path).lower()
+    return path_str.endswith(".opus") or bool(_OPUS_SUFFIX_RE.search(path_str))
 
 
 def opus_optional_reader_status() -> Dict[str, bool]:
