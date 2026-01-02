@@ -11,6 +11,11 @@ from PyQt6.QtGui import QDesktopServices
 
 from spectro_app.engine.plugin_api import BatchResult
 from spectro_app.engine.recipe_model import Recipe
+from spectro_app.engine.solvent_reference import (
+    SolventReferenceStore,
+    build_reference_entry,
+    load_reference_spectrum,
+)
 from spectro_app.engine.run_controller import (
     PREVIEW_EXPORT_DISABLED_FLAG,
     RunController,
@@ -23,6 +28,10 @@ from spectro_app.ui.dialogs.about import AboutDialog
 from spectro_app.ui.dialogs.help_viewer import HelpViewer
 from spectro_app.ui.dialogs.settings_dialog import SettingsDialog
 from spectro_app.ui.dialogs.raw_preview import RawDataPreviewWindow
+from spectro_app.ui.dialogs.solvent_reference import (
+    SolventReferenceMetadataDialog,
+    SolventReferenceSelectionDialog,
+)
 from spectro_app.ui.docks.file_queue import FileQueueDock, QueueEntry
 from spectro_app.ui.docks.logger_view import LoggerDock
 from spectro_app.ui.docks.preview_widget import PreviewDock
@@ -206,6 +215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._raw_preview_window: Optional[RawDataPreviewWindow] = None
         self._auto_update_preview_enabled: bool = True
         self._auto_run_pending: bool = False
+        self._solvent_reference_store = SolventReferenceStore()
         self._config_update_timer = QtCore.QTimer(self)
         self._config_update_timer.setSingleShot(True)
         self._config_update_timer.setInterval(400)
@@ -226,6 +236,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileDock.inspect_requested.connect(self._on_queue_inspect_requested)
         self.fileDock.preview_requested.connect(self._on_queue_preview_requested)
         self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
+        self.fileDock.save_solvent_reference_requested.connect(
+            self._on_save_solvent_reference_requested
+        )
         self.fileDock.overrides_changed.connect(self._on_queue_overrides_changed)
         self.fileDock.clear_requested.connect(self._on_queue_clear_requested)
         self.fileDock.remove_requested.connect(self._on_queue_remove_requested)
@@ -905,6 +918,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             return False
 
+        if not self._ensure_ftir_solvent_reference(
+            effective_recipe_payload, prompt=not auto_triggered
+        ):
+            return False
+
         self._active_plugin = plugin
         self._active_plugin_id = plugin.id
         self._select_module(plugin.id)
@@ -1546,6 +1564,49 @@ class MainWindow(QtWidgets.QMainWindow):
         directory = target.parent if target.is_file() else target
         QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory.resolve())))
 
+    def _on_save_solvent_reference_requested(self, path: str) -> None:
+        try:
+            spectrum = load_reference_spectrum(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Reference Load Failed",
+                f"Unable to load the selected reference file:\n{exc}",
+            )
+            return
+
+        name_default = Path(path).stem
+        dialog = SolventReferenceMetadataDialog(
+            name_default=name_default,
+            allow_save_toggle=False,
+            parent=self,
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        metadata = dialog.metadata()
+        if not metadata.name:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing Name",
+                "Provide a name for the solvent reference before saving.",
+            )
+            return
+
+        entry = build_reference_entry(
+            spectrum,
+            name=metadata.name,
+            tags=metadata.tags,
+            metadata=metadata.metadata,
+            source_path=path,
+            defaults=metadata.set_default,
+        )
+        self._solvent_reference_store.upsert(entry)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Reference Saved",
+            f"Saved solvent reference '{metadata.name}'.",
+        )
+
     def _on_raw_preview_destroyed(self, *_args):
         self._raw_preview_window = None
 
@@ -1559,6 +1620,95 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         if not self._loading_session:
             self.appctx.set_dirty(True)
+
+    def _ensure_ftir_solvent_reference(self, recipe_payload: Dict[str, Any], *, prompt: bool) -> bool:
+        module_id = str(recipe_payload.get("module") or "").strip().lower()
+        if module_id != "ftir":
+            return True
+        params = dict(recipe_payload.get("params") or {})
+        solvent_cfg = params.get("solvent_subtraction")
+        if not isinstance(solvent_cfg, dict) or not solvent_cfg.get("enabled"):
+            return True
+
+        reference_entry = solvent_cfg.get("reference_entry")
+        if isinstance(reference_entry, dict):
+            return True
+
+        reference_id = solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
+        if reference_id:
+            stored = self._solvent_reference_store.get(str(reference_id))
+            if stored:
+                solvent_cfg["reference_id"] = stored.id
+                solvent_cfg["reference_entry"] = stored.to_dict()
+                params["solvent_subtraction"] = solvent_cfg
+                recipe_payload["params"] = params
+                return True
+
+        if not prompt:
+            return True
+
+        selected = self._prompt_solvent_reference_selection()
+        if selected is None:
+            return False
+        solvent_cfg["reference_id"] = selected.get("id")
+        solvent_cfg["reference_entry"] = selected
+        params["solvent_subtraction"] = solvent_cfg
+        recipe_payload["params"] = params
+        return True
+
+    def _prompt_solvent_reference_selection(self) -> Optional[Dict[str, Any]]:
+        entries = [entry.to_dict() for entry in self._solvent_reference_store.load()]
+        dialog = SolventReferenceSelectionDialog(entries, parent=self)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return None
+
+        browse_path = dialog.browse_path()
+        if browse_path:
+            try:
+                spectrum = load_reference_spectrum(browse_path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Reference Load Failed",
+                    f"Unable to load the selected reference file:\n{exc}",
+                )
+                return None
+
+            metadata_dialog = SolventReferenceMetadataDialog(
+                name_default=Path(browse_path).stem,
+                allow_save_toggle=True,
+                parent=self,
+            )
+            if metadata_dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+                return None
+            metadata = metadata_dialog.metadata()
+            if not metadata.name:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Missing Name",
+                    "Provide a name for the solvent reference before continuing.",
+                )
+                return None
+            entry = build_reference_entry(
+                spectrum,
+                name=metadata.name,
+                tags=metadata.tags,
+                metadata=metadata.metadata,
+                source_path=browse_path,
+                defaults=metadata.set_default,
+            )
+            if metadata.save_to_store:
+                self._solvent_reference_store.upsert(entry)
+            return entry.to_dict()
+
+        selected = dialog.selected_entry()
+        if selected is None:
+            return None
+        if dialog.mark_default():
+            selected_id = selected.get("id")
+            if selected_id:
+                self._solvent_reference_store.set_default(str(selected_id), True)
+        return selected
 
     def _open_file_text_preview(self, path: Path, title: str, max_bytes: int):
         if not path.exists():

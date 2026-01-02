@@ -267,6 +267,15 @@ def apply_solvent_subtraction(
 
     meta = dict(spec.meta or {})
     solvent_meta = dict(meta.get("solvent_subtraction") or {})
+    reference_meta = dict(reference.meta or {})
+    if reference_meta.get("reference_name") and not solvent_meta.get("reference_name"):
+        solvent_meta["reference_name"] = reference_meta.get("reference_name")
+    if reference_meta.get("reference_tags") and not solvent_meta.get("reference_tags"):
+        solvent_meta["reference_tags"] = reference_meta.get("reference_tags")
+    if reference_meta.get("reference_metadata") and not solvent_meta.get("reference_metadata"):
+        solvent_meta["reference_metadata"] = reference_meta.get("reference_metadata")
+    if reference_meta.get("source_path") and not solvent_meta.get("reference_source"):
+        solvent_meta["reference_source"] = reference_meta.get("source_path")
     solvent_meta.update(
         {
             "enabled": True,

@@ -4,6 +4,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
 from typing import Iterable, Optional
 
 from spectro_app.engine import pipeline as core_pipeline
+from spectro_app.engine.solvent_reference import build_reference_spectrum
 
 PREVIEW_EXPORT_DISABLED_FLAG = "_preview_export_disabled"
 
@@ -90,6 +91,7 @@ class BatchRunnable(QRunnable):
 
             self._emit_message("Preprocessing spectra...")
             self._raise_if_cancelled()
+            specs = self._apply_solvent_references(specs, flattened_recipe)
             specs, qc = core_pipeline.run_pipeline(specs, flattened_recipe)
             self.signals.progress.emit(40)
 
@@ -121,6 +123,20 @@ class BatchRunnable(QRunnable):
 
     def _emit_message(self, message: str):
         self.signals.message.emit(message)
+
+    def _apply_solvent_references(self, specs, recipe: dict):
+        solvent_cfg = recipe.get("solvent_subtraction")
+        if not isinstance(solvent_cfg, dict):
+            return specs
+        entry = solvent_cfg.get("reference_entry")
+        if not isinstance(entry, dict):
+            return specs
+        spectrum = build_reference_spectrum(entry)
+        if spectrum is None:
+            return specs
+        augmented = list(specs)
+        augmented.append(spectrum)
+        return augmented
 
 class RunController(QObject):
     job_started = pyqtSignal()
