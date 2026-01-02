@@ -116,10 +116,11 @@ for guidance on expected processing behaviour.
 
 Preview failures now surface the raw exception text (including the exception
 type and message) in the dialog so you can see the precise parsing issue (for
-example missing axes or unexpected dataset shapes). The same full exception
-text and stack trace are appended to `preview_errors.log` inside the log folder
-(open via **Help → Open Log Folder**) for deeper debugging and sharing with
-support.
+example missing axes or unexpected dataset shapes). The application also
+captures a timestamped entry with the file path(s), exception details, and full
+stack trace, writing it to `preview_errors.log` inside the log folder (open via
+**Tools → Open Log Folder**) and echoing the same diagnostics in the on-screen
+logger panel for rapid triage and sharing with support.
 
 ## Utilities
 Analysts can generate a searchable index of the JCAMP-DX headers bundled in
