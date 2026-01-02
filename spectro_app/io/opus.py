@@ -250,11 +250,21 @@ def _normalize_axis_unit(axis_unit: object | None) -> str | None:
     if axis_unit is None:
         return None
     if isinstance(axis_unit, str):
-        return axis_unit
-    try:
-        return str(axis_unit)
-    except Exception:
+        unit = axis_unit.strip()
+    else:
+        try:
+            unit = str(axis_unit).strip()
+        except Exception:
+            return None
+    if not unit:
         return None
+    normalized = unit.replace(" ", "")
+    lowered = normalized.lower()
+    if lowered in {"cm-1", "cm^-1", "cm⁻1", "1/cm", "1cm-1", "cm-¹"}:
+        return "cm^-1"
+    if "cm" in lowered and ("-1" in lowered or "^-1" in lowered):
+        return "cm^-1"
+    return unit
 
 
 def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
@@ -263,16 +273,40 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
             return value
         return [value]
 
+    def extract_attr(value: object, names: Iterable[str]) -> object | None:
+        for name in names:
+            candidate = getattr(value, name, None)
+            if candidate is not None:
+                return candidate
+        return None
+
     records: List[Dict[str, object]] = []
     for entry in iter_datasets(dataset):
         if entry is None:
             continue
-        intensity = getattr(entry, "data", entry)
-        intensity = np.asarray(intensity, dtype=float)
+        intensity_source = extract_attr(entry, ("values", "data", "y", "signal"))
+        if intensity_source is None:
+            intensity_source = entry
+        try:
+            intensity = np.asarray(intensity_source, dtype=float)
+        except Exception as exc:
+            raise ValueError(
+                "spectrochempy dataset intensity extraction failed "
+                "(tried .values, .data, .y, .signal)."
+            ) from exc
+        if intensity.size == 0:
+            raise ValueError(
+                "spectrochempy dataset intensity extraction failed: empty array from .values/.data."
+            )
 
         axis = None
         axis_unit = None
-        axis_source = getattr(entry, "x", None)
+        axis_source = None
+        coordset = getattr(entry, "coordset", None)
+        if coordset is not None:
+            axis_source = getattr(coordset, "x", None)
+        if axis_source is None:
+            axis_source = getattr(entry, "x", None)
         if axis_source is None:
             axes = getattr(entry, "axes", None)
             if axes:
@@ -280,11 +314,24 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
         if axis_source is None:
             axis_source = getattr(entry, "axis", None)
         if axis_source is not None:
-            axis = getattr(axis_source, "data", axis_source)
-            axis_unit = _normalize_axis_unit(getattr(axis_source, "units", None))
+            axis = extract_attr(axis_source, ("values", "data"))
+            if axis is None:
+                axis = axis_source
+            axis_unit = _normalize_axis_unit(
+                extract_attr(axis_source, ("units", "unit")) or getattr(entry, "xunit", None)
+            )
 
         if axis is None:
-            axis = np.arange(intensity.size, dtype=float)
+            raise ValueError(
+                "spectrochempy dataset axis extraction failed "
+                "(tried coordset.x, .x, .axes[0], .axis)."
+            )
+        try:
+            axis = np.asarray(axis, dtype=float)
+        except Exception as exc:
+            raise ValueError("spectrochempy dataset axis conversion failed.") from exc
+        if axis.size == 0:
+            raise ValueError("spectrochempy dataset axis extraction failed: empty axis.")
 
         meta: Dict[str, object] = {
             "source": "opus",
@@ -299,6 +346,8 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
         if isinstance(extra_meta, dict) and extra_meta:
             meta["external_meta"] = dict(extra_meta)
         records.append({"wavelength": np.asarray(axis, dtype=float), "intensity": intensity, "meta": meta})
+    if not records:
+        raise ValueError("spectrochempy dataset extraction failed: no records produced.")
     return records
 
 
