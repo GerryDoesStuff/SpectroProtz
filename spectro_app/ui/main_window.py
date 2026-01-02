@@ -20,6 +20,7 @@ from spectro_app.engine.run_controller import (
     PREVIEW_EXPORT_DISABLED_FLAG,
     RunController,
 )
+from spectro_app.io.opus import opus_optional_reader_status
 from spectro_app.plugins.ftir.plugin import FtirPlugin
 from spectro_app.plugins.pees.plugin import PeesPlugin
 from spectro_app.plugins.raman.plugin import RamanPlugin
@@ -1523,10 +1524,25 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             spectra = plugin.load([str_path])
         except Exception as exc:
+            hint = ""
+            if candidate.suffix.lower() == ".opus":
+                status = opus_optional_reader_status()
+                optional_hint = (
+                    "Install an optional OPUS reader for more robust parsing:\n"
+                    "  - pip install spectrochempy\n"
+                    "  - pip install brukeropusreader"
+                )
+                availability = (
+                    f"Detected: spectrochempy="
+                    f"{'available' if status['spectrochempy'] else 'missing'}, "
+                    f"brukeropusreader="
+                    f"{'available' if status['brukeropusreader'] else 'missing'}."
+                )
+                hint = f"\n\n{optional_hint}\n{availability}"
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
-                f"Loading spectra for preview failed: {exc}",
+                f"Loading spectra for preview failed: {exc}{hint}",
             )
             return
 
