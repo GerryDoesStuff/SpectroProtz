@@ -163,6 +163,22 @@ class Recipe:
             fit_scale_val = solvent_cfg.get("fit_scale")
             if fit_scale_val is not None and not isinstance(fit_scale_val, bool):
                 errs.append("Solvent subtraction fit_scale must be true or false")
+            if "multi_reference" in solvent_cfg and not isinstance(
+                solvent_cfg.get("multi_reference"), bool
+            ):
+                errs.append("Solvent subtraction multi_reference must be true or false")
+            reference_ids = solvent_cfg.get("reference_ids")
+            if reference_ids is not None and not isinstance(reference_ids, list):
+                errs.append("Solvent subtraction reference_ids must be a list")
+            ridge_alpha = solvent_cfg.get("ridge_alpha")
+            if ridge_alpha is not None:
+                try:
+                    float(ridge_alpha)
+                except (TypeError, ValueError):
+                    errs.append("Solvent subtraction ridge_alpha must be numeric")
+            include_offset = solvent_cfg.get("include_offset")
+            if include_offset is not None and not isinstance(include_offset, bool):
+                errs.append("Solvent subtraction include_offset must be true or false")
             shift_cfg = solvent_cfg.get("shift_compensation")
             if isinstance(shift_cfg, dict):
                 shift_enabled = shift_cfg.get("enabled")

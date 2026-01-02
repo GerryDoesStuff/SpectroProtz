@@ -672,10 +672,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recipeDock.smooth_enable.toggled.connect(self._on_recipe_widget_changed)
         self.recipeDock.smooth_window.valueChanged.connect(self._on_recipe_widget_changed)
         self.recipeDock.config_changed.connect(self._on_recipe_config_changed)
+        self.recipeDock.solvent_reference_requested.connect(
+            self._on_solvent_reference_requested
+        )
         self.recipeDock.auto_update_preview_checkbox.toggled.connect(
             self._on_auto_update_toggled
         )
         self._apply_auto_update_checkbox_state()
+        self._refresh_solvent_reference_entries()
 
     def on_open(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1601,11 +1605,26 @@ class MainWindow(QtWidgets.QMainWindow):
             defaults=metadata.set_default,
         )
         self._solvent_reference_store.upsert(entry)
+        self._refresh_solvent_reference_entries()
         QtWidgets.QMessageBox.information(
             self,
             "Reference Saved",
             f"Saved solvent reference '{metadata.name}'.",
         )
+
+    def _refresh_solvent_reference_entries(self) -> None:
+        if not self.recipeDock:
+            return
+        entries = [entry.to_dict() for entry in self._solvent_reference_store.load()]
+        self.recipeDock.set_solvent_reference_entries(entries)
+
+    def _on_solvent_reference_requested(self) -> None:
+        selected = self._prompt_solvent_reference_selection()
+        if selected is None:
+            return
+        if self.recipeDock:
+            self.recipeDock.set_selected_solvent_reference(selected)
+        self._refresh_solvent_reference_entries()
 
     def _on_raw_preview_destroyed(self, *_args):
         self._raw_preview_window = None
@@ -1631,11 +1650,37 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         reference_entry = solvent_cfg.get("reference_entry")
+        reference_entries = solvent_cfg.get("reference_entries")
         if isinstance(reference_entry, dict):
+            return True
+        if isinstance(reference_entries, list) and any(
+            isinstance(item, dict) for item in reference_entries
+        ):
             return True
 
         reference_id = solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
-        if reference_id:
+        reference_ids = solvent_cfg.get("reference_ids")
+        if isinstance(reference_ids, list):
+            reference_ids = [value for value in reference_ids if value]
+        else:
+            reference_ids = []
+        multi_reference = bool(solvent_cfg.get("multi_reference")) or bool(
+            reference_ids
+        )
+        if reference_id and reference_id not in reference_ids:
+            reference_ids.insert(0, reference_id)
+        if multi_reference and reference_ids:
+            entries = []
+            for ref_id in reference_ids:
+                stored = self._solvent_reference_store.get(str(ref_id))
+                if stored:
+                    entries.append(stored.to_dict())
+            if entries:
+                solvent_cfg["reference_entries"] = entries
+                params["solvent_subtraction"] = solvent_cfg
+                recipe_payload["params"] = params
+                return True
+        elif reference_id:
             stored = self._solvent_reference_store.get(str(reference_id))
             if stored:
                 solvent_cfg["reference_id"] = stored.id

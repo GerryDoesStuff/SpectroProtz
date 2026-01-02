@@ -778,6 +778,17 @@ def run_pipeline(
     solvent_reference_id = _normalize_identifier(
         solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
     )
+    reference_ids_cfg = solvent_cfg.get("reference_ids")
+    if isinstance(reference_ids_cfg, Sequence) and not isinstance(
+        reference_ids_cfg, (str, bytes)
+    ):
+        solvent_reference_ids = [
+            _normalize_identifier(value)
+            for value in reference_ids_cfg
+            if _normalize_identifier(value)
+        ]
+    else:
+        solvent_reference_ids = []
     solvent_references = (
         [
             spec
@@ -787,7 +798,23 @@ def run_pipeline(
         if solvent_enabled
         else []
     )
-    solvent_reference = _select_reference(solvent_references, solvent_reference_id)
+    multi_reference = bool(solvent_cfg.get("multi_reference")) or len(
+        solvent_reference_ids
+    ) > 1
+    if solvent_enabled and solvent_references and multi_reference:
+        if not solvent_reference_ids:
+            solvent_reference = solvent_references
+        else:
+            solvent_reference = [
+                ref
+                for ref in solvent_references
+                if _normalize_identifier(_reference_identifier(ref))
+                in solvent_reference_ids
+            ]
+        if not solvent_reference:
+            solvent_reference = None
+    else:
+        solvent_reference = _select_reference(solvent_references, solvent_reference_id)
 
     if solvent_enabled:
         samples = [
@@ -832,6 +859,8 @@ def run_pipeline(
                 reference_id=solvent_reference_id,
                 scale=solvent_cfg.get("scale"),
                 fit_scale=solvent_cfg.get("fit_scale", True),
+                ridge_alpha=solvent_cfg.get("ridge_alpha"),
+                include_offset=solvent_cfg.get("include_offset", False),
                 shift_compensation=solvent_cfg.get("shift_compensation"),
             )
 

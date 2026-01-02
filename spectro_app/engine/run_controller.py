@@ -128,14 +128,23 @@ class BatchRunnable(QRunnable):
         solvent_cfg = recipe.get("solvent_subtraction")
         if not isinstance(solvent_cfg, dict):
             return specs
+        entries = []
         entry = solvent_cfg.get("reference_entry")
-        if not isinstance(entry, dict):
-            return specs
-        spectrum = build_reference_spectrum(entry)
-        if spectrum is None:
+        if isinstance(entry, dict):
+            entries.append(entry)
+        extra_entries = solvent_cfg.get("reference_entries")
+        if isinstance(extra_entries, list):
+            entries.extend(
+                item for item in extra_entries if isinstance(item, dict)
+            )
+        if not entries:
             return specs
         augmented = list(specs)
-        augmented.append(spectrum)
+        for entry in entries:
+            spectrum = build_reference_spectrum(entry)
+            if spectrum is None:
+                continue
+            augmented.append(spectrum)
         return augmented
 
 class RunController(QObject):

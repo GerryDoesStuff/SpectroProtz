@@ -9,6 +9,7 @@ import yaml
 from PyQt6 import QtCore
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDockWidget,
@@ -21,6 +22,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -80,6 +83,7 @@ class CollapsibleSection(QWidget):
 class RecipeEditorDock(QDockWidget):
     config_changed = QtCore.pyqtSignal()
     module_changed = QtCore.pyqtSignal(str)
+    solvent_reference_requested = QtCore.pyqtSignal()
     _CUSTOM_SENTINEL = "__custom__"
     _JOIN_WINDOWS_GLOBAL_KEY = "__global__"
 
@@ -100,6 +104,7 @@ class RecipeEditorDock(QDockWidget):
         self._stitch_windows_errors: list[str] = []
         self._baseline_anchor_errors: list[str] = []
         self._despike_exclusion_errors: list[str] = []
+        self._solvent_reference_entries: dict[str, dict[str, object]] = {}
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -764,6 +769,119 @@ class RecipeEditorDock(QDockWidget):
         baseline_form.addRow("Anchor windows", baseline_anchor_container)
         layout.addWidget(baseline_section)
 
+        # --- Solvent subtraction (FTIR) ---
+        self.solvent_section = CollapsibleSection("Solvent subtraction (FTIR)")
+        solvent_form = QFormLayout()
+        self._solvent_form = solvent_form
+        solvent_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        self.solvent_section.setContentLayout(solvent_form)
+
+        self.solvent_enable = QCheckBox("Enable solvent subtraction")
+        self.solvent_enable.setToolTip(
+            "Subtract solvent/reference signatures from FTIR spectra before smoothing."
+        )
+
+        reference_row = QWidget()
+        reference_layout = QHBoxLayout(reference_row)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setSpacing(6)
+
+        self.solvent_reference_combo = QComboBox()
+        self.solvent_reference_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.solvent_reference_combo.setToolTip(
+            "Select a stored solvent reference to subtract from samples."
+        )
+        reference_layout.addWidget(self.solvent_reference_combo, 1)
+
+        self.solvent_reference_load = QPushButton("Load…")
+        self.solvent_reference_load.setToolTip(
+            "Load a solvent reference from file or choose from stored references."
+        )
+        reference_layout.addWidget(self.solvent_reference_load)
+
+        self.solvent_shift_enable = QCheckBox("Enable shift compensation")
+        self.solvent_shift_enable.setToolTip(
+            "Enable spectral alignment by scanning small shift offsets."
+        )
+        self.solvent_shift_min = QDoubleSpinBox()
+        self.solvent_shift_min.setDecimals(3)
+        self.solvent_shift_min.setRange(-999.0, 999.0)
+        self.solvent_shift_min.setSingleStep(0.1)
+        self.solvent_shift_min.setValue(-2.0)
+        self.solvent_shift_min.setToolTip(
+            "Minimum wavenumber shift (cm⁻¹) applied when aligning references."
+        )
+        self.solvent_shift_max = QDoubleSpinBox()
+        self.solvent_shift_max.setDecimals(3)
+        self.solvent_shift_max.setRange(-999.0, 999.0)
+        self.solvent_shift_max.setSingleStep(0.1)
+        self.solvent_shift_max.setValue(2.0)
+        self.solvent_shift_max.setToolTip(
+            "Maximum wavenumber shift (cm⁻¹) applied when aligning references."
+        )
+        self.solvent_shift_step = QDoubleSpinBox()
+        self.solvent_shift_step.setDecimals(3)
+        self.solvent_shift_step.setRange(0.001, 100.0)
+        self.solvent_shift_step.setSingleStep(0.05)
+        self.solvent_shift_step.setValue(0.1)
+        self.solvent_shift_step.setToolTip(
+            "Step size (cm⁻¹) used to scan shift offsets."
+        )
+
+        shift_bounds_row = QWidget()
+        shift_bounds_layout = QHBoxLayout(shift_bounds_row)
+        shift_bounds_layout.setContentsMargins(0, 0, 0, 0)
+        shift_bounds_layout.setSpacing(6)
+        shift_bounds_layout.addWidget(self.solvent_shift_min)
+        shift_bounds_layout.addWidget(self.solvent_shift_max)
+        shift_bounds_layout.addWidget(self.solvent_shift_step)
+
+        self.solvent_multi_reference_enable = QCheckBox("Enable multi-reference fit")
+        self.solvent_multi_reference_enable.setToolTip(
+            "Fit multiple solvent references at once; useful for mixed solvents."
+        )
+        self.solvent_reference_list = QListWidget()
+        self.solvent_reference_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.MultiSelection
+        )
+        self.solvent_reference_list.setToolTip(
+            "Select additional solvent references to include in the fit."
+        )
+
+        self.solvent_ridge_enable = QCheckBox("Enable ridge regularization")
+        self.solvent_ridge_enable.setToolTip(
+            "Apply ridge regularization to stabilize multi-reference fits."
+        )
+        self.solvent_ridge_alpha = QDoubleSpinBox()
+        self.solvent_ridge_alpha.setDecimals(6)
+        self.solvent_ridge_alpha.setRange(0.0, 1e6)
+        self.solvent_ridge_alpha.setSingleStep(0.1)
+        self.solvent_ridge_alpha.setValue(0.0)
+        self.solvent_ridge_alpha.setToolTip(
+            "Regularization strength (α). Increase to reduce coefficient noise."
+        )
+
+        self.solvent_offset_enable = QCheckBox("Include constant offset")
+        self.solvent_offset_enable.setToolTip(
+            "Fit a constant offset term alongside reference coefficients."
+        )
+
+        solvent_form.addRow(self.solvent_enable)
+        solvent_form.addRow("Reference", reference_row)
+        solvent_form.addRow(self.solvent_shift_enable)
+        solvent_form.addRow("Shift bounds (min / max / step)", shift_bounds_row)
+        solvent_form.addRow(self.solvent_multi_reference_enable)
+        solvent_form.addRow("Additional references", self.solvent_reference_list)
+        self._solvent_reference_list_row = solvent_form.rowCount() - 1
+        solvent_form.addRow(self.solvent_ridge_enable)
+        solvent_form.addRow("Ridge α", self.solvent_ridge_alpha)
+        solvent_form.addRow(self.solvent_offset_enable)
+        layout.addWidget(self.solvent_section)
+
         # --- Smoothing ---
         smoothing_section = CollapsibleSection("Smoothing")
         smoothing_form = QFormLayout()
@@ -1151,6 +1269,19 @@ class RecipeEditorDock(QDockWidget):
         self.baseline_anchor_table.itemSelectionChanged.connect(
             self._update_baseline_anchor_buttons
         )
+        self.solvent_reference_load.clicked.connect(
+            self.solvent_reference_requested.emit
+        )
+        self.solvent_enable.toggled.connect(self._update_solvent_controls_enabled)
+        self.solvent_multi_reference_enable.toggled.connect(
+            self._update_solvent_controls_enabled
+        )
+        self.solvent_ridge_enable.toggled.connect(
+            self._update_solvent_controls_enabled
+        )
+        self.solvent_shift_enable.toggled.connect(
+            self._update_solvent_controls_enabled
+        )
         self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
         self.stitch_enable.toggled.connect(self._update_feature_controls_enabled)
         self.peaks_enable.toggled.connect(self._update_feature_controls_enabled)
@@ -1196,6 +1327,17 @@ class RecipeEditorDock(QDockWidget):
             self.baseline_p.valueChanged,
             self.baseline_niter.valueChanged,
             self.baseline_iterations.valueChanged,
+            self.solvent_enable.toggled,
+            self.solvent_reference_combo.currentIndexChanged,
+            self.solvent_shift_enable.toggled,
+            self.solvent_shift_min.valueChanged,
+            self.solvent_shift_max.valueChanged,
+            self.solvent_shift_step.valueChanged,
+            self.solvent_multi_reference_enable.toggled,
+            self.solvent_reference_list.itemSelectionChanged,
+            self.solvent_ridge_enable.toggled,
+            self.solvent_ridge_alpha.valueChanged,
+            self.solvent_offset_enable.toggled,
             self.despike_enable.toggled,
             self.despike_window.valueChanged,
             self.despike_zscore.valueChanged,
@@ -1231,6 +1373,10 @@ class RecipeEditorDock(QDockWidget):
     def _on_module_changed(self, text: str) -> None:
         if self._updating:
             return
+        module_id = self.module.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        module_id = module_id if isinstance(module_id, str) else text
+        self._update_solvent_section_visibility(module_id)
+        self._update_solvent_controls_enabled()
         self.module_changed.emit(text)
 
     def set_available_modules(self, modules: list[tuple[str, str]] | None) -> None:
@@ -1263,6 +1409,49 @@ class RecipeEditorDock(QDockWidget):
                 index = 0
             if index >= 0:
                 self.module.setCurrentIndex(index)
+
+    def set_solvent_reference_entries(
+        self, entries: list[dict[str, object]] | None
+    ) -> None:
+        cleaned: dict[str, dict[str, object]] = {}
+        if entries:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = str(entry.get("id") or "").strip()
+                if not entry_id:
+                    continue
+                name = str(entry.get("name") or entry_id).strip()
+                payload = dict(entry)
+                payload["id"] = entry_id
+                payload["name"] = name or entry_id
+                cleaned[entry_id] = payload
+
+        active_id = self._current_solvent_reference_id()
+        if active_id and active_id in self._solvent_reference_entries:
+            cleaned.setdefault(
+                active_id, self._solvent_reference_entries[active_id]
+            )
+
+        self._solvent_reference_entries = cleaned
+        self._refresh_solvent_reference_widgets(
+            selected_id=active_id, selected_ids=[active_id] if active_id else None
+        )
+
+    def set_selected_solvent_reference(self, entry: dict[str, object]) -> None:
+        if not isinstance(entry, dict):
+            return
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            return
+        payload = dict(entry)
+        payload.setdefault("name", entry_id)
+        self._solvent_reference_entries[entry_id] = payload
+        self._refresh_solvent_reference_widgets(
+            selected_id=entry_id, selected_ids=[entry_id]
+        )
+        if not self._updating:
+            self._update_model_from_ui()
 
     @contextmanager
     def _suspend_updates(self):
@@ -1306,6 +1495,7 @@ class RecipeEditorDock(QDockWidget):
                 )
             if index >= 0:
                 self.module.setCurrentIndex(index)
+            self._update_solvent_section_visibility(module)
 
             params = self.recipe.params if isinstance(self.recipe.params, dict) else {}
             smoothing = params.get("smoothing", {}) if isinstance(params.get("smoothing"), dict) else {}
@@ -1515,6 +1705,66 @@ class RecipeEditorDock(QDockWidget):
             anchor_enabled, _ = self._load_baseline_anchor_windows(anchor_cfg)
             self.baseline_anchor_enable.setChecked(anchor_enabled)
 
+            solvent_cfg = (
+                params.get("solvent_subtraction", {})
+                if isinstance(params.get("solvent_subtraction"), dict)
+                else {}
+            )
+            self.solvent_enable.setChecked(bool(solvent_cfg.get("enabled", False)))
+            reference_entry = solvent_cfg.get("reference_entry")
+            if isinstance(reference_entry, dict):
+                entry_id = str(reference_entry.get("id") or "").strip()
+                if entry_id:
+                    self._solvent_reference_entries[entry_id] = dict(reference_entry)
+            reference_id = solvent_cfg.get("reference_id") or solvent_cfg.get("reference")
+            reference_id = str(reference_id).strip() if reference_id else ""
+            reference_ids = solvent_cfg.get("reference_ids")
+            if isinstance(reference_ids, Sequence) and not isinstance(
+                reference_ids, (str, bytes)
+            ):
+                reference_ids_list = [
+                    str(ref).strip()
+                    for ref in reference_ids
+                    if str(ref).strip()
+                ]
+            else:
+                reference_ids_list = []
+            shift_cfg = (
+                solvent_cfg.get("shift_compensation", {})
+                if isinstance(solvent_cfg.get("shift_compensation"), dict)
+                else {}
+            )
+            self.solvent_shift_enable.setChecked(
+                bool(shift_cfg.get("enabled", True))
+            )
+            self.solvent_shift_min.setValue(
+                self._safe_float(shift_cfg.get("min"), self.solvent_shift_min.value())
+            )
+            self.solvent_shift_max.setValue(
+                self._safe_float(shift_cfg.get("max"), self.solvent_shift_max.value())
+            )
+            self.solvent_shift_step.setValue(
+                self._safe_float(shift_cfg.get("step"), self.solvent_shift_step.value())
+            )
+            self.solvent_multi_reference_enable.setChecked(
+                bool(solvent_cfg.get("multi_reference", False))
+            )
+            ridge_alpha = solvent_cfg.get("ridge_alpha")
+            self.solvent_ridge_enable.setChecked(ridge_alpha is not None)
+            self.solvent_ridge_alpha.setValue(
+                self._safe_float(
+                    ridge_alpha, self.solvent_ridge_alpha.value()
+                )
+            )
+            self.solvent_offset_enable.setChecked(
+                bool(solvent_cfg.get("include_offset", False))
+            )
+            self._refresh_solvent_reference_widgets(
+                selected_id=reference_id,
+                selected_ids=reference_ids_list
+                or ([reference_id] if reference_id else None),
+            )
+
             despike_cfg = params.get("despike", {}) if isinstance(params.get("despike"), dict) else {}
             self.despike_enable.setChecked(bool(despike_cfg.get("enabled", False)))
             self.despike_window.setValue(
@@ -1703,6 +1953,7 @@ class RecipeEditorDock(QDockWidget):
 
         self._sync_recipe_from_ui()
         self._update_baseline_controls_enabled()
+        self._update_solvent_controls_enabled()
         self._update_feature_controls_enabled()
 
     def _format_optional(self, value) -> str:
@@ -2077,6 +2328,112 @@ class RecipeEditorDock(QDockWidget):
 
         self._update_join_window_buttons()
         self._update_stitch_window_buttons()
+
+    def _update_solvent_controls_enabled(self) -> None:
+        solvent_enabled = self.solvent_enable.isChecked()
+        self.solvent_reference_combo.setEnabled(solvent_enabled)
+        self.solvent_reference_load.setEnabled(solvent_enabled)
+        self.solvent_shift_enable.setEnabled(solvent_enabled)
+        shift_enabled = solvent_enabled and self.solvent_shift_enable.isChecked()
+        self.solvent_shift_min.setEnabled(shift_enabled)
+        self.solvent_shift_max.setEnabled(shift_enabled)
+        self.solvent_shift_step.setEnabled(shift_enabled)
+        self.solvent_multi_reference_enable.setEnabled(solvent_enabled)
+        multi_enabled = (
+            solvent_enabled and self.solvent_multi_reference_enable.isChecked()
+        )
+        self.solvent_reference_list.setEnabled(multi_enabled)
+        self.solvent_reference_list.setVisible(multi_enabled)
+        if hasattr(self, "_solvent_form"):
+            try:
+                self._solvent_form.setRowVisible(
+                    self._solvent_reference_list_row, multi_enabled
+                )
+            except AttributeError:
+                pass
+        self.solvent_ridge_enable.setEnabled(solvent_enabled)
+        ridge_enabled = (
+            solvent_enabled and self.solvent_ridge_enable.isChecked()
+        )
+        self.solvent_ridge_alpha.setEnabled(ridge_enabled)
+        self.solvent_offset_enable.setEnabled(solvent_enabled)
+
+    def _current_solvent_reference_id(self) -> str | None:
+        current = self.solvent_reference_combo.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        if isinstance(current, str) and current.strip():
+            return current.strip()
+        return None
+
+    def _selected_solvent_reference_ids(self) -> list[str]:
+        selected: list[str] = []
+        for item in self.solvent_reference_list.selectedItems():
+            entry_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry_id, str) and entry_id.strip():
+                selected.append(entry_id.strip())
+        return selected
+
+    def _refresh_solvent_reference_widgets(
+        self,
+        *,
+        selected_id: str | None = None,
+        selected_ids: Sequence[str] | None = None,
+    ) -> None:
+        entries = list(self._solvent_reference_entries.values())
+        entries.sort(
+            key=lambda entry: (not entry.get("defaults", False), entry.get("name", ""))
+        )
+        current_id = selected_id or self._current_solvent_reference_id()
+        self.solvent_reference_combo.blockSignals(True)
+        try:
+            self.solvent_reference_combo.clear()
+            self.solvent_reference_combo.addItem("None", None)
+            for entry in entries:
+                entry_id = str(entry.get("id") or "").strip()
+                if not entry_id:
+                    continue
+                name = str(entry.get("name") or entry_id).strip()
+                label = name or entry_id
+                if entry.get("defaults"):
+                    label = f"{label} (default)"
+                self.solvent_reference_combo.addItem(label, entry_id)
+            if current_id:
+                index = self.solvent_reference_combo.findData(
+                    current_id, QtCore.Qt.ItemDataRole.UserRole
+                )
+                if index >= 0:
+                    self.solvent_reference_combo.setCurrentIndex(index)
+        finally:
+            self.solvent_reference_combo.blockSignals(False)
+
+        selected_set = {
+            str(value).strip()
+            for value in (selected_ids or [])
+            if str(value).strip()
+        }
+        self.solvent_reference_list.blockSignals(True)
+        try:
+            self.solvent_reference_list.clear()
+            for entry in entries:
+                entry_id = str(entry.get("id") or "").strip()
+                if not entry_id:
+                    continue
+                name = str(entry.get("name") or entry_id).strip()
+                label = name or entry_id
+                if entry.get("defaults"):
+                    label = f"{label} (default)"
+                item = QListWidgetItem(label)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, entry_id)
+                if entry_id in selected_set:
+                    item.setSelected(True)
+                self.solvent_reference_list.addItem(item)
+        finally:
+            self.solvent_reference_list.blockSignals(False)
+
+    def _update_solvent_section_visibility(self, module_id: str) -> None:
+        is_ftir = str(module_id or "").strip().lower() == "ftir"
+        self.solvent_section.setVisible(is_ftir)
 
     def _refresh_join_windows_combo(self) -> None:
         self._join_windows_loading = True
@@ -2677,6 +3034,53 @@ class RecipeEditorDock(QDockWidget):
             self._baseline_anchor_errors = []
             for key in ("anchor", "anchor_windows", "anchors", "zeroing"):
                 baseline_cfg.pop(key, None)
+
+        module_id = self.module.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        module_id = str(module_id or "").strip().lower()
+        if module_id == "ftir":
+            solvent_cfg = self._ensure_dict(params, "solvent_subtraction")
+            solvent_cfg["enabled"] = bool(self.solvent_enable.isChecked())
+            reference_id = self._current_solvent_reference_id()
+            if reference_id:
+                solvent_cfg["reference_id"] = reference_id
+            else:
+                solvent_cfg.pop("reference_id", None)
+                solvent_cfg.pop("reference_entry", None)
+            entry = (
+                self._solvent_reference_entries.get(reference_id)
+                if reference_id
+                else None
+            )
+            if isinstance(entry, dict):
+                solvent_cfg["reference_entry"] = copy.deepcopy(entry)
+            elif not reference_id:
+                solvent_cfg.pop("reference_entry", None)
+            multi_enabled = bool(self.solvent_multi_reference_enable.isChecked())
+            solvent_cfg["multi_reference"] = multi_enabled
+            if multi_enabled:
+                reference_ids = self._selected_solvent_reference_ids()
+                if reference_id and reference_id not in reference_ids:
+                    reference_ids.insert(0, reference_id)
+                if reference_ids:
+                    solvent_cfg["reference_ids"] = reference_ids
+                else:
+                    solvent_cfg.pop("reference_ids", None)
+            else:
+                solvent_cfg.pop("reference_ids", None)
+            shift_cfg = self._ensure_dict(solvent_cfg, "shift_compensation")
+            shift_cfg["enabled"] = bool(self.solvent_shift_enable.isChecked())
+            shift_cfg["min"] = float(self.solvent_shift_min.value())
+            shift_cfg["max"] = float(self.solvent_shift_max.value())
+            shift_cfg["step"] = float(self.solvent_shift_step.value())
+            if self.solvent_ridge_enable.isChecked():
+                solvent_cfg["ridge_alpha"] = float(
+                    self.solvent_ridge_alpha.value()
+                )
+            else:
+                solvent_cfg.pop("ridge_alpha", None)
+            solvent_cfg["include_offset"] = bool(
+                self.solvent_offset_enable.isChecked()
+            )
 
         smoothing_cfg = self._ensure_dict(params, "smoothing")
         smoothing_cfg.update(
