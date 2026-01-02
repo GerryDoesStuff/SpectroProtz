@@ -35,6 +35,7 @@ from matplotlib.figure import Figure
 from scipy.signal import savgol_filter
 
 from spectro_app.engine.io_common import sniff_locale
+from spectro_app.io.opus import read_opus_records
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
 from spectro_app.engine import pipeline as core_pipeline
@@ -494,7 +495,7 @@ class UvVisPlugin(SpectroscopyPlugin):
 
     def detect(self, paths):
         return any(
-            str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".xls", ".txt"))
+            str(p).lower().endswith((".dsp", ".csv", ".xlsx", ".xls", ".txt", ".opus"))
             for p in paths
         )
 
@@ -562,6 +563,8 @@ class UvVisPlugin(SpectroscopyPlugin):
                     file_records = read_helios(path)
                 else:
                     file_records = self._read_generic_excel(path)
+            elif suffix in {".opus"}:
+                file_records = read_opus_records(path)
             else:
                 raise ValueError(f"Unsupported UV-Vis file type: {suffix}")
 
