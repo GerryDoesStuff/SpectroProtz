@@ -37,6 +37,10 @@ OPUS file or those accessors are missing, the application surfaces the raw
 exception (type + message) in the UI and records the full traceback in the
 log folder. Logs are accessible via **Tools → Open Log Folder**.
 
+OPUS ingestion accepts both `.opus` files and Bruker-style numeric suffixes
+such as `.0`, `.1`, or `.000`, routing them through the same OPUS reader for
+FTIR, Raman, and UV-Vis workflows.
+
 ## Setup
 From a fresh checkout:
 
