@@ -114,6 +114,12 @@ resetting settings, review the default configuration in
 workflow reference in [`docs/workflow_overview.md`](docs/workflow_overview.md)
 for guidance on expected processing behaviour.
 
+Preview failures now surface the raw exception text in the dialog so you can
+see the precise parsing issue (for example missing axes or unexpected dataset
+shapes). The same stack trace is appended to `preview_errors.log` inside the
+log folder (open via **Help → Open Log Folder**) for deeper debugging and
+sharing with support.
+
 ## Utilities
 Analysts can generate a searchable index of the JCAMP-DX headers bundled in
 `IR_referenceDatabase/` with the `index_ir_metadata.py` helper. The script

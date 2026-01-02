@@ -7,6 +7,7 @@ from struct import error as struct_error
 from struct import unpack
 from typing import Callable, Dict, Iterable, List, Tuple
 
+import logging
 import numpy as np
 
 from spectro_app.engine.plugin_api import Spectrum
@@ -29,6 +30,8 @@ NULL_STR = "\x00"
 PARAM_TYPES = {0: "int", 1: "float", 2: "str", 3: "str", 4: "str"}
 
 SERIES_BLOCKS = ("AB", "ScSm", "IgSm", "PhSm", "ScRf", "IgRf")
+
+logger = logging.getLogger(__name__)
 
 
 class UnknownBlockType(Exception):
@@ -426,9 +429,8 @@ def read_opus_records_external(
             if prefer_spectrochempy_only:
                 raise ValueError("spectrochempy.read_opus returned no spectra.")
         except Exception as exc:
-            if prefer_spectrochempy_only:
-                raise ValueError(f"spectrochempy.read_opus failed: {exc}") from exc
-            errors.append(f"spectrochempy.read_opus failed: {exc}")
+            logger.exception("spectrochempy.read_opus failed for %s", path)
+            raise
 
     try:
         from brukeropusreader import read_file as bruker_read_file
