@@ -41,6 +41,12 @@ pip install spectrochempy
 pip install brukeropusreader
 ```
 
+When SpectroChemPy is available, OPUS imports expect each dataset to provide
+`values`/`data` for the Y axis and `x`/`coordset.x` for the X axis. Missing
+axes or values trigger explicit error messages that surface in both the UI
+preview dialog and the log output, making it clear which dataset accessors are
+required.
+
 ## Setup
 From a fresh checkout:
 
