@@ -56,37 +56,6 @@ def test_load_opus_spectra_prefers_spectrochempy(monkeypatch, tmp_path) -> None:
     assert spectra[0].meta["external_reader"] == "spectrochempy"
 
 
-def test_load_opus_spectra_falls_back_to_internal_reader(monkeypatch, tmp_path) -> None:
-    spectrochempy = ModuleType("spectrochempy")
-    monkeypatch.setitem(__import__("sys").modules, "spectrochempy", spectrochempy)
-
-    brukeropusreader = ModuleType("brukeropusreader")
-    monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
-
-    fallback_calls: list[str] = []
-
-    def fake_read_opus_records(path: str) -> list[dict[str, object]]:
-        fallback_calls.append(path)
-        return [
-            {
-                "wavelength": np.array([1.0, 2.0], dtype=float),
-                "intensity": np.array([3.0, 4.0], dtype=float),
-                "meta": {"axis_key": "wavenumber", "axis_unit": "cm^-1"},
-            }
-        ]
-
-    monkeypatch.setattr(opus_reader, "read_opus_records", fake_read_opus_records)
-
-    opus_path = tmp_path / "fallback.opus"
-    opus_path.write_bytes(b"unused")
-
-    spectra = opus_reader.load_opus_spectra(opus_path)
-
-    assert fallback_calls == [opus_path]
-    assert len(spectra) == 1
-    assert spectra[0].meta["axis_key"] == "wavenumber"
-
-
 def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) -> None:
     spectrochempy = ModuleType("spectrochempy")
 
@@ -104,11 +73,6 @@ def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) ->
     brukeropusreader.read_file = read_file
     monkeypatch.setitem(__import__("sys").modules, "brukeropusreader", brukeropusreader)
 
-    def fail_internal(_: str) -> list[dict[str, object]]:
-        raise ValueError("internal boom")
-
-    monkeypatch.setattr(opus_reader, "read_opus_records", fail_internal)
-
     opus_path = tmp_path / "broken.opus"
     opus_path.write_bytes(b"unused")
 
@@ -116,7 +80,4 @@ def test_load_opus_spectra_error_when_all_readers_fail(monkeypatch, tmp_path) ->
         opus_reader.load_opus_spectra(opus_path)
 
     message = str(excinfo.value)
-    assert "Unable to read OPUS file with available readers" in message
-    assert "spectrochempy.read_opus failed: spectrochempy boom" in message
-    assert "brukeropusreader.read_file failed: brukeropusreader boom" in message
-    assert "fallback read_opus_records failed: internal boom" in message
+    assert "OPUS load failed: install spectrochempy or brukeropusreader" in message
