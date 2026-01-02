@@ -23,29 +23,19 @@ Ensure your environment matches the expectations declared in
 A typical workflow uses a virtual environment so the above packages can be
 installed without affecting system Python.
 
-### Optional OPUS readers
-SpectroProtz loads OPUS spectra through external readers to ensure the axis and
-intensity arrays are populated with SpectroChemPy’s default dataset accessors.
-Install one (or both) of the optional readers below to enable OPUS imports:
-
-- **spectrochempy** (adds `spectrochempy.read_opus`)
-- **brukeropusreader** (adds `brukeropusreader.read_file`)
-
-Install either package (or both) in the same environment as the app:
+### FTIR OPUS support (SpectroChemPy)
+SpectroProtz reads FTIR OPUS files through **SpectroChemPy**. Install it in the
+same environment as the app:
 
 ```bash
 pip install spectrochempy
 ```
 
-```bash
-pip install brukeropusreader
-```
-
-When SpectroChemPy is available, OPUS imports expect each dataset to provide
-`values`/`data` for the Y axis and `x`/`coordset.x` for the X axis. Missing
-axes or values trigger explicit error messages that surface in both the UI
-preview dialog and the log output, making it clear which dataset accessors are
-required.
+The OPUS importer expects SpectroChemPy datasets to provide `values`/`data` for
+the Y axis and `x`/`coordset.x` for the X axis. If SpectroChemPy cannot parse an
+OPUS file or those accessors are missing, the application surfaces the raw
+exception (type + message) in the UI and records the full traceback in the
+log folder. Logs are accessible via **Tools → Open Log Folder**.
 
 ## Setup
 From a fresh checkout:
