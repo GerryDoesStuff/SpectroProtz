@@ -1542,7 +1542,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Preview Failed",
-                f"Loading spectra for preview failed: {exc}{hint}",
+                f"{exc}{hint}",
             )
             return
 
