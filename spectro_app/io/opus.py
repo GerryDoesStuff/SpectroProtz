@@ -262,27 +262,48 @@ def normalize_unit(unit: object | None) -> str | None:
     return mapping.get(text.lower(), text)
 
 
-def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
-    def to_numeric_array(value: object) -> np.ndarray:
-        if hasattr(value, "magnitude"):
-            value = getattr(value, "magnitude")
-        elif hasattr(value, "data"):
-            value = getattr(value, "data")
-        elif hasattr(value, "values"):
-            value = getattr(value, "values")
+def to_numeric_array(value: object) -> np.ndarray:
+    if value is None:
+        raise ValueError("Cannot convert empty value to numeric array.")
+    if hasattr(value, "values"):
+        value = getattr(value, "values")
+    elif hasattr(value, "data"):
+        value = getattr(value, "data")
+    if hasattr(value, "magnitude"):
+        value = getattr(value, "magnitude")
+    try:
         return np.asarray(value, dtype=float)
+    except Exception as exc:
+        raise ValueError("Failed to convert value to numeric array.") from exc
 
+
+def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[str, object]]:
     def iter_datasets(value: object) -> Iterable[object]:
         if isinstance(value, (list, tuple)):
             return value
         return [value]
 
     records: List[Dict[str, object]] = []
-    for entry in iter_datasets(dataset):
+    for index, entry in enumerate(iter_datasets(dataset)):
         if entry is None:
             continue
-        arr = entry.squeeze()
-        intensity = to_numeric_array(arr)
+        if hasattr(entry, "squeeze"):
+            try:
+                arr = entry.squeeze()
+            except Exception:
+                arr = entry
+        else:
+            arr = entry
+        intensity_source = None
+        if hasattr(arr, "values"):
+            intensity_source = getattr(arr, "values")
+        elif hasattr(arr, "data"):
+            intensity_source = getattr(arr, "data")
+        if intensity_source is None:
+            raise ValueError(
+                f"spectrochempy entry {index} has no intensity values on .values or .data."
+            )
+        intensity = to_numeric_array(intensity_source)
 
         axis = None
         axis_unit = None
@@ -294,12 +315,10 @@ def _records_from_spectrochempy(dataset: object, path: str | Path) -> List[Dict[
         if x_obj is None:
             coordset = getattr(arr, "coordset", None)
             x_obj = getattr(coordset, "x", None) if coordset is not None else None
-        if x_obj is not None:
-            axis = to_numeric_array(x_obj)
-            axis_unit = normalize_unit(getattr(x_obj, "units", None) or getattr(x_obj, "unit", None))
-
-        if axis is None:
-            axis = np.arange(intensity.size, dtype=float)
+        if x_obj is None:
+            raise ValueError(f"spectrochempy entry {index} has no x axis on .x or .coordset.x.")
+        axis = to_numeric_array(x_obj)
+        axis_unit = normalize_unit(getattr(x_obj, "units", None) or getattr(x_obj, "unit", None))
 
         meta: Dict[str, object] = {
             "source": "opus",
