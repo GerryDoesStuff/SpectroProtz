@@ -37,6 +37,7 @@ from scipy.signal import savgol_filter
 from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
+from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.peak_detection import detect_peaks_for_features, resolve_peak_config
 from spectro_app.engine.excel_writer import (
     write_single_spectrum_csv,
@@ -3736,10 +3737,9 @@ class UvVisPlugin(SpectroscopyPlugin):
 
         return {"enabled": True, "status": overall_status, "targets": target_results}
 
-    def analyze(self, specs, recipe):
+    def _enrich_with_features(self, specs: List[Spectrum], recipe: Dict[str, object]):
         from spectro_app.engine.qc import compute_uvvis_drift_map, compute_uvvis_qc
 
-        recipe = self._apply_recipe_defaults(recipe)
         context = self._report_context
         analysis_ctx = context.setdefault("analysis", {})
         ingestion_ctx = context.setdefault("ingestion", {})
@@ -4025,6 +4025,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         analysis_ctx["feature_summary"] = feature_summary
         analysis_ctx["calibration"] = calibration_results
         return processed_with_features, qc_rows
+
+    def analyze(self, specs, recipe):
+        recipe = self._apply_recipe_defaults(recipe)
+        processed, _ = core_pipeline.run_pipeline(specs, recipe)
+        return self._enrich_with_features(processed, recipe)
+
+    def enrich(self, specs, qc_rows, recipe):
+        recipe = self._apply_recipe_defaults(recipe)
+        return self._enrich_with_features(specs, recipe)
 
     def _build_audit_entries(
         self,

@@ -13,7 +13,13 @@ class RamanPlugin(SpectroscopyPlugin):
     def load(self, paths):
         wn = np.linspace(100, 3500, 3401)
         inten = np.zeros_like(wn)
-        return [Spectrum(wavelength=wn, intensity=inten, meta={"source": "stub"})]
+        return [
+            Spectrum(
+                wavelength=wn,
+                intensity=inten,
+                meta={"source": "stub", "axis_key": "wavenumber", "axis_unit": "cm^-1"},
+            )
+        ]
 
     def preprocess(self, specs, recipe):
         # TODO: cosmic-ray despike, baseline, optional vector normalization
@@ -21,7 +27,7 @@ class RamanPlugin(SpectroscopyPlugin):
 
     def _detect_peak_features(self, wn: np.ndarray, intensity: np.ndarray, peak_cfg: dict) -> list[dict]:
         config = resolve_peak_config(peak_cfg)
-        return detect_peaks_for_features(wn, intensity, config, axis_key="wavelength")
+        return detect_peaks_for_features(wn, intensity, config, axis_key="wavenumber")
 
     def analyze(self, specs, recipe):
         feature_cfg = dict(recipe.get("features", {})) if recipe else {}
