@@ -813,41 +813,218 @@ class RecipeEditorDock(QDockWidget):
         self.peaks_prominence.setDecimals(4)
         self.peaks_prominence.setRange(0.0, 1e6)
         self.peaks_prominence.setSingleStep(0.01)
-        self.peaks_prominence.setValue(0.01)
+        self.peaks_prominence.setValue(0.003)
         self.peaks_prominence.setToolTip(
-            "Minimum prominence (absorbance) a peak must exceed. Increase when"
-            " noise triggers false positives; decrease to capture subtle peaks."
+            "Base prominence floor for peak detection (normalized absorbance units)."
         )
-        self.peaks_min_distance = QSpinBox()
-        self.peaks_min_distance.setRange(1, 100000)
-        self.peaks_min_distance.setValue(5)
+        self.peaks_min_absorbance_threshold = QDoubleSpinBox()
+        self.peaks_min_absorbance_threshold.setDecimals(4)
+        self.peaks_min_absorbance_threshold.setRange(0.0, 1e6)
+        self.peaks_min_absorbance_threshold.setSingleStep(0.01)
+        self.peaks_min_absorbance_threshold.setValue(0.05)
+        self.peaks_min_absorbance_threshold.setToolTip(
+            "Minimum baseline-corrected absorbance to keep a peak candidate."
+        )
+        self.peaks_noise_sigma_multiplier = QDoubleSpinBox()
+        self.peaks_noise_sigma_multiplier.setDecimals(4)
+        self.peaks_noise_sigma_multiplier.setRange(0.0, 1e6)
+        self.peaks_noise_sigma_multiplier.setSingleStep(0.1)
+        self.peaks_noise_sigma_multiplier.setValue(1.5)
+        self.peaks_noise_sigma_multiplier.setToolTip(
+            "Multiplier applied to estimated noise sigma to set the prominence floor."
+        )
+        self.peaks_noise_window_cm = QDoubleSpinBox()
+        self.peaks_noise_window_cm.setDecimals(3)
+        self.peaks_noise_window_cm.setRange(0.0, 1e6)
+        self.peaks_noise_window_cm.setSingleStep(10.0)
+        self.peaks_noise_window_cm.setValue(400.0)
+        self.peaks_noise_window_cm.setToolTip(
+            "Window size (cm^-1) for local noise estimation. Set to 0 to use a"
+            " single global noise estimate."
+        )
+        self.peaks_min_prominence_by_region = QLineEdit()
+        self.peaks_min_prominence_by_region.setPlaceholderText(
+            'e.g. "400-1500:0.03,1500-1800:0.02"'
+        )
+        self.peaks_min_prominence_by_region.setClearButtonEnabled(True)
+        self.peaks_min_prominence_by_region.setToolTip(
+            "Comma-separated regional prominence floors, e.g. "
+            '"400-1500:0.03,1500-1800:0.02". Use this to suppress low-value '
+            "artifacts in targeted ranges."
+        )
+        self.peaks_min_distance = QDoubleSpinBox()
+        self.peaks_min_distance.setDecimals(3)
+        self.peaks_min_distance.setRange(0.0, 1e6)
+        self.peaks_min_distance.setSingleStep(0.1)
+        self.peaks_min_distance.setValue(0.8)
         self.peaks_min_distance.setToolTip(
-            "Minimum separation between detected peaks, expressed in data"
-            " points. Raise to merge tightly clustered maxima."
+            "Minimum peak separation in cm^-1 (converted to points using median spacing)."
         )
-        self.peaks_max_peaks = QSpinBox()
-        self.peaks_max_peaks.setRange(0, 100000)
-        self.peaks_max_peaks.setValue(5)
-        self.peaks_max_peaks.setToolTip(
-            "Limit on the number of peaks reported per spectrum. Set to zero to"
-            " disable reporting while keeping detection active."
+        self.peaks_min_distance_mode = QComboBox()
+        self.peaks_min_distance_mode.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
         )
-        self.peaks_height = QLineEdit()
-        self.peaks_height.setPlaceholderText("Optional minimum height")
-        self.peaks_height.setClearButtonEnabled(True)
-        self.peaks_height.setToolTip(
-            "Optional absolute intensity threshold. Leave blank to accept any"
-            " height meeting the prominence criterion."
+        self.peaks_min_distance_mode.addItem("Fixed", "fixed")
+        self.peaks_min_distance_mode.addItem("Adaptive (median FWHM)", "adaptive")
+        self.peaks_min_distance_mode.setToolTip(
+            "Use a fixed min distance or clamp it to a fraction of the median peak FWHM"
+            " (adaptive)."
         )
-        height_validator = QDoubleValidator(0.0, 1e12, 6, self.peaks_height)
-        height_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
-        self.peaks_height.setValidator(height_validator)
+        self.peaks_min_distance_fwhm_fraction = QDoubleSpinBox()
+        self.peaks_min_distance_fwhm_fraction.setDecimals(3)
+        self.peaks_min_distance_fwhm_fraction.setRange(0.0, 10.0)
+        self.peaks_min_distance_fwhm_fraction.setSingleStep(0.05)
+        self.peaks_min_distance_fwhm_fraction.setValue(0.5)
+        self.peaks_min_distance_fwhm_fraction.setToolTip(
+            "Fraction of median peak FWHM to clamp min-distance in adaptive mode."
+        )
+        self.peaks_peak_width_min = QDoubleSpinBox()
+        self.peaks_peak_width_min.setDecimals(3)
+        self.peaks_peak_width_min.setRange(0.0, 1e6)
+        self.peaks_peak_width_min.setSingleStep(0.5)
+        self.peaks_peak_width_min.setValue(0.0)
+        self.peaks_peak_width_min.setToolTip(
+            "Minimum peak width in cm^-1; set to 0 to disable width filtering."
+        )
+        self.peaks_peak_width_max = QDoubleSpinBox()
+        self.peaks_peak_width_max.setDecimals(3)
+        self.peaks_peak_width_max.setRange(0.0, 1e6)
+        self.peaks_peak_width_max.setSingleStep(0.5)
+        self.peaks_peak_width_max.setValue(0.0)
+        self.peaks_peak_width_max.setToolTip(
+            "Maximum peak width in cm^-1; set to 0 to disable width filtering."
+        )
+        self.peaks_max_peak_candidates = QSpinBox()
+        self.peaks_max_peak_candidates.setRange(0, 100000)
+        self.peaks_max_peak_candidates.setValue(0)
+        self.peaks_max_peak_candidates.setToolTip(
+            "Maximum number of peak candidates to retain per spectrum (0 disables)."
+        )
+        self.peaks_detect_negative = QCheckBox("Detect negative peaks")
+        self.peaks_detect_negative.setToolTip(
+            "Also detect negative peaks by searching inverted spectra."
+        )
+        self.peaks_merge_tolerance = QDoubleSpinBox()
+        self.peaks_merge_tolerance.setDecimals(3)
+        self.peaks_merge_tolerance.setRange(0.0, 1e6)
+        self.peaks_merge_tolerance.setSingleStep(0.5)
+        self.peaks_merge_tolerance.setValue(8.0)
+        self.peaks_merge_tolerance.setToolTip(
+            "Cluster tolerance (cm^-1) for merging nearby peak detections."
+        )
+        self.peaks_close_peak_tolerance = QDoubleSpinBox()
+        self.peaks_close_peak_tolerance.setDecimals(3)
+        self.peaks_close_peak_tolerance.setRange(0.0, 1e6)
+        self.peaks_close_peak_tolerance.setSingleStep(0.1)
+        self.peaks_close_peak_tolerance.setValue(1.5)
+        self.peaks_close_peak_tolerance.setToolTip(
+            "Tolerance (cm^-1) for labeling peaks that are unusually close together."
+        )
+        self.peaks_plateau_min_points = QSpinBox()
+        self.peaks_plateau_min_points.setRange(2, 999)
+        self.peaks_plateau_min_points.setValue(3)
+        self.peaks_plateau_min_points.setToolTip(
+            "Minimum number of consecutive samples required to flag a plateau peak."
+        )
+        self.peaks_plateau_prominence_factor = QDoubleSpinBox()
+        self.peaks_plateau_prominence_factor.setDecimals(3)
+        self.peaks_plateau_prominence_factor.setRange(0.0, 10.0)
+        self.peaks_plateau_prominence_factor.setSingleStep(0.1)
+        self.peaks_plateau_prominence_factor.setValue(1.0)
+        self.peaks_plateau_prominence_factor.setToolTip(
+            "Multiplier applied to the median prominence when detecting plateau peaks."
+        )
+        self.peaks_shoulder_min_distance = QDoubleSpinBox()
+        self.peaks_shoulder_min_distance.setDecimals(3)
+        self.peaks_shoulder_min_distance.setRange(0.0, 1e6)
+        self.peaks_shoulder_min_distance.setSingleStep(0.1)
+        self.peaks_shoulder_min_distance.setValue(0.0)
+        self.peaks_shoulder_min_distance.setSpecialValueText("Auto")
+        self.peaks_shoulder_min_distance.setToolTip(
+            "Minimum distance between shoulder detections in cm^-1. Leave at Auto to"
+            " derive from the sampling step and min-distance."
+        )
+        self.peaks_shoulder_merge_tolerance = QDoubleSpinBox()
+        self.peaks_shoulder_merge_tolerance.setDecimals(3)
+        self.peaks_shoulder_merge_tolerance.setRange(0.0, 1e6)
+        self.peaks_shoulder_merge_tolerance.setSingleStep(0.1)
+        self.peaks_shoulder_merge_tolerance.setValue(1.5)
+        self.peaks_shoulder_merge_tolerance.setToolTip(
+            "Merge tolerance (cm^-1) for shoulder detections."
+        )
+        self.peaks_shoulder_curvature_prominence_factor = QDoubleSpinBox()
+        self.peaks_shoulder_curvature_prominence_factor.setDecimals(3)
+        self.peaks_shoulder_curvature_prominence_factor.setRange(0.0, 10.0)
+        self.peaks_shoulder_curvature_prominence_factor.setSingleStep(0.1)
+        self.peaks_shoulder_curvature_prominence_factor.setValue(1.2)
+        self.peaks_shoulder_curvature_prominence_factor.setToolTip(
+            "Multiplier applied to curvature prominence when detecting shoulders."
+        )
+        self.peaks_cwt_enabled = QCheckBox("Enable CWT detection")
+        self.peaks_cwt_enabled.setToolTip(
+            "Use continuous wavelet transform (CWT) detection to supplement peak picks."
+        )
+        self.peaks_cwt_width_min = QDoubleSpinBox()
+        self.peaks_cwt_width_min.setDecimals(3)
+        self.peaks_cwt_width_min.setRange(0.0, 1e6)
+        self.peaks_cwt_width_min.setSingleStep(0.5)
+        self.peaks_cwt_width_min.setValue(0.0)
+        self.peaks_cwt_width_min.setToolTip(
+            "Minimum CWT width in cm^-1 (0 uses the main width minimum)."
+        )
+        self.peaks_cwt_width_max = QDoubleSpinBox()
+        self.peaks_cwt_width_max.setDecimals(3)
+        self.peaks_cwt_width_max.setRange(0.0, 1e6)
+        self.peaks_cwt_width_max.setSingleStep(0.5)
+        self.peaks_cwt_width_max.setValue(0.0)
+        self.peaks_cwt_width_max.setToolTip(
+            "Maximum CWT width in cm^-1 (0 uses the main width maximum)."
+        )
+        self.peaks_cwt_width_step = QDoubleSpinBox()
+        self.peaks_cwt_width_step.setDecimals(3)
+        self.peaks_cwt_width_step.setRange(0.0, 1e6)
+        self.peaks_cwt_width_step.setSingleStep(0.5)
+        self.peaks_cwt_width_step.setValue(0.0)
+        self.peaks_cwt_width_step.setToolTip(
+            "CWT width step in cm^-1 (0 derives the step from the width span)."
+        )
+        self.peaks_cwt_cluster_tolerance = QDoubleSpinBox()
+        self.peaks_cwt_cluster_tolerance.setDecimals(3)
+        self.peaks_cwt_cluster_tolerance.setRange(0.0, 1e6)
+        self.peaks_cwt_cluster_tolerance.setSingleStep(0.5)
+        self.peaks_cwt_cluster_tolerance.setValue(8.0)
+        self.peaks_cwt_cluster_tolerance.setToolTip(
+            "Cluster tolerance (cm^-1) used to merge adjacent CWT detections."
+        )
 
         peaks_form.addRow(self.peaks_enable)
         peaks_form.addRow("Prominence", self.peaks_prominence)
+        peaks_form.addRow("Min absorbance threshold", self.peaks_min_absorbance_threshold)
+        peaks_form.addRow("Noise sigma multiplier", self.peaks_noise_sigma_multiplier)
+        peaks_form.addRow("Noise window (cm^-1)", self.peaks_noise_window_cm)
+        peaks_form.addRow("Min prominence by region", self.peaks_min_prominence_by_region)
         peaks_form.addRow("Min distance", self.peaks_min_distance)
-        peaks_form.addRow("Max peaks", self.peaks_max_peaks)
-        peaks_form.addRow("Height", self.peaks_height)
+        peaks_form.addRow("Min distance mode", self.peaks_min_distance_mode)
+        peaks_form.addRow("Min distance FWHM fraction", self.peaks_min_distance_fwhm_fraction)
+        peaks_form.addRow("Peak width min (cm^-1)", self.peaks_peak_width_min)
+        peaks_form.addRow("Peak width max (cm^-1)", self.peaks_peak_width_max)
+        peaks_form.addRow("Max peak candidates", self.peaks_max_peak_candidates)
+        peaks_form.addRow(self.peaks_detect_negative)
+        peaks_form.addRow("Merge tolerance (cm^-1)", self.peaks_merge_tolerance)
+        peaks_form.addRow("Close-peak tolerance (cm^-1)", self.peaks_close_peak_tolerance)
+        peaks_form.addRow("Plateau min points", self.peaks_plateau_min_points)
+        peaks_form.addRow("Plateau prominence factor", self.peaks_plateau_prominence_factor)
+        peaks_form.addRow("Shoulder min distance (cm^-1)", self.peaks_shoulder_min_distance)
+        peaks_form.addRow("Shoulder merge tolerance (cm^-1)", self.peaks_shoulder_merge_tolerance)
+        peaks_form.addRow(
+            "Shoulder curvature prominence factor",
+            self.peaks_shoulder_curvature_prominence_factor,
+        )
+        peaks_form.addRow(self.peaks_cwt_enabled)
+        peaks_form.addRow("CWT width min (cm^-1)", self.peaks_cwt_width_min)
+        peaks_form.addRow("CWT width max (cm^-1)", self.peaks_cwt_width_max)
+        peaks_form.addRow("CWT width step (cm^-1)", self.peaks_cwt_width_step)
+        peaks_form.addRow("CWT cluster tolerance (cm^-1)", self.peaks_cwt_cluster_tolerance)
         layout.addWidget(peaks_section)
 
         # --- QC / Drift ---
@@ -992,8 +1169,28 @@ class RecipeEditorDock(QDockWidget):
             self.peaks_enable.toggled,
             self.peaks_prominence.valueChanged,
             self.peaks_min_distance.valueChanged,
-            self.peaks_max_peaks.valueChanged,
-            self.peaks_height.textChanged,
+            self.peaks_min_absorbance_threshold.valueChanged,
+            self.peaks_noise_sigma_multiplier.valueChanged,
+            self.peaks_noise_window_cm.valueChanged,
+            self.peaks_min_prominence_by_region.textChanged,
+            self.peaks_min_distance_mode.currentIndexChanged,
+            self.peaks_min_distance_fwhm_fraction.valueChanged,
+            self.peaks_peak_width_min.valueChanged,
+            self.peaks_peak_width_max.valueChanged,
+            self.peaks_max_peak_candidates.valueChanged,
+            self.peaks_detect_negative.toggled,
+            self.peaks_merge_tolerance.valueChanged,
+            self.peaks_close_peak_tolerance.valueChanged,
+            self.peaks_plateau_min_points.valueChanged,
+            self.peaks_plateau_prominence_factor.valueChanged,
+            self.peaks_shoulder_min_distance.valueChanged,
+            self.peaks_shoulder_merge_tolerance.valueChanged,
+            self.peaks_shoulder_curvature_prominence_factor.valueChanged,
+            self.peaks_cwt_enabled.toggled,
+            self.peaks_cwt_width_min.valueChanged,
+            self.peaks_cwt_width_max.valueChanged,
+            self.peaks_cwt_width_step.valueChanged,
+            self.peaks_cwt_cluster_tolerance.valueChanged,
             self.baseline_lambda.valueChanged,
             self.baseline_p.valueChanged,
             self.baseline_niter.valueChanged,
@@ -1128,23 +1325,142 @@ class RecipeEditorDock(QDockWidget):
                     self.peaks_prominence.value(),
                 )
             )
+            self.peaks_min_absorbance_threshold.setValue(
+                self._safe_float(
+                    peaks_cfg.get("min_absorbance_threshold"),
+                    self.peaks_min_absorbance_threshold.value(),
+                )
+            )
+            self.peaks_noise_sigma_multiplier.setValue(
+                self._safe_float(
+                    peaks_cfg.get("noise_sigma_multiplier"),
+                    self.peaks_noise_sigma_multiplier.value(),
+                )
+            )
+            self.peaks_noise_window_cm.setValue(
+                self._safe_float(
+                    peaks_cfg.get("noise_window_cm"),
+                    self.peaks_noise_window_cm.value(),
+                )
+            )
+            region_prominence = peaks_cfg.get("min_prominence_by_region")
+            self.peaks_min_prominence_by_region.setText(
+                "" if region_prominence in (None, "") else str(region_prominence)
+            )
             self.peaks_min_distance.setValue(
-                self._safe_int(
+                self._safe_float(
                     peaks_cfg.get("min_distance", peaks_cfg.get("distance")),
                     self.peaks_min_distance.value(),
                 )
             )
-            self.peaks_max_peaks.setValue(
-                self._safe_int(
-                    peaks_cfg.get("max_peaks", peaks_cfg.get("num_peaks")),
-                    self.peaks_max_peaks.value(),
+            min_distance_mode = str(peaks_cfg.get("min_distance_mode") or "fixed").lower()
+            if min_distance_mode not in {"fixed", "adaptive"}:
+                min_distance_mode = "fixed"
+            min_distance_mode_index = self.peaks_min_distance_mode.findData(
+                min_distance_mode, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if min_distance_mode_index < 0:
+                min_distance_mode_index = 0
+            self.peaks_min_distance_mode.setCurrentIndex(min_distance_mode_index)
+            self.peaks_min_distance_fwhm_fraction.setValue(
+                self._safe_float(
+                    peaks_cfg.get("min_distance_fwhm_fraction"),
+                    self.peaks_min_distance_fwhm_fraction.value(),
                 )
             )
-            height_value = peaks_cfg.get("height")
-            if height_value in (None, ""):
-                self.peaks_height.setText("")
-            else:
-                self.peaks_height.setText(str(height_value))
+            self.peaks_peak_width_min.setValue(
+                self._safe_float(
+                    peaks_cfg.get("peak_width_min"),
+                    self.peaks_peak_width_min.value(),
+                )
+            )
+            self.peaks_peak_width_max.setValue(
+                self._safe_float(
+                    peaks_cfg.get("peak_width_max"),
+                    self.peaks_peak_width_max.value(),
+                )
+            )
+            self.peaks_max_peak_candidates.setValue(
+                self._safe_int(
+                    peaks_cfg.get(
+                        "max_peak_candidates",
+                        peaks_cfg.get("max_peaks", peaks_cfg.get("num_peaks")),
+                    ),
+                    self.peaks_max_peak_candidates.value(),
+                )
+            )
+            self.peaks_detect_negative.setChecked(
+                bool(peaks_cfg.get("detect_negative_peaks", False))
+            )
+            self.peaks_merge_tolerance.setValue(
+                self._safe_float(
+                    peaks_cfg.get("merge_tolerance"),
+                    self.peaks_merge_tolerance.value(),
+                )
+            )
+            self.peaks_close_peak_tolerance.setValue(
+                self._safe_float(
+                    peaks_cfg.get("close_peak_tolerance_cm"),
+                    self.peaks_close_peak_tolerance.value(),
+                )
+            )
+            self.peaks_plateau_min_points.setValue(
+                self._safe_int(
+                    peaks_cfg.get("plateau_min_points"),
+                    self.peaks_plateau_min_points.value(),
+                )
+            )
+            self.peaks_plateau_prominence_factor.setValue(
+                self._safe_float(
+                    peaks_cfg.get("plateau_prominence_factor"),
+                    self.peaks_plateau_prominence_factor.value(),
+                )
+            )
+            self.peaks_shoulder_min_distance.setValue(
+                self._safe_float(
+                    peaks_cfg.get("shoulder_min_distance_cm"),
+                    self.peaks_shoulder_min_distance.value(),
+                )
+            )
+            self.peaks_shoulder_merge_tolerance.setValue(
+                self._safe_float(
+                    peaks_cfg.get("shoulder_merge_tolerance_cm"),
+                    self.peaks_shoulder_merge_tolerance.value(),
+                )
+            )
+            self.peaks_shoulder_curvature_prominence_factor.setValue(
+                self._safe_float(
+                    peaks_cfg.get("shoulder_curvature_prominence_factor"),
+                    self.peaks_shoulder_curvature_prominence_factor.value(),
+                )
+            )
+            self.peaks_cwt_enabled.setChecked(
+                bool(peaks_cfg.get("cwt_enabled", False))
+            )
+            self.peaks_cwt_width_min.setValue(
+                self._safe_float(
+                    peaks_cfg.get("cwt_width_min"),
+                    self.peaks_cwt_width_min.value(),
+                )
+            )
+            self.peaks_cwt_width_max.setValue(
+                self._safe_float(
+                    peaks_cfg.get("cwt_width_max"),
+                    self.peaks_cwt_width_max.value(),
+                )
+            )
+            self.peaks_cwt_width_step.setValue(
+                self._safe_float(
+                    peaks_cfg.get("cwt_width_step"),
+                    self.peaks_cwt_width_step.value(),
+                )
+            )
+            self.peaks_cwt_cluster_tolerance.setValue(
+                self._safe_float(
+                    peaks_cfg.get("cwt_cluster_tolerance"),
+                    self.peaks_cwt_cluster_tolerance.value(),
+                )
+            )
 
             baseline_cfg = (
                 params.get("baseline", {}) if isinstance(params.get("baseline"), dict) else {}
@@ -1684,8 +2000,28 @@ class RecipeEditorDock(QDockWidget):
         peaks_enabled = self.peaks_enable.isChecked()
         self.peaks_prominence.setEnabled(peaks_enabled)
         self.peaks_min_distance.setEnabled(peaks_enabled)
-        self.peaks_max_peaks.setEnabled(peaks_enabled)
-        self.peaks_height.setEnabled(peaks_enabled)
+        self.peaks_min_absorbance_threshold.setEnabled(peaks_enabled)
+        self.peaks_noise_sigma_multiplier.setEnabled(peaks_enabled)
+        self.peaks_noise_window_cm.setEnabled(peaks_enabled)
+        self.peaks_min_prominence_by_region.setEnabled(peaks_enabled)
+        self.peaks_min_distance_mode.setEnabled(peaks_enabled)
+        self.peaks_min_distance_fwhm_fraction.setEnabled(peaks_enabled)
+        self.peaks_peak_width_min.setEnabled(peaks_enabled)
+        self.peaks_peak_width_max.setEnabled(peaks_enabled)
+        self.peaks_max_peak_candidates.setEnabled(peaks_enabled)
+        self.peaks_detect_negative.setEnabled(peaks_enabled)
+        self.peaks_merge_tolerance.setEnabled(peaks_enabled)
+        self.peaks_close_peak_tolerance.setEnabled(peaks_enabled)
+        self.peaks_plateau_min_points.setEnabled(peaks_enabled)
+        self.peaks_plateau_prominence_factor.setEnabled(peaks_enabled)
+        self.peaks_shoulder_min_distance.setEnabled(peaks_enabled)
+        self.peaks_shoulder_merge_tolerance.setEnabled(peaks_enabled)
+        self.peaks_shoulder_curvature_prominence_factor.setEnabled(peaks_enabled)
+        self.peaks_cwt_enabled.setEnabled(peaks_enabled)
+        self.peaks_cwt_width_min.setEnabled(peaks_enabled)
+        self.peaks_cwt_width_max.setEnabled(peaks_enabled)
+        self.peaks_cwt_width_step.setEnabled(peaks_enabled)
+        self.peaks_cwt_cluster_tolerance.setEnabled(peaks_enabled)
 
         stitch_enabled = self.stitch_enable.isChecked()
         self.stitch_shoulder_points.setEnabled(stitch_enabled)
@@ -2347,20 +2683,54 @@ class RecipeEditorDock(QDockWidget):
         features_cfg = self._ensure_dict(params, "features")
         peaks_enabled = self.peaks_enable.isChecked()
         if peaks_enabled:
+            min_distance_mode_data = self.peaks_min_distance_mode.currentData(
+                QtCore.Qt.ItemDataRole.UserRole
+            )
+            min_distance_mode = (
+                str(min_distance_mode_data).strip().lower()
+                if isinstance(min_distance_mode_data, str)
+                else "fixed"
+            )
+            if min_distance_mode not in {"fixed", "adaptive"}:
+                min_distance_mode = "fixed"
             peak_payload: dict[str, object] = {
                 "enabled": True,
                 "prominence": float(self.peaks_prominence.value()),
-                "min_distance": int(self.peaks_min_distance.value()),
-                "max_peaks": int(self.peaks_max_peaks.value()),
+                "min_absorbance_threshold": float(self.peaks_min_absorbance_threshold.value()),
+                "noise_sigma_multiplier": float(self.peaks_noise_sigma_multiplier.value()),
+                "noise_window_cm": float(self.peaks_noise_window_cm.value()),
+                "min_distance": float(self.peaks_min_distance.value()),
+                "min_distance_mode": min_distance_mode,
+                "min_distance_fwhm_fraction": float(
+                    self.peaks_min_distance_fwhm_fraction.value()
+                ),
+                "peak_width_min": float(self.peaks_peak_width_min.value()),
+                "peak_width_max": float(self.peaks_peak_width_max.value()),
+                "max_peak_candidates": int(self.peaks_max_peak_candidates.value()),
+                "detect_negative_peaks": bool(self.peaks_detect_negative.isChecked()),
+                "merge_tolerance": float(self.peaks_merge_tolerance.value()),
+                "close_peak_tolerance_cm": float(self.peaks_close_peak_tolerance.value()),
+                "plateau_min_points": int(self.peaks_plateau_min_points.value()),
+                "plateau_prominence_factor": float(
+                    self.peaks_plateau_prominence_factor.value()
+                ),
+                "shoulder_merge_tolerance_cm": float(
+                    self.peaks_shoulder_merge_tolerance.value()
+                ),
+                "shoulder_curvature_prominence_factor": float(
+                    self.peaks_shoulder_curvature_prominence_factor.value()
+                ),
+                "cwt_enabled": bool(self.peaks_cwt_enabled.isChecked()),
+                "cwt_width_min": float(self.peaks_cwt_width_min.value()),
+                "cwt_width_max": float(self.peaks_cwt_width_max.value()),
+                "cwt_width_step": float(self.peaks_cwt_width_step.value()),
+                "cwt_cluster_tolerance": float(self.peaks_cwt_cluster_tolerance.value()),
             }
-            height_text = self.peaks_height.text().strip()
-            if height_text:
-                try:
-                    peak_payload["height"] = float(height_text)
-                except ValueError:
-                    peak_payload["height"] = height_text
-            else:
-                peak_payload["height"] = None
+            region_text = self.peaks_min_prominence_by_region.text().strip()
+            peak_payload["min_prominence_by_region"] = region_text or None
+            shoulder_min_distance = float(self.peaks_shoulder_min_distance.value())
+            if shoulder_min_distance > 0:
+                peak_payload["shoulder_min_distance_cm"] = shoulder_min_distance
             features_cfg["peaks"] = peak_payload
         else:
             features_cfg.pop("peaks", None)

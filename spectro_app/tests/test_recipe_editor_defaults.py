@@ -101,9 +101,29 @@ def test_peak_detection_roundtrip(qt_app):
     try:
         dock.peaks_enable.setChecked(True)
         dock.peaks_prominence.setValue(0.25)
-        dock.peaks_min_distance.setValue(7)
-        dock.peaks_max_peaks.setValue(3)
-        dock.peaks_height.setText("1.5")
+        dock.peaks_min_absorbance_threshold.setValue(0.12)
+        dock.peaks_noise_sigma_multiplier.setValue(1.8)
+        dock.peaks_noise_window_cm.setValue(250.0)
+        dock.peaks_min_prominence_by_region.setText("400-1500:0.03,1500-1800:0.02")
+        dock.peaks_min_distance.setValue(1.5)
+        dock.peaks_min_distance_mode.setCurrentIndex(1)
+        dock.peaks_min_distance_fwhm_fraction.setValue(0.35)
+        dock.peaks_peak_width_min.setValue(5.0)
+        dock.peaks_peak_width_max.setValue(20.0)
+        dock.peaks_max_peak_candidates.setValue(12)
+        dock.peaks_detect_negative.setChecked(True)
+        dock.peaks_merge_tolerance.setValue(9.0)
+        dock.peaks_close_peak_tolerance.setValue(2.5)
+        dock.peaks_plateau_min_points.setValue(4)
+        dock.peaks_plateau_prominence_factor.setValue(1.4)
+        dock.peaks_shoulder_min_distance.setValue(1.1)
+        dock.peaks_shoulder_merge_tolerance.setValue(2.2)
+        dock.peaks_shoulder_curvature_prominence_factor.setValue(1.3)
+        dock.peaks_cwt_enabled.setChecked(True)
+        dock.peaks_cwt_width_min.setValue(4.0)
+        dock.peaks_cwt_width_max.setValue(50.0)
+        dock.peaks_cwt_width_step.setValue(4.0)
+        dock.peaks_cwt_cluster_tolerance.setValue(7.0)
         qt_app.processEvents()
 
         dock._update_model_from_ui(force=True)
@@ -112,26 +132,61 @@ def test_peak_detection_roundtrip(qt_app):
         assert isinstance(peaks, dict)
         assert peaks.get("enabled") is True
         assert peaks.get("prominence") == pytest.approx(0.25)
-        assert peaks.get("min_distance") == 7
-        assert peaks.get("max_peaks") == 3
-        assert peaks.get("height") == pytest.approx(1.5)
+        assert peaks.get("min_absorbance_threshold") == pytest.approx(0.12)
+        assert peaks.get("noise_sigma_multiplier") == pytest.approx(1.8)
+        assert peaks.get("noise_window_cm") == pytest.approx(250.0)
+        assert peaks.get("min_prominence_by_region") == "400-1500:0.03,1500-1800:0.02"
+        assert peaks.get("min_distance") == pytest.approx(1.5)
+        assert peaks.get("min_distance_mode") == "adaptive"
+        assert peaks.get("min_distance_fwhm_fraction") == pytest.approx(0.35)
+        assert peaks.get("peak_width_min") == pytest.approx(5.0)
+        assert peaks.get("peak_width_max") == pytest.approx(20.0)
+        assert peaks.get("max_peak_candidates") == 12
+        assert peaks.get("detect_negative_peaks") is True
+        assert peaks.get("merge_tolerance") == pytest.approx(9.0)
+        assert peaks.get("close_peak_tolerance_cm") == pytest.approx(2.5)
+        assert peaks.get("plateau_min_points") == 4
+        assert peaks.get("plateau_prominence_factor") == pytest.approx(1.4)
+        assert peaks.get("shoulder_min_distance_cm") == pytest.approx(1.1)
+        assert peaks.get("shoulder_merge_tolerance_cm") == pytest.approx(2.2)
+        assert peaks.get("shoulder_curvature_prominence_factor") == pytest.approx(1.3)
+        assert peaks.get("cwt_enabled") is True
+        assert peaks.get("cwt_width_min") == pytest.approx(4.0)
+        assert peaks.get("cwt_width_max") == pytest.approx(50.0)
+        assert peaks.get("cwt_width_step") == pytest.approx(4.0)
+        assert peaks.get("cwt_cluster_tolerance") == pytest.approx(7.0)
 
         recipe_dict = dock.recipe_dict()
         dock.set_recipe(recipe_dict)
         qt_app.processEvents()
         assert dock.peaks_enable.isChecked() is True
         assert dock.peaks_prominence.value() == pytest.approx(0.25)
-        assert dock.peaks_min_distance.value() == 7
-        assert dock.peaks_max_peaks.value() == 3
-        assert dock.peaks_height.text() == "1.5"
-
-        dock.peaks_height.clear()
-        qt_app.processEvents()
-        dock._update_model_from_ui(force=True)
-        features = dock.recipe.params.get("features", {})
-        peaks = features.get("peaks")
-        assert isinstance(peaks, dict)
-        assert peaks.get("height") is None
+        assert dock.peaks_min_absorbance_threshold.value() == pytest.approx(0.12)
+        assert dock.peaks_noise_sigma_multiplier.value() == pytest.approx(1.8)
+        assert dock.peaks_noise_window_cm.value() == pytest.approx(250.0)
+        assert (
+            dock.peaks_min_prominence_by_region.text()
+            == "400-1500:0.03,1500-1800:0.02"
+        )
+        assert dock.peaks_min_distance.value() == pytest.approx(1.5)
+        assert dock.peaks_min_distance_mode.currentData() == "adaptive"
+        assert dock.peaks_min_distance_fwhm_fraction.value() == pytest.approx(0.35)
+        assert dock.peaks_peak_width_min.value() == pytest.approx(5.0)
+        assert dock.peaks_peak_width_max.value() == pytest.approx(20.0)
+        assert dock.peaks_max_peak_candidates.value() == 12
+        assert dock.peaks_detect_negative.isChecked() is True
+        assert dock.peaks_merge_tolerance.value() == pytest.approx(9.0)
+        assert dock.peaks_close_peak_tolerance.value() == pytest.approx(2.5)
+        assert dock.peaks_plateau_min_points.value() == 4
+        assert dock.peaks_plateau_prominence_factor.value() == pytest.approx(1.4)
+        assert dock.peaks_shoulder_min_distance.value() == pytest.approx(1.1)
+        assert dock.peaks_shoulder_merge_tolerance.value() == pytest.approx(2.2)
+        assert dock.peaks_shoulder_curvature_prominence_factor.value() == pytest.approx(1.3)
+        assert dock.peaks_cwt_enabled.isChecked() is True
+        assert dock.peaks_cwt_width_min.value() == pytest.approx(4.0)
+        assert dock.peaks_cwt_width_max.value() == pytest.approx(50.0)
+        assert dock.peaks_cwt_width_step.value() == pytest.approx(4.0)
+        assert dock.peaks_cwt_cluster_tolerance.value() == pytest.approx(7.0)
 
         dock.peaks_enable.setChecked(False)
         qt_app.processEvents()
@@ -151,9 +206,29 @@ def test_peak_detection_roundtrip(qt_app):
             "peaks_enable",
             [
                 "peaks_prominence",
+                "peaks_min_absorbance_threshold",
+                "peaks_noise_sigma_multiplier",
+                "peaks_noise_window_cm",
+                "peaks_min_prominence_by_region",
                 "peaks_min_distance",
-                "peaks_max_peaks",
-                "peaks_height",
+                "peaks_min_distance_mode",
+                "peaks_min_distance_fwhm_fraction",
+                "peaks_peak_width_min",
+                "peaks_peak_width_max",
+                "peaks_max_peak_candidates",
+                "peaks_detect_negative",
+                "peaks_merge_tolerance",
+                "peaks_close_peak_tolerance",
+                "peaks_plateau_min_points",
+                "peaks_plateau_prominence_factor",
+                "peaks_shoulder_min_distance",
+                "peaks_shoulder_merge_tolerance",
+                "peaks_shoulder_curvature_prominence_factor",
+                "peaks_cwt_enabled",
+                "peaks_cwt_width_min",
+                "peaks_cwt_width_max",
+                "peaks_cwt_width_step",
+                "peaks_cwt_cluster_tolerance",
             ],
             True,
         ),
