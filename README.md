@@ -8,6 +8,9 @@ entry point so analysts can focus on domain workflows instead of wiring
 individual scripts. Internally, the launcher hands control to
 [`spectro_app/main.py`](spectro_app/main.py), which wires up the Qt event loop
 and the shared application context.
+During batch runs, the main window keeps the status bar and log panel updated
+with per-spectrum progress messages so operators can see each spectrum complete
+in real time alongside the overall progress bar.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in

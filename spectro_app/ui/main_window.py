@@ -1236,6 +1236,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runctl.job_finished.connect(self._on_job_finished)
         self.runctl.job_progress.connect(self._on_job_progress)
         self.runctl.job_message.connect(self._on_job_message)
+        self.runctl.job_item_processed.connect(self._on_job_item_processed)
 
     def _update_action_states(self):
         running = self._job_running
@@ -2335,6 +2336,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.progress.maximum() == 0:
             self.progress.setRange(0, 100)
         self.progress.setValue(value)
+
+    def _on_job_item_processed(self, index: int, total: int) -> None:
+        message = f"Processed spectrum {index}/{total}"
+        self.status.showMessage(message)
+        self.loggerDock.append_line(message)
 
     def _on_job_message(self, message: str):
         self.status.showMessage(message)

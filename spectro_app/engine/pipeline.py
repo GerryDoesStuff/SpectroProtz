@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import logging
 import multiprocessing
 import os
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -802,6 +802,7 @@ def run_pipeline(
     recipe: Dict[str, Any],
     *,
     axis: AxisAdapter | None = None,
+    on_item_processed: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[Spectrum], List[Dict[str, Any]]]:
     specs_list = list(specs)
     if not specs_list:
@@ -955,6 +956,14 @@ def run_pipeline(
         pre_solvent.append(working)
 
     solvent_results = pre_solvent
+    total_items = len(pre_solvent)
+    reported_indices: set[int] = set()
+
+    def _report_progress(index: int) -> None:
+        if on_item_processed is None:
+            return
+        on_item_processed(index + 1, total_items)
+        reported_indices.add(index)
     if solvent_enabled and solvent_reference is not None:
         solvent_task_cfg = _solvent_subtraction_config(
             solvent_cfg, reference_id=solvent_reference_id
@@ -992,6 +1001,7 @@ def run_pipeline(
                         results[idx] = SolventSubtractionTaskResult(
                             spectrum=pre_solvent[idx], error=error_text
                         )
+                    _report_progress(idx)
             solvent_results = []
             for idx, result in enumerate(results):
                 if result is None:
@@ -1024,9 +1034,10 @@ def run_pipeline(
                         result.error,
                     )
                 solvent_results.append(result.spectrum)
+                _report_progress(idx)
 
     processed: List[Spectrum] = []
-    for working in solvent_results:
+    for idx, working in enumerate(solvent_results):
         if smoothing_cfg.get("enabled"):
             join_indices = working.meta.get("join_indices")
             working = smooth_spectrum(
@@ -1038,6 +1049,8 @@ def run_pipeline(
 
         working = _detect_peaks(working, recipe, axis)
         processed.append(working)
+        if idx not in reported_indices:
+            _report_progress(idx)
 
     drift_map = qc_engine.compute_uvvis_drift_map(processed, recipe)
     qc_rows = [

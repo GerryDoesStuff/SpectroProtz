@@ -31,6 +31,7 @@ def _flatten_recipe(recipe: Optional[dict]) -> dict:
 class JobSignals(QObject):
     progress = pyqtSignal(int)
     message = pyqtSignal(str)
+    item_processed = pyqtSignal(int, int)
     finished = pyqtSignal(object)  # BatchResult or Exception
 
 def _sanitize_export_for_preview(recipe: dict) -> dict:
@@ -92,7 +93,11 @@ class BatchRunnable(QRunnable):
             self._emit_message("Preprocessing spectra...")
             self._raise_if_cancelled()
             specs = self._apply_solvent_references(specs, flattened_recipe)
-            specs, qc = core_pipeline.run_pipeline(specs, flattened_recipe)
+            specs, qc = core_pipeline.run_pipeline(
+                specs,
+                flattened_recipe,
+                on_item_processed=self.signals.item_processed.emit,
+            )
             self.signals.progress.emit(40)
 
             self._emit_message("Finalizing results...")
@@ -152,6 +157,7 @@ class RunController(QObject):
     job_finished = pyqtSignal(object)
     job_progress = pyqtSignal(int)
     job_message = pyqtSignal(str)
+    job_item_processed = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -168,6 +174,7 @@ class RunController(QObject):
         runnable.signals.finished.connect(self._on_finished)
         runnable.signals.progress.connect(self.job_progress)
         runnable.signals.message.connect(self.job_message)
+        runnable.signals.item_processed.connect(self.job_item_processed)
         self._current_runnable = runnable
         self.job_started.emit()
         self.pool.start(runnable)
