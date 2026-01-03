@@ -110,7 +110,11 @@ that processed traces remain representative of their raw counterparts:
   below configured thresholds. If the reference is identical to the sample and
   variance collapses to zero, the diagnostics are skipped and a warning notes
   that the correlation and normalization checks were suppressed to avoid divide-by-zero
-  noise.
+  noise. Solvent subtraction uses nearest-value edge extrapolation so the
+  reference remains finite at the sample boundaries, allowing subtraction across
+  the full sample range while keeping fit diagnostics scoped to the true overlap.
+  The metadata channel records the edge handling strategy under
+  `meta["solvent_subtraction"]["edge_strategy"]` for traceability.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.

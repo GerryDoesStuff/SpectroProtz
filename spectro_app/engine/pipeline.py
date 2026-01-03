@@ -259,8 +259,8 @@ def apply_solvent_subtraction(
             x_sorted,
             ref_x_sorted,
             ref_y_sorted,
-            left=np.nan,
-            right=np.nan,
+            left=ref_y_sorted[0],
+            right=ref_y_sorted[-1],
         )
         ref_interp = np.empty_like(ref_interp_sorted)
         ref_interp[x_order] = ref_interp_sorted
@@ -405,23 +405,23 @@ def apply_solvent_subtraction(
         fitted = fitted + offset
     fitted = np.asarray(fitted, dtype=float)
     valid_ref_mask = np.all(np.isfinite(ref_matrix), axis=1)
-    apply_mask = fit_mask & valid_ref_mask
+    apply_mask = np.isfinite(y) & valid_ref_mask
     if not np.any(apply_mask):
         return spec
     corrected = y.copy()
     corrected[apply_mask] = y[apply_mask] - fitted[apply_mask]
-    overlap_min = float(np.min(x[apply_mask]))
-    overlap_max = float(np.max(x[apply_mask]))
-    residual = y[apply_mask] - fitted[apply_mask]
+    overlap_min = float(np.min(x[fit_mask]))
+    overlap_max = float(np.max(x[fit_mask]))
+    residual = y[fit_mask] - fitted[fit_mask]
     sse = float(np.sum(residual * residual))
     rmse = float(np.sqrt(sse / residual.size)) if residual.size else None
     negative_fraction = None
     negative_area = None
     if residual.size:
-        corrected_overlap = corrected[apply_mask]
+        corrected_overlap = corrected[fit_mask]
         negative_fraction = float(np.mean(corrected_overlap < 0.0))
-        order = np.argsort(x[apply_mask])
-        sorted_x = x[apply_mask][order]
+        order = np.argsort(x[fit_mask])
+        sorted_x = x[fit_mask][order]
         sorted_corrected = corrected_overlap[order]
         negative_area = float(
             np.trapezoid(np.minimum(sorted_corrected, 0.0), sorted_x)
@@ -429,7 +429,7 @@ def apply_solvent_subtraction(
     derivative_corr = None
     diagnostics_skipped = False
     if residual.size >= 3:
-        derivative = np.gradient(fitted[apply_mask], x[apply_mask])
+        derivative = np.gradient(fitted[fit_mask], x[fit_mask])
         valid = np.isfinite(residual) & np.isfinite(derivative)
         if np.count_nonzero(valid) >= 3:
             residual_std = float(np.std(residual[valid]))
@@ -502,7 +502,7 @@ def apply_solvent_subtraction(
         "max_normalized_rmse": 0.5,
     }
     warnings = []
-    overlap_points = int(np.count_nonzero(apply_mask))
+    overlap_points = int(np.count_nonzero(fit_mask))
     if overlap_points < warning_thresholds["min_overlap_points"]:
         warnings.append(
             f"Low overlap coverage (points={overlap_points}, "
@@ -554,9 +554,11 @@ def apply_solvent_subtraction(
         solvent_meta["reference_metadata"] = ref_metadata[0] if len(ref_metadata) == 1 else ref_metadata
     if ref_sources and not solvent_meta.get("reference_source"):
         solvent_meta["reference_source"] = ref_sources[0] if len(ref_sources) == 1 else ref_sources
+    edge_strategy = "nearest"
     solvent_meta.update(
         {
             "enabled": True,
+            "edge_strategy": edge_strategy,
             "reference_id": reference_id or (ref_ids[0] if len(ref_ids) == 1 else None),
             "reference_ids": ref_ids if len(ref_ids) > 1 else None,
             "reference_count": int(ref_count),
