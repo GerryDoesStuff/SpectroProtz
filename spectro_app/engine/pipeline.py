@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+import inspect
 import logging
 import multiprocessing
 import os
@@ -299,17 +300,38 @@ def _default_parallel_workers() -> int:
     return max(1, min(4, os.cpu_count() or 1))
 
 
-def _resolve_parallel_settings(solvent_cfg: Mapping[str, Any]) -> tuple[bool, int]:
-    parallel_cfg = solvent_cfg.get("parallel")
-    if not isinstance(parallel_cfg, Mapping):
-        parallel_cfg = {}
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
-    enabled = parallel_cfg.get("enabled")
+
+def _resolve_multiprocessing_settings(
+    recipe: Mapping[str, Any],
+    solvent_cfg: Mapping[str, Any],
+) -> tuple[bool, int, int | None, int | None]:
+    multiprocessing_cfg = recipe.get("multiprocessing")
+    if not isinstance(multiprocessing_cfg, Mapping):
+        multiprocessing_cfg = {}
+
+    legacy_parallel_cfg = solvent_cfg.get("parallel")
+    if not isinstance(legacy_parallel_cfg, Mapping):
+        legacy_parallel_cfg = {}
+
+    enabled = multiprocessing_cfg.get("enabled")
+    if enabled is None:
+        enabled = legacy_parallel_cfg.get("enabled")
     if enabled is None and "use_multiprocessing" in solvent_cfg:
         enabled = solvent_cfg.get("use_multiprocessing")
-    parallel_enabled = bool(enabled) if enabled is not None else False
+    parallel_enabled = bool(enabled) if enabled is not None else True
 
-    workers_value = parallel_cfg.get("workers")
+    workers_value = multiprocessing_cfg.get("workers")
+    if workers_value is None:
+        workers_value = legacy_parallel_cfg.get("workers")
     try:
         workers = int(workers_value) if workers_value is not None else _default_parallel_workers()
     except (TypeError, ValueError):
@@ -317,7 +339,28 @@ def _resolve_parallel_settings(solvent_cfg: Mapping[str, Any]) -> tuple[bool, in
     if workers < 1:
         workers = _default_parallel_workers()
 
-    return parallel_enabled, workers
+    chunk_size = _coerce_optional_positive_int(multiprocessing_cfg.get("chunk_size"))
+    max_tasks_per_child = _coerce_optional_positive_int(
+        multiprocessing_cfg.get("max_tasks_per_child")
+    )
+
+    return parallel_enabled, workers, chunk_size, max_tasks_per_child
+
+
+def _process_spectrum_task_batch(batch: Sequence[Mapping[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+    results: List[Tuple[int, Dict[str, Any]]] = []
+    for task in batch:
+        try:
+            result = _process_spectrum_task(task)
+        except Exception as exc:
+            index = task.get("index", "unknown")
+            raise RuntimeError(f"Spectrum task failed at index {index}.") from exc
+        results.append((int(task["index"]), result))
+    return results
+
+
+def _supports_max_tasks_per_child() -> bool:
+    return "max_tasks_per_child" in inspect.signature(ProcessPoolExecutor).parameters
 
 
 def _apply_solvent_subtraction_task(
@@ -1162,7 +1205,9 @@ def run_pipeline(
         on_item_processed(index + 1, total_items)
         reported_indices.add(index)
     processed: List[Spectrum] = []
-    parallel_enabled, parallel_workers = _resolve_parallel_settings(solvent_cfg)
+    parallel_enabled, parallel_workers, chunk_size, max_tasks_per_child = _resolve_multiprocessing_settings(
+        recipe, solvent_cfg
+    )
     run_parallel = (
         module_id == "ftir"
         and parallel_enabled
@@ -1172,19 +1217,28 @@ def run_pipeline(
     if run_parallel:
         ctx = multiprocessing.get_context("spawn")
         results: List[Dict[str, Any] | None] = [None for _ in per_spectrum_tasks]
-        with ProcessPoolExecutor(mp_context=ctx, max_workers=parallel_workers) as executor:
+        batch_size = chunk_size or 1
+        batches = [
+            per_spectrum_tasks[start : start + batch_size]
+            for start in range(0, len(per_spectrum_tasks), batch_size)
+        ]
+        executor_kwargs: Dict[str, Any] = {"mp_context": ctx, "max_workers": parallel_workers}
+        if max_tasks_per_child is not None and _supports_max_tasks_per_child():
+            executor_kwargs["max_tasks_per_child"] = max_tasks_per_child
+        with ProcessPoolExecutor(**executor_kwargs) as executor:
             future_map = {
-                executor.submit(_process_spectrum_task, task): task["index"]
-                for task in per_spectrum_tasks
+                executor.submit(_process_spectrum_task_batch, batch): batch
+                for batch in batches
             }
             for future in as_completed(future_map):
-                idx = future_map[future]
                 try:
-                    results[idx] = future.result()
+                    batch_results = future.result()
                 except Exception:
-                    logger.exception("Spectrum task failed at index %s.", idx)
+                    logger.exception("Spectrum task batch failed.")
                     raise
-                _report_progress(idx)
+                for idx, result in batch_results:
+                    results[idx] = result
+                    _report_progress(idx)
         for idx, result in enumerate(results):
             if result is None:
                 logger.error("Spectrum task returned no result for index %s.", idx)
