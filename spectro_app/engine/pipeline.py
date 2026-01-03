@@ -427,12 +427,23 @@ def apply_solvent_subtraction(
             np.trapezoid(np.minimum(sorted_corrected, 0.0), sorted_x)
         )
     derivative_corr = None
+    diagnostics_skipped = False
     if residual.size >= 3:
         derivative = np.gradient(fitted[apply_mask], x[apply_mask])
         valid = np.isfinite(residual) & np.isfinite(derivative)
         if np.count_nonzero(valid) >= 3:
-            corr = np.corrcoef(residual[valid], derivative[valid])
-            derivative_corr = float(corr[0, 1])
+            residual_std = float(np.std(residual[valid]))
+            derivative_std = float(np.std(derivative[valid]))
+            if (
+                not np.isfinite(residual_std)
+                or not np.isfinite(derivative_std)
+                or residual_std == 0.0
+                or derivative_std == 0.0
+            ):
+                diagnostics_skipped = True
+            else:
+                corr = np.corrcoef(residual[valid], derivative[valid])
+                derivative_corr = float(corr[0, 1])
     condition_number = None
     fit_design = ref_matrix[fit_mask]
     if fit_design.size and fit_design.shape[0] >= fit_design.shape[1]:
@@ -517,7 +528,11 @@ def apply_solvent_subtraction(
         )
     if rmse is not None and residual.size:
         signal_std = float(np.std(y[apply_mask])) if residual.size else 0.0
-        normalized_rmse = float(rmse / signal_std) if signal_std else None
+        if not np.isfinite(signal_std) or signal_std <= 0.0:
+            normalized_rmse = None
+            diagnostics_skipped = True
+        else:
+            normalized_rmse = float(rmse / signal_std)
         if normalized_rmse is not None and normalized_rmse > warning_thresholds["max_normalized_rmse"]:
             warnings.append(
                 "High normalized RMSE over overlap "
@@ -526,6 +541,10 @@ def apply_solvent_subtraction(
             )
     else:
         normalized_rmse = None
+    if diagnostics_skipped:
+        warnings.append(
+            "Reference identical to sample; diagnostics skipped due to zero variance."
+        )
 
     if ref_names and not solvent_meta.get("reference_name"):
         solvent_meta["reference_name"] = ref_names[0] if len(ref_names) == 1 else ref_names
