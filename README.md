@@ -87,6 +87,22 @@ point. This command bootstraps the Qt event loop and shows the main window
 immediately, allowing users to load recipes, configure processing options, and
 monitor batch runs.
 
+## Solvent reference management
+FTIR solvent subtraction relies on curated solvent references that can be saved,
+reviewed, and edited from within the GUI. From the file queue, choose **Save as
+FTIR Solvent Reference…** to store the currently selected spectrum. The metadata
+dialog captures a reference name, optional tags, and contextual fields such as
+solvent identity, measurement mode, temperature, instrument, and date. Saved
+entries are stored in `~/SpectroApp/solvent_references.json` by default and are
+available in the **Reference** selector inside the recipe editor’s solvent
+subtraction panel.
+
+When you open **Select Solvent Reference**, the dialog lists stored entries,
+shows their metadata, and lets you browse a new file. Use **Edit Metadata…** to
+update the name, tags, metadata fields, or default status of an existing
+reference; changes are saved back to the solvent reference store immediately so
+future selections reflect the updated information.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:
