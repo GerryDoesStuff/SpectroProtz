@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import logging
 import multiprocessing
 import os
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import traceback
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypedDict
 
 import numpy as np
 
@@ -229,7 +230,52 @@ def smooth_spectrum(*args: Any, **kwargs: Any) -> Spectrum:
 @dataclass(frozen=True)
 class SolventSubtractionTaskResult:
     spectrum: Spectrum
-    error: str | None = None
+    error: "SolventSubtractionError | None" = None
+
+
+class SolventSubtractionError(TypedDict):
+    error_type: str
+    message: str
+    traceback: str
+
+
+def _build_solvent_subtraction_error(exc: BaseException) -> SolventSubtractionError:
+    return {
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": traceback.format_exc(),
+    }
+
+
+def _spectrum_log_details(spec: Spectrum, index: int) -> tuple[str, str]:
+    meta = spec.meta if isinstance(spec.meta, Mapping) else {}
+    spectrum_id = (
+        meta.get("spectrum_id")
+        or meta.get("sample_id")
+        or meta.get("id")
+        or meta.get("name")
+        or meta.get("label")
+    )
+    path = meta.get("file_path") or meta.get("path") or meta.get("filename") or meta.get("file")
+    spectrum_label = str(spectrum_id) if spectrum_id is not None else str(index + 1)
+    path_label = str(path) if path else "unknown"
+    return spectrum_label, path_label
+
+
+def _log_solvent_subtraction_error(
+    spec: Spectrum,
+    index: int,
+    error: SolventSubtractionError,
+) -> None:
+    spectrum_label, path_label = _spectrum_log_details(spec, index)
+    logger.error(
+        "Solvent subtraction failed for spectrum_id=%s path=%s error=%s: %s\n%s",
+        spectrum_label,
+        path_label,
+        error.get("error_type", "UnknownError"),
+        error.get("message", ""),
+        error.get("traceback", ""),
+    )
 
 
 def _solvent_subtraction_config(
@@ -293,8 +339,9 @@ def _apply_solvent_subtraction_task(
         )
         return SolventSubtractionTaskResult(spectrum=corrected)
     except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}"
-        return SolventSubtractionTaskResult(spectrum=spec, error=error_text)
+        return SolventSubtractionTaskResult(
+            spectrum=spec, error=_build_solvent_subtraction_error(exc)
+        )
 
 
 def apply_solvent_subtraction(
@@ -958,6 +1005,7 @@ def run_pipeline(
     solvent_results = pre_solvent
     total_items = len(pre_solvent)
     reported_indices: set[int] = set()
+    failure_count = 0
 
     def _report_progress(index: int) -> None:
         if on_item_processed is None:
@@ -992,31 +1040,27 @@ def run_pipeline(
                     try:
                         results[idx] = future.result()
                     except Exception as exc:
-                        error_text = f"{type(exc).__name__}: {exc}"
-                        logger.exception(
-                            "Solvent subtraction task failed for spectrum %s: %s",
-                            idx,
-                            error_text,
-                        )
+                        error_payload = _build_solvent_subtraction_error(exc)
+                        _log_solvent_subtraction_error(pre_solvent[idx], idx, error_payload)
                         results[idx] = SolventSubtractionTaskResult(
-                            spectrum=pre_solvent[idx], error=error_text
+                            spectrum=pre_solvent[idx], error=error_payload
                         )
                     _report_progress(idx)
             solvent_results = []
             for idx, result in enumerate(results):
                 if result is None:
+                    spectrum_label, path_label = _spectrum_log_details(pre_solvent[idx], idx)
                     logger.error(
-                        "Solvent subtraction task returned no result for spectrum %s",
-                        idx,
+                        "Solvent subtraction task returned no result for spectrum_id=%s path=%s",
+                        spectrum_label,
+                        path_label,
                     )
+                    failure_count += 1
                     solvent_results.append(pre_solvent[idx])
                     continue
                 if result.error:
-                    logger.error(
-                        "Solvent subtraction failed for spectrum %s: %s",
-                        idx,
-                        result.error,
-                    )
+                    _log_solvent_subtraction_error(pre_solvent[idx], idx, result.error)
+                    failure_count += 1
                 solvent_results.append(result.spectrum)
         else:
             solvent_results = []
@@ -1028,11 +1072,8 @@ def run_pipeline(
                     axis,
                 )
                 if result.error:
-                    logger.error(
-                        "Solvent subtraction failed for spectrum %s: %s",
-                        idx,
-                        result.error,
-                    )
+                    _log_solvent_subtraction_error(spec, idx, result.error)
+                    failure_count += 1
                 solvent_results.append(result.spectrum)
                 _report_progress(idx)
 
@@ -1057,4 +1098,9 @@ def run_pipeline(
         qc_engine.compute_uvvis_qc(spec, recipe, drift_map.get(id(spec)))
         for spec in processed
     ]
+    if failure_count:
+        logger.warning(
+            "Solvent subtraction completed with %s spectrum failure(s).",
+            failure_count,
+        )
     return processed, qc_rows
