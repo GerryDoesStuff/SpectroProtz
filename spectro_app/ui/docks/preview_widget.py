@@ -48,11 +48,13 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "despiked": "Despiked",
         "blanked": "Blanked",
         "baseline_corrected": "Baseline",
+        "solvent_subtracted": "Solvent Subtracted",
         "smoothed": "Smoothed",
     }
 
     DEFAULT_STAGE_PRIORITY: Sequence[str] = (
         "smoothed",
+        "solvent_subtracted",
         "baseline_corrected",
         "blanked",
         "despiked",
@@ -68,6 +70,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "joined": QtCore.Qt.PenStyle.DashDotDotLine,
         "stitched": QtCore.Qt.PenStyle.DashLine,
         "despiked": QtCore.Qt.PenStyle.SolidLine,
+        "solvent_subtracted": QtCore.Qt.PenStyle.DashDotDotLine,
         "smoothed": QtCore.Qt.PenStyle.SolidLine,
     }
 
@@ -110,6 +113,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._selection_pen = pg.mkPen(color=self._selection_color, width=4)
         self._exporters_available: bool = _EXPORTERS_AVAILABLE
         self._axis_label_cache: Optional[tuple[str, str]] = None
+        self._solvent_subtracted_allowed: bool = True
 
         self._build_ui()
 
@@ -241,6 +245,15 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         """Populate the plot with spectra and return ``True`` if data was shown."""
 
         self._hidden_labels.clear()
+        self._solvent_subtracted_allowed = self._detect_ftir_preview(spectra)
+        solvent_checkbox = self._stage_controls.get("solvent_subtracted")
+        if solvent_checkbox is not None:
+            solvent_checkbox.setVisible(self._solvent_subtracted_allowed)
+            if not self._solvent_subtracted_allowed:
+                solvent_checkbox.blockSignals(True)
+                solvent_checkbox.setChecked(False)
+                solvent_checkbox.setEnabled(False)
+                solvent_checkbox.blockSignals(False)
         self._apply_axis_labels(spectra, force=True)
 
         preserved_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
@@ -273,6 +286,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 for stage, checkbox in self._stage_controls.items()
                 if checkbox.isChecked()
             }
+            if not self._solvent_subtracted_allowed and preserved_visible_stages is not None:
+                preserved_visible_stages.discard("solvent_subtracted")
             preserved_single_mode = self._single_mode if self._total_spectra > 0 else False
             preserved_window_start = self._single_window_start
             preserved_window_size = self._single_window_size
@@ -521,6 +536,22 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     # Internal helpers
+    def _detect_ftir_preview(self, spectra: Sequence[Spectrum]) -> bool:
+        for spec in spectra:
+            meta = getattr(spec, "meta", {}) or {}
+            if not isinstance(meta, dict):
+                continue
+            technique = str(meta.get("technique") or "").strip().lower()
+            axis_key = str(meta.get("axis_key") or meta.get("axis_type") or "").strip().lower()
+            if technique == "ftir" or axis_key == "wavenumber":
+                return True
+        return False
+
+    def _stage_allowed(self, stage: str) -> bool:
+        if stage == "solvent_subtracted":
+            return self._solvent_subtracted_allowed
+        return True
+
     def _choose_default_stage(self, available: Optional[Set[str]] = None) -> Optional[str]:
         if available is None:
             available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
@@ -615,12 +646,17 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             self._reset_view()
 
     def _update_stage_controls(self, *, initial: bool) -> None:
-        available = {stage for stage, datasets in self._stage_datasets.items() if datasets}
+        available = {
+            stage
+            for stage, datasets in self._stage_datasets.items()
+            if datasets and self._stage_allowed(stage)
+        }
         desired_visible: Set[str] = set()
         default_stage = self._choose_default_stage(available) if initial else None
 
         for stage, checkbox in self._stage_controls.items():
-            has_stage = stage in available
+            allowed = self._stage_allowed(stage)
+            has_stage = stage in available and allowed
             checkbox.blockSignals(True)
             if not has_stage:
                 checkbox.setChecked(False)
@@ -636,6 +672,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 if should_check:
                     desired_visible.add(stage)
             checkbox.setEnabled(has_stage)
+            checkbox.setVisible(allowed)
             checkbox.blockSignals(False)
 
         if not desired_visible and available:

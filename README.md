@@ -90,12 +90,15 @@ that processed traces remain representative of their raw counterparts:
 
 - **Stage-by-stage channels.** Each processing step writes its result into a
   dedicated metadata channel (for example `raw`, `blanked`,
-  `baseline_corrected`, `joined`, `despiked`, `smoothed`). The original signal
-  stays available alongside every intermediate, enabling numerical and visual
-  comparisons at any point in the pipeline.
+  `baseline_corrected`, `solvent_subtracted` for FTIR, `joined`, `despiked`,
+  `smoothed`). The original signal stays available alongside every intermediate,
+  enabling numerical and visual comparisons at any point in the pipeline.
 - **Interactive stage toggles.** The preview dock in the UI lets you toggle the
   visibility of stored stages so you can overlay the processed curve on top of
-  the raw trace or inspect any intermediate discrepancies.
+  the raw trace or inspect any intermediate discrepancies. When the preview is
+  showing FTIR data (identified by `technique == "ftir"` or a wavenumber axis),
+  an extra **Solvent Subtracted** stage appears so you can compare solvent-
+  corrected traces; non-FTIR previews hide this toggle.
 - **Quantitative QC metrics.** The QC engine computes diagnostics such as noise
   levels, join offsets, spike counts, smoothing guards, drift, and per-stage
   roughness deltas that compare processed spectra against their retained
