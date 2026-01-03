@@ -101,6 +101,13 @@ that processed traces remain representative of their raw counterparts:
   roughness deltas that compare processed spectra against their retained
   channels. These metrics roll up into QC flags that highlight when processing
   diverges too far from the source data.
+- **Solvent subtraction diagnostics.** When FTIR solvent subtraction is enabled,
+  the pipeline records overlap metrics (RMSE, normalized RMSE, residual/derivative
+  correlations, condition numbers) and emits warnings if overlap quality drops
+  below configured thresholds. If the reference is identical to the sample and
+  variance collapses to zero, the diagnostics are skipped and a warning notes
+  that the correlation and normalization checks were suppressed to avoid divide-by-zero
+  noise.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
