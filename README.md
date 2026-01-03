@@ -41,7 +41,9 @@ never trigger boolean evaluation while loading spectra.
 
 OPUS ingestion accepts both `.opus` files and Bruker-style numeric suffixes
 such as `.0`, `.1`, or `.000`, routing them through the same OPUS reader for
-FTIR and Raman workflows.
+FTIR and Raman workflows. Solvent reference imports use the same acceptance
+rules so curated solvent libraries can be sourced from `.opus` or numeric OPUS
+extensions without renaming.
 
 ## Supported techniques and file formats
 SpectroProtz focuses on FTIR, Raman, and UV-Vis processing. The current import
