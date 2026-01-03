@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from uuid import uuid4
 
@@ -49,8 +50,10 @@ def _deserialize_spectrum(data: Mapping[str, Any]) -> Spectrum:
 
 def load_reference_spectrum(path: str | Path) -> Spectrum:
     suffix = Path(path).suffix.lower()
-    if suffix != ".opus":
-        raise ValueError("Solvent reference files must be OPUS (.opus) format.")
+    if not (suffix == ".opus" or re.fullmatch(r"\.\d+$", suffix)):
+        raise ValueError(
+            "Solvent reference files must be OPUS (.opus) or numeric OPUS extensions (.0, .1, …)."
+        )
     spectra = load_opus_spectra(path, technique="ftir")
     if not spectra:
         raise ValueError("No spectra found in reference file.")
