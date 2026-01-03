@@ -1778,7 +1778,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _prompt_solvent_reference_selection(self) -> Optional[Dict[str, Any]]:
         entries = [entry.to_dict() for entry in self._solvent_reference_store.load()]
-        dialog = SolventReferenceSelectionDialog(entries, parent=self)
+        dialog = SolventReferenceSelectionDialog(
+            entries,
+            store=self._solvent_reference_store,
+            parent=self,
+        )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return None
 

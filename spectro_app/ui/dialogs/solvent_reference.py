@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from PyQt6 import QtCore, QtWidgets
 
+from spectro_app.engine.solvent_reference import SolventReferenceEntry, SolventReferenceStore
+
 
 @dataclass
 class SolventReferenceMetadata:
@@ -22,7 +24,9 @@ class SolventReferenceMetadataDialog(QtWidgets.QDialog):
         *,
         name_default: str = "",
         tags_default: Iterable[str] = (),
+        metadata_default: Optional[Dict[str, str]] = None,
         allow_save_toggle: bool = False,
+        default_checked: bool = False,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -31,11 +35,20 @@ class SolventReferenceMetadataDialog(QtWidgets.QDialog):
 
         self._name_edit = QtWidgets.QLineEdit(name_default)
         self._tags_edit = QtWidgets.QLineEdit(", ".join(str(tag) for tag in tags_default))
-        self._identity_edit = QtWidgets.QLineEdit()
-        self._mode_edit = QtWidgets.QLineEdit()
-        self._temperature_edit = QtWidgets.QLineEdit()
-        self._instrument_edit = QtWidgets.QLineEdit()
-        self._date_edit = QtWidgets.QLineEdit()
+        metadata_default = metadata_default or {}
+        self._identity_edit = QtWidgets.QLineEdit(
+            str(metadata_default.get("solvent_identity", ""))
+        )
+        self._mode_edit = QtWidgets.QLineEdit(
+            str(metadata_default.get("measurement_mode", ""))
+        )
+        self._temperature_edit = QtWidgets.QLineEdit(
+            str(metadata_default.get("temperature", ""))
+        )
+        self._instrument_edit = QtWidgets.QLineEdit(
+            str(metadata_default.get("instrument", ""))
+        )
+        self._date_edit = QtWidgets.QLineEdit(str(metadata_default.get("date", "")))
 
         form = QtWidgets.QFormLayout()
         form.addRow("Name:", self._name_edit)
@@ -51,7 +64,7 @@ class SolventReferenceMetadataDialog(QtWidgets.QDialog):
         self._save_checkbox.setVisible(allow_save_toggle)
 
         self._default_checkbox = QtWidgets.QCheckBox("Mark as default")
-        self._default_checkbox.setChecked(False)
+        self._default_checkbox.setChecked(default_checked)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -95,6 +108,7 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         self,
         entries: List[Dict[str, Any]],
         *,
+        store: Optional["SolventReferenceStore"] = None,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -102,6 +116,7 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         self.resize(520, 360)
         self._entries = entries
         self._browse_path: Optional[str] = None
+        self._store = store
 
         self._list = QtWidgets.QListWidget()
         self._list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -110,12 +125,7 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
 
         default_index = None
         for idx, entry in enumerate(entries):
-            name = str(entry.get("name") or "Untitled")
-            tags = entry.get("tags") or []
-            default_flag = " (default)" if entry.get("defaults") else ""
-            label = name + default_flag
-            if tags:
-                label = f"{label} — {', '.join(str(tag) for tag in tags)}"
+            label = self._format_entry_label(entry)
             item = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
             self._list.addItem(item)
@@ -128,8 +138,13 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
 
         self._default_checkbox = QtWidgets.QCheckBox("Mark selected as default")
 
+        self._edit_button = QtWidgets.QPushButton("Edit Metadata…")
+        self._edit_button.clicked.connect(self._on_edit_metadata)
+
         browse_button = QtWidgets.QPushButton("Browse File…")
         browse_button.clicked.connect(self._on_browse)
+
+        self._update_edit_state()
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -145,8 +160,39 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
         layout.addWidget(self._default_checkbox)
-        layout.addWidget(browse_button)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.addWidget(self._edit_button)
+        action_row.addStretch(1)
+        action_row.addWidget(browse_button)
+        layout.addLayout(action_row)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _format_entry_label(entry: Dict[str, Any]) -> str:
+        name = str(entry.get("name") or "Untitled")
+        tags = entry.get("tags") or []
+        default_flag = " (default)" if entry.get("defaults") else ""
+        label = name + default_flag
+        if tags:
+            label = f"{label} — {', '.join(str(tag) for tag in tags)}"
+        return label
+
+    @staticmethod
+    def _update_entry_spectrum(entry: Dict[str, Any]) -> None:
+        spectrum = entry.get("spectrum")
+        if not isinstance(spectrum, dict):
+            return
+        meta = spectrum.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            spectrum["meta"] = meta
+        meta["reference_name"] = entry.get("name") or ""
+        meta["reference_tags"] = list(entry.get("tags") or [])
+        meta["reference_metadata"] = dict(entry.get("metadata") or {})
+
+    def _update_edit_state(self) -> None:
+        has_selection = self._list.currentItem() is not None
+        self._edit_button.setEnabled(has_selection)
 
     def _on_browse(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -159,9 +205,49 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         self._browse_path = path
         self.accept()
 
+    def _on_edit_metadata(self) -> None:
+        entry = self.selected_entry()
+        if not entry:
+            return
+        metadata_dialog = SolventReferenceMetadataDialog(
+            name_default=str(entry.get("name") or ""),
+            tags_default=entry.get("tags") or (),
+            metadata_default=entry.get("metadata") or {},
+            default_checked=bool(entry.get("defaults")),
+            parent=self,
+        )
+        if metadata_dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        metadata = metadata_dialog.metadata()
+        if not metadata.name:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing Name",
+                "Provide a name for the solvent reference before saving changes.",
+            )
+            return
+        entry["name"] = metadata.name
+        entry["tags"] = metadata.tags
+        entry["metadata"] = metadata.metadata
+        entry["defaults"] = metadata.set_default
+        self._update_entry_spectrum(entry)
+
+        if self._store:
+            stored = self._store.get(str(entry.get("id") or ""))
+            if stored:
+                entry["created_at"] = stored.created_at
+            self._store.upsert(SolventReferenceEntry.from_dict(entry))
+
+        current_item = self._list.currentItem()
+        if current_item:
+            current_item.setText(self._format_entry_label(entry))
+            current_item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
+        self._update_detail(current_item)
+
     def _update_detail(self, current: Optional[QtWidgets.QListWidgetItem]) -> None:
         if current is None:
             self._detail.setPlainText("")
+            self._update_edit_state()
             return
         entry = current.data(QtCore.Qt.ItemDataRole.UserRole) or {}
         lines = [
@@ -180,6 +266,7 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         if entry.get("defaults"):
             lines.append("Default: yes")
         self._detail.setPlainText("\n".join(lines))
+        self._update_edit_state()
 
     def selected_entry(self) -> Optional[Dict[str, Any]]:
         item = self._list.currentItem()
