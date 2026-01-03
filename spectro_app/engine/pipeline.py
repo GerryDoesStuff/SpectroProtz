@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
 import multiprocessing
+import os
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -246,6 +247,31 @@ def _solvent_subtraction_config(
         "include_offset": solvent_cfg.get("include_offset", False),
         "shift_compensation": shift_payload,
     }
+
+
+def _default_parallel_workers() -> int:
+    return max(1, min(4, os.cpu_count() or 1))
+
+
+def _resolve_parallel_settings(solvent_cfg: Mapping[str, Any]) -> tuple[bool, int]:
+    parallel_cfg = solvent_cfg.get("parallel")
+    if not isinstance(parallel_cfg, Mapping):
+        parallel_cfg = {}
+
+    enabled = parallel_cfg.get("enabled")
+    if enabled is None and "use_multiprocessing" in solvent_cfg:
+        enabled = solvent_cfg.get("use_multiprocessing")
+    parallel_enabled = bool(enabled) if enabled is not None else False
+
+    workers_value = parallel_cfg.get("workers")
+    try:
+        workers = int(workers_value) if workers_value is not None else _default_parallel_workers()
+    except (TypeError, ValueError):
+        workers = _default_parallel_workers()
+    if workers < 1:
+        workers = _default_parallel_workers()
+
+    return parallel_enabled, workers
 
 
 def _apply_solvent_subtraction_task(
@@ -933,13 +959,15 @@ def run_pipeline(
         solvent_task_cfg = _solvent_subtraction_config(
             solvent_cfg, reference_id=solvent_reference_id
         )
-        parallel_enabled = bool(solvent_cfg.get("use_multiprocessing", False))
-        if parallel_enabled and len(pre_solvent) > 1:
+        parallel_enabled, parallel_workers = _resolve_parallel_settings(solvent_cfg)
+        if parallel_enabled and len(pre_solvent) > 1 and parallel_workers > 1:
             ctx = multiprocessing.get_context("spawn")
             results: List[SolventSubtractionTaskResult | None] = [
                 None for _ in pre_solvent
             ]
-            with ProcessPoolExecutor(mp_context=ctx) as executor:
+            with ProcessPoolExecutor(
+                mp_context=ctx, max_workers=parallel_workers
+            ) as executor:
                 future_map = {
                     executor.submit(
                         _apply_solvent_subtraction_task,
