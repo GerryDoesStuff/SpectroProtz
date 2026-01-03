@@ -248,15 +248,20 @@ def _build_solvent_subtraction_error(exc: BaseException) -> SolventSubtractionEr
     }
 
 
-def _spectrum_log_details(spec: Spectrum, index: int) -> tuple[str, str]:
+def _spectrum_identifier(spec: Spectrum, index: int) -> str | int | None:
     meta = spec.meta if isinstance(spec.meta, Mapping) else {}
-    spectrum_id = (
+    return (
         meta.get("spectrum_id")
         or meta.get("sample_id")
         or meta.get("id")
         or meta.get("name")
         or meta.get("label")
     )
+
+
+def _spectrum_log_details(spec: Spectrum, index: int) -> tuple[str, str]:
+    spectrum_id = _spectrum_identifier(spec, index)
+    meta = spec.meta if isinstance(spec.meta, Mapping) else {}
     path = meta.get("file_path") or meta.get("path") or meta.get("filename") or meta.get("file")
     spectrum_label = str(spectrum_id) if spectrum_id is not None else str(index + 1)
     path_label = str(path) if path else "unknown"
@@ -1065,7 +1070,7 @@ def run_pipeline(
     recipe: Dict[str, Any],
     *,
     axis: AxisAdapter | None = None,
-    on_item_processed: Optional[Callable[[int, int], None]] = None,
+    on_item_processed: Optional[Callable[[int, int, str | int | None], None]] = None,
 ) -> Tuple[List[Spectrum], List[Dict[str, Any]]]:
     specs_list = list(specs)
     if not specs_list:
@@ -1202,7 +1207,8 @@ def run_pipeline(
     def _report_progress(index: int) -> None:
         if on_item_processed is None:
             return
-        on_item_processed(index + 1, total_items)
+        spectrum_id = _spectrum_identifier(samples[index], index)
+        on_item_processed(index + 1, total_items, spectrum_id)
         reported_indices.add(index)
     processed: List[Spectrum] = []
     parallel_enabled, parallel_workers, chunk_size, max_tasks_per_child = _resolve_multiprocessing_settings(

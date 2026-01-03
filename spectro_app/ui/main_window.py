@@ -2331,6 +2331,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appctx.set_job_running(True)
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
         self.previewDock.prepare_for_job()
         self.qcDock.clear()
         self.loggerDock.clear()
@@ -2341,8 +2342,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.progress.setRange(0, 100)
         self.progress.setValue(value)
 
-    def _on_job_item_processed(self, index: int, total: int) -> None:
-        message = f"Processed spectrum {index}/{total}"
+    def _on_job_item_processed(self, index: int, total: int, spectrum_id: object) -> None:
+        label = spectrum_id if spectrum_id is not None else index
+        message = f"Processed spectrum {label} ({index}/{total})"
+        if total:
+            self.progress.setFormat(f"%p% | Spectra {index}/{total}")
         self.status.showMessage(message)
         self.loggerDock.append_line(message)
 
