@@ -115,6 +115,12 @@ that processed traces remain representative of their raw counterparts:
   the full sample range while keeping fit diagnostics scoped to the true overlap.
   The metadata channel records the edge handling strategy under
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability.
+- **Parallel solvent subtraction.** FTIR solvent subtraction can be fanned out
+  per spectrum by enabling `solvent_subtraction.use_multiprocessing` in a recipe.
+  The pipeline uses a spawn-safe process pool to parallelize the CPU-heavy
+  fitting while keeping results ordered, and it logs any per-spectrum exceptions
+  without aborting the batch (falling back to the original spectrum for that
+  entry).
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.

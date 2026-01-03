@@ -5,6 +5,7 @@ params:
     reference_id: null
     fit_scale: true
     scale: 1.0
+    use_multiprocessing: false
     shift_compensation:
       enabled: true
       min: -2.0
