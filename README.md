@@ -138,10 +138,12 @@ that processed traces remain representative of their raw counterparts:
   per spectrum by enabling the `solvent_subtraction.parallel` block in a recipe
   (`enabled: true`, optional `workers` to cap pool size). The pipeline uses a
   spawn-safe process pool to parallelize the CPU-heavy fitting while keeping
-  results ordered, and it logs any per-spectrum exceptions without aborting the
-  batch (falling back to the original spectrum for that entry). When the
-  `workers` value is omitted, the pipeline picks a safe default of
-  `min(4, os.cpu_count())`.
+  results ordered, and it logs any per-spectrum exceptions (including the
+  spectrum ID/path, exception type/message, and stack trace) without aborting
+  the batch (falling back to the original spectrum for that entry). The run
+  concludes with a warning summarizing how many spectra failed solvent
+  subtraction. When the `workers` value is omitted, the pipeline picks a safe
+  default of `min(4, os.cpu_count())`.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
