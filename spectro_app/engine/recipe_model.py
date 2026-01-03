@@ -191,6 +191,25 @@ class Recipe:
                         except (TypeError, ValueError):
                             errs.append(f"Shift compensation {key} must be numeric")
 
+        multiprocessing_cfg = self.params.get("multiprocessing")
+        if isinstance(multiprocessing_cfg, dict):
+            enabled = multiprocessing_cfg.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                errs.append("Multiprocessing enabled must be true or false")
+            for key, label in (
+                ("workers", "worker count"),
+                ("chunk_size", "chunk size"),
+                ("max_tasks_per_child", "max tasks per child"),
+            ):
+                value = multiprocessing_cfg.get(key)
+                if value is None:
+                    continue
+                try:
+                    if int(value) <= 0:
+                        errs.append(f"Multiprocessing {label} must be positive")
+                except (TypeError, ValueError):
+                    errs.append(f"Multiprocessing {label} must be an integer")
+
         blank_cfg = self.params.get("blank", {})
         subtract = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
         require_blank = blank_cfg.get("require", subtract)

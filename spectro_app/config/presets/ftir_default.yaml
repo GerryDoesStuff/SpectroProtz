@@ -5,12 +5,14 @@ params:
     reference_id: null
     fit_scale: true
     scale: 1.0
-    parallel:
-      enabled: false
-      workers: null
     shift_compensation:
       enabled: true
       min: -2.0
       max: 2.0
       step: 0.1
+  multiprocessing:
+    enabled: true
+    workers: null
+    chunk_size: null
+    max_tasks_per_child: null
 version: "0.1.0"

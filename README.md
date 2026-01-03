@@ -135,8 +135,8 @@ that processed traces remain representative of their raw counterparts:
   The metadata channel records the edge handling strategy under
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability.
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
-  per-spectrum pipeline by enabling the `solvent_subtraction.parallel` block in
-  a recipe (`enabled: true`, optional `workers` to cap pool size). The pipeline
+  per-spectrum pipeline by configuring a `multiprocessing` block in the recipe
+  (`enabled`, `workers`, `chunk_size`, `max_tasks_per_child`). The pipeline
   builds explicit per-spectrum tasks (recipe snapshot + axis metadata + sample
   data) and executes them in a spawn-safe process pool so coerce-domain,
   stitching, join correction, despiking, blank subtraction, baseline correction,
@@ -145,9 +145,11 @@ that processed traces remain representative of their raw counterparts:
   tasks still log any solvent-subtraction exceptions (including the spectrum
   ID/path, exception type/message, and stack trace), fall back to the original
   pre-solvent spectrum for that entry, and the run concludes with a warning
-  summarizing how many spectra failed solvent subtraction. When the `workers`
-  value is omitted, the pipeline picks a safe default of
-  `min(4, os.cpu_count())`.
+  summarizing how many spectra failed solvent subtraction. Multiprocessing is
+  enabled by default for FTIR runs with a worker count of
+  `min(4, os.cpu_count())`, while `chunk_size` batches multiple spectra per
+  worker submission and `max_tasks_per_child` can recycle processes to limit
+  long-lived memory growth. Set `enabled: false` or `workers: 1` to opt out.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
