@@ -134,16 +134,20 @@ that processed traces remain representative of their raw counterparts:
   the full sample range while keeping fit diagnostics scoped to the true overlap.
   The metadata channel records the edge handling strategy under
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability.
-- **Parallel solvent subtraction.** FTIR solvent subtraction can be fanned out
-  per spectrum by enabling the `solvent_subtraction.parallel` block in a recipe
-  (`enabled: true`, optional `workers` to cap pool size). The pipeline uses a
-  spawn-safe process pool to parallelize the CPU-heavy fitting while keeping
-  results ordered, and it logs any per-spectrum exceptions (including the
-  spectrum ID/path, exception type/message, and stack trace) without aborting
-  the batch (falling back to the original spectrum for that entry). The run
-  concludes with a warning summarizing how many spectra failed solvent
-  subtraction. When the `workers` value is omitted, the pipeline picks a safe
-  default of `min(4, os.cpu_count())`.
+- **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
+  per-spectrum pipeline by enabling the `solvent_subtraction.parallel` block in
+  a recipe (`enabled: true`, optional `workers` to cap pool size). The pipeline
+  builds explicit per-spectrum tasks (recipe snapshot + axis metadata + sample
+  data) and executes them in a spawn-safe process pool so coerce-domain,
+  stitching, join correction, despiking, blank subtraction, baseline correction,
+  solvent subtraction, smoothing, and peak detection all run in subprocesses.
+  Results are reassembled in input order for deterministic outputs. The worker
+  tasks still log any solvent-subtraction exceptions (including the spectrum
+  ID/path, exception type/message, and stack trace), fall back to the original
+  pre-solvent spectrum for that entry, and the run concludes with a warning
+  summarizing how many spectra failed solvent subtraction. When the `workers`
+  value is omitted, the pipeline picks a safe default of
+  `min(4, os.cpu_count())`.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.

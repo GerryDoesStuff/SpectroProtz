@@ -844,6 +844,179 @@ def _detect_peaks(spec: Spectrum, recipe: Dict[str, Any], axis: AxisAdapter) -> 
     )
 
 
+def _make_serializable(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {key: _make_serializable(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_make_serializable(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_make_serializable(item) for item in value)
+    return value
+
+
+def _spectrum_to_payload(spec: Spectrum) -> Dict[str, Any]:
+    meta = spec.meta if isinstance(spec.meta, Mapping) else {}
+    return {
+        "wavelength": np.asarray(spec.wavelength, dtype=float).tolist(),
+        "intensity": np.asarray(spec.intensity, dtype=float).tolist(),
+        "meta": _make_serializable(dict(meta)),
+    }
+
+
+def _spectrum_from_payload(payload: Mapping[str, Any]) -> Spectrum:
+    return Spectrum(
+        wavelength=np.asarray(payload.get("wavelength", []), dtype=float),
+        intensity=np.asarray(payload.get("intensity", []), dtype=float),
+        meta=dict(payload.get("meta") or {}),
+    )
+
+
+def _axis_to_payload(axis: AxisAdapter) -> Dict[str, str]:
+    return {
+        "axis_key": axis.axis_key,
+        "unit_label": axis.unit_label,
+        "window_suffix": axis.window_suffix,
+    }
+
+
+def _axis_from_payload(payload: Mapping[str, Any]) -> AxisAdapter:
+    return AxisAdapter(
+        axis_key=str(payload.get("axis_key", "wavelength")),
+        unit_label=str(payload.get("unit_label", "nm")),
+        window_suffix=str(payload.get("window_suffix", "nm")),
+    )
+
+
+def _process_spectrum_task(task: Mapping[str, Any]) -> Dict[str, Any]:
+    spec = _spectrum_from_payload(task["spectrum"])
+    axis = _axis_from_payload(task["axis"])
+    recipe = dict(task.get("recipe") or {})
+    domain_cfg = recipe.get("domain") if recipe else None
+    stitch_cfg = dict(recipe.get("stitch", {})) if recipe else {}
+    join_cfg = dict(recipe.get("join", {})) if recipe else {}
+    despike_cfg = dict(recipe.get("despike", {})) if recipe else {}
+    baseline_cfg = dict(recipe.get("baseline", {})) if recipe else {}
+    solvent_cfg = dict(recipe.get("solvent_subtraction", {})) if recipe else {}
+    smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
+
+    working = coerce_domain(spec, domain_cfg, axis=axis)
+
+    if stitch_cfg.get("enabled"):
+        windows_cfg = stitch_cfg.get("windows")
+        windows = normalise_stitch_windows(windows_cfg, axis=axis)
+        working = stitch_regions(
+            working,
+            windows,
+            shoulder_points=stitch_cfg.get("shoulder_points", stitch_cfg.get("points", 0)),
+            method=stitch_cfg.get("method", "linear"),
+        )
+
+    joins: List[int] = []
+    if join_cfg.get("enabled"):
+        joins = detect_joins(
+            working.wavelength,
+            working.intensity,
+            threshold=join_cfg.get("threshold"),
+            window=int(join_cfg.get("window", 10)),
+        )
+        working = correct_joins(
+            working,
+            joins,
+            window=int(join_cfg.get("window", 10)),
+        )
+    working.meta.setdefault("join_indices", tuple(joins))
+
+    if despike_cfg.get("enabled"):
+        exclusion_windows = normalise_exclusion_windows(despike_cfg.get("exclusions"), axis=axis)
+        working = despike_spectrum(
+            working,
+            zscore=despike_cfg.get("zscore", 5.0),
+            window=despike_cfg.get("window", 5),
+            baseline_window=despike_cfg.get("baseline_window"),
+            spread_window=despike_cfg.get("spread_window"),
+            spread_method=despike_cfg.get("spread_method", "mad"),
+            spread_epsilon=despike_cfg.get("spread_epsilon", 1e-6),
+            residual_floor=despike_cfg.get("residual_floor", 2e-2),
+            isolation_ratio=despike_cfg.get("isolation_ratio", 20.0),
+            tail_decay_ratio=despike_cfg.get("tail_decay_ratio", 0.85),
+            max_passes=despike_cfg.get("max_passes", 10),
+            leading_padding=despike_cfg.get("leading_padding", 0),
+            trailing_padding=despike_cfg.get("trailing_padding", 0),
+            noise_scale_multiplier=despike_cfg.get("noise_scale_multiplier", 1.0),
+            rng_seed=despike_cfg.get("rng_seed"),
+            exclusion_windows=exclusion_windows,
+        )
+
+    if task.get("mode") == "preprocess":
+        return {
+            "spectrum": _spectrum_to_payload(working),
+            "solvent_error": None,
+        }
+
+    subtract_blank_flag = bool(task.get("subtract_blank"))
+    require_blank = bool(task.get("require_blank"))
+    blank_payload = task.get("blank")
+    if subtract_blank_flag:
+        if blank_payload is None:
+            if require_blank:
+                raise ValueError("Blank spectrum required but not found")
+        else:
+            working = subtract_blank(working, _spectrum_from_payload(blank_payload))
+
+    if baseline_cfg.get("method"):
+        params = {
+            "lam": baseline_cfg.get("lam", baseline_cfg.get("lambda", 1e5)),
+            "p": baseline_cfg.get("p", 0.01),
+            "niter": baseline_cfg.get("niter", 10),
+            "iterations": baseline_cfg.get("iterations", 24),
+        }
+        params["anchor"] = baseline_cfg.get("anchor")
+        working = apply_baseline(
+            working, str(baseline_cfg.get("method")), axis=axis, **params
+        )
+
+    solvent_error = None
+    if task.get("solvent_enabled") and task.get("solvent_reference") is not None:
+        reference_payload = task.get("solvent_reference")
+        if isinstance(reference_payload, list):
+            solvent_reference = [
+                _spectrum_from_payload(ref_payload) for ref_payload in reference_payload
+            ]
+        else:
+            solvent_reference = _spectrum_from_payload(reference_payload)
+        solvent_task_cfg = _solvent_subtraction_config(
+            solvent_cfg, reference_id=task.get("solvent_reference_id")
+        )
+        result = _apply_solvent_subtraction_task(
+            working,
+            solvent_reference,
+            solvent_task_cfg,
+            axis,
+        )
+        working = result.spectrum
+        solvent_error = result.error
+
+    if smoothing_cfg.get("enabled"):
+        join_indices = working.meta.get("join_indices")
+        working = smooth_spectrum(
+            working,
+            window=int(smoothing_cfg.get("window", 5)),
+            polyorder=int(smoothing_cfg.get("polyorder", 2)),
+            join_indices=join_indices,
+        )
+
+    working = _detect_peaks(working, recipe, axis)
+
+    return {
+        "spectrum": _spectrum_to_payload(working),
+        "solvent_error": solvent_error,
+    }
+
+
 def run_pipeline(
     specs: Iterable[Spectrum],
     recipe: Dict[str, Any],
@@ -856,69 +1029,29 @@ def run_pipeline(
         return [], []
 
     axis = axis or AxisAdapter.from_spectrum(specs_list[0])
-    domain_cfg = recipe.get("domain") if recipe else None
-    stitch_cfg = dict(recipe.get("stitch", {})) if recipe else {}
-    join_cfg = dict(recipe.get("join", {})) if recipe else {}
-    despike_cfg = dict(recipe.get("despike", {})) if recipe else {}
     blank_cfg = dict(recipe.get("blank", {})) if recipe else {}
-    baseline_cfg = dict(recipe.get("baseline", {})) if recipe else {}
     solvent_cfg = dict(recipe.get("solvent_subtraction", {})) if recipe else {}
-    smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
     module_id = str(recipe.get("module", "") or "").strip().lower()
+    axis_payload = _axis_to_payload(axis)
+    recipe_payload = _make_serializable(dict(recipe or {}))
 
-    preprocess: List[Spectrum] = []
-    for spec in specs_list:
-        working = coerce_domain(spec, domain_cfg, axis=axis)
-
-        if stitch_cfg.get("enabled"):
-            windows_cfg = stitch_cfg.get("windows")
-            windows = normalise_stitch_windows(windows_cfg, axis=axis)
-            working = stitch_regions(
-                working,
-                windows,
-                shoulder_points=stitch_cfg.get("shoulder_points", stitch_cfg.get("points", 0)),
-                method=stitch_cfg.get("method", "linear"),
-            )
-
-        joins: List[int] = []
-        if join_cfg.get("enabled"):
-            joins = detect_joins(
-                working.wavelength,
-                working.intensity,
-                threshold=join_cfg.get("threshold"),
-                window=int(join_cfg.get("window", 10)),
-            )
-            working = correct_joins(
-                working,
-                joins,
-                window=int(join_cfg.get("window", 10)),
-            )
-        working.meta.setdefault("join_indices", tuple(joins))
-
-        if despike_cfg.get("enabled"):
-            exclusion_windows = normalise_exclusion_windows(despike_cfg.get("exclusions"), axis=axis)
-            working = despike_spectrum(
-                working,
-                zscore=despike_cfg.get("zscore", 5.0),
-                window=despike_cfg.get("window", 5),
-                baseline_window=despike_cfg.get("baseline_window"),
-                spread_window=despike_cfg.get("spread_window"),
-                spread_method=despike_cfg.get("spread_method", "mad"),
-                spread_epsilon=despike_cfg.get("spread_epsilon", 1e-6),
-                residual_floor=despike_cfg.get("residual_floor", 2e-2),
-                isolation_ratio=despike_cfg.get("isolation_ratio", 20.0),
-                tail_decay_ratio=despike_cfg.get("tail_decay_ratio", 0.85),
-                max_passes=despike_cfg.get("max_passes", 10),
-                leading_padding=despike_cfg.get("leading_padding", 0),
-                trailing_padding=despike_cfg.get("trailing_padding", 0),
-                noise_scale_multiplier=despike_cfg.get("noise_scale_multiplier", 1.0),
-                rng_seed=despike_cfg.get("rng_seed"),
-                exclusion_windows=exclusion_windows,
-            )
-
-        preprocess.append(working)
-
-    blanks = [spec for spec in preprocess if spec.meta.get("role") == "blank"]
+    preprocess_task_base = {
+        "recipe": recipe_payload,
+        "axis": axis_payload,
+        "mode": "preprocess",
+    }
+    blanks = [
+        _spectrum_from_payload(
+            _process_spectrum_task(
+                {
+                    **preprocess_task_base,
+                    "spectrum": _spectrum_to_payload(spec),
+                }
+            )["spectrum"]
+        )
+        for spec in specs_list
+        if spec.meta.get("role") == "blank"
+    ]
     reference_role_set = {"reference", "solvent", "solvent_reference"}
     solvent_enabled = module_id == "ftir" and bool(solvent_cfg.get("enabled"))
     solvent_reference_id = _normalize_identifier(
@@ -935,15 +1068,20 @@ def run_pipeline(
         ]
     else:
         solvent_reference_ids = []
-    solvent_references = (
-        [
-            spec
-            for spec in preprocess
+    solvent_references = []
+    if solvent_enabled:
+        solvent_references = [
+            _spectrum_from_payload(
+                _process_spectrum_task(
+                    {
+                        **preprocess_task_base,
+                        "spectrum": _spectrum_to_payload(spec),
+                    }
+                )["spectrum"]
+            )
+            for spec in specs_list
             if _normalize_role(spec.meta.get("role")) in reference_role_set
         ]
-        if solvent_enabled
-        else []
-    )
     multi_reference = bool(solvent_cfg.get("multi_reference")) or len(
         solvent_reference_ids
     ) > 1
@@ -965,12 +1103,12 @@ def run_pipeline(
     if solvent_enabled:
         samples = [
             spec
-            for spec in preprocess
+            for spec in specs_list
             if spec.meta.get("role") not in {"blank"}
             and _normalize_role(spec.meta.get("role")) not in reference_role_set
         ]
     else:
-        samples = [spec for spec in preprocess if spec.meta.get("role") != "blank"]
+        samples = [spec for spec in specs_list if spec.meta.get("role") != "blank"]
 
     subtract_blank_flag = blank_cfg.get("subtract", blank_cfg.get("enabled", False))
     require_blank = blank_cfg.get("require", subtract_blank_flag)
@@ -978,32 +1116,43 @@ def run_pipeline(
     blank_lookup = _lookup_blanks(blanks, strategy)
     fallback_identifier = _normalize_identifier(blank_cfg.get("default") or blank_cfg.get("fallback"))
 
-    pre_solvent: List[Spectrum] = []
-    for spec in samples:
-        working = spec
+    per_spectrum_tasks: List[Dict[str, Any]] = []
+    for idx, spec in enumerate(samples):
+        blank_payload: Dict[str, Any] | None = None
         if subtract_blank_flag:
             blank = _select_blank(spec, blank_lookup, strategy, fallback_identifier)
             if blank is None and require_blank:
                 raise ValueError("Blank spectrum required but not found")
             if blank is not None:
-                working = subtract_blank(working, blank)
+                blank_payload = _spectrum_to_payload(blank)
 
-        if baseline_cfg.get("method"):
-            params = {
-                "lam": baseline_cfg.get("lam", baseline_cfg.get("lambda", 1e5)),
-                "p": baseline_cfg.get("p", 0.01),
-                "niter": baseline_cfg.get("niter", 10),
-                "iterations": baseline_cfg.get("iterations", 24),
+        solvent_reference_payload: Dict[str, Any] | List[Dict[str, Any]] | None = None
+        if solvent_reference is not None:
+            if isinstance(solvent_reference, Sequence) and not isinstance(
+                solvent_reference, Spectrum
+            ):
+                solvent_reference_payload = [
+                    _spectrum_to_payload(ref) for ref in solvent_reference
+                ]
+            else:
+                solvent_reference_payload = _spectrum_to_payload(solvent_reference)
+
+        per_spectrum_tasks.append(
+            {
+                "index": idx,
+                "spectrum": _spectrum_to_payload(spec),
+                "recipe": recipe_payload,
+                "axis": axis_payload,
+                "blank": blank_payload,
+                "subtract_blank": subtract_blank_flag,
+                "require_blank": require_blank,
+                "solvent_enabled": bool(solvent_enabled and solvent_reference is not None),
+                "solvent_reference": solvent_reference_payload,
+                "solvent_reference_id": solvent_reference_id,
             }
-            params["anchor"] = baseline_cfg.get("anchor")
-            working = apply_baseline(
-                working, str(baseline_cfg.get("method")), axis=axis, **params
-            )
+        )
 
-        pre_solvent.append(working)
-
-    solvent_results = pre_solvent
-    total_items = len(pre_solvent)
+    total_items = len(per_spectrum_tasks)
     reported_indices: set[int] = set()
     failure_count = 0
 
@@ -1012,86 +1161,49 @@ def run_pipeline(
             return
         on_item_processed(index + 1, total_items)
         reported_indices.add(index)
-    if solvent_enabled and solvent_reference is not None:
-        solvent_task_cfg = _solvent_subtraction_config(
-            solvent_cfg, reference_id=solvent_reference_id
-        )
-        parallel_enabled, parallel_workers = _resolve_parallel_settings(solvent_cfg)
-        if parallel_enabled and len(pre_solvent) > 1 and parallel_workers > 1:
-            ctx = multiprocessing.get_context("spawn")
-            results: List[SolventSubtractionTaskResult | None] = [
-                None for _ in pre_solvent
-            ]
-            with ProcessPoolExecutor(
-                mp_context=ctx, max_workers=parallel_workers
-            ) as executor:
-                future_map = {
-                    executor.submit(
-                        _apply_solvent_subtraction_task,
-                        spec,
-                        solvent_reference,
-                        solvent_task_cfg,
-                        axis,
-                    ): idx
-                    for idx, spec in enumerate(pre_solvent)
-                }
-                for future in as_completed(future_map):
-                    idx = future_map[future]
-                    try:
-                        results[idx] = future.result()
-                    except Exception as exc:
-                        error_payload = _build_solvent_subtraction_error(exc)
-                        _log_solvent_subtraction_error(pre_solvent[idx], idx, error_payload)
-                        results[idx] = SolventSubtractionTaskResult(
-                            spectrum=pre_solvent[idx], error=error_payload
-                        )
-                    _report_progress(idx)
-            solvent_results = []
-            for idx, result in enumerate(results):
-                if result is None:
-                    spectrum_label, path_label = _spectrum_log_details(pre_solvent[idx], idx)
-                    logger.error(
-                        "Solvent subtraction task returned no result for spectrum_id=%s path=%s",
-                        spectrum_label,
-                        path_label,
-                    )
-                    failure_count += 1
-                    solvent_results.append(pre_solvent[idx])
-                    continue
-                if result.error:
-                    _log_solvent_subtraction_error(pre_solvent[idx], idx, result.error)
-                    failure_count += 1
-                solvent_results.append(result.spectrum)
-        else:
-            solvent_results = []
-            for idx, spec in enumerate(pre_solvent):
-                result = _apply_solvent_subtraction_task(
-                    spec,
-                    solvent_reference,
-                    solvent_task_cfg,
-                    axis,
-                )
-                if result.error:
-                    _log_solvent_subtraction_error(spec, idx, result.error)
-                    failure_count += 1
-                solvent_results.append(result.spectrum)
-                _report_progress(idx)
-
     processed: List[Spectrum] = []
-    for idx, working in enumerate(solvent_results):
-        if smoothing_cfg.get("enabled"):
-            join_indices = working.meta.get("join_indices")
-            working = smooth_spectrum(
-                working,
-                window=int(smoothing_cfg.get("window", 5)),
-                polyorder=int(smoothing_cfg.get("polyorder", 2)),
-                join_indices=join_indices,
-            )
-
-        working = _detect_peaks(working, recipe, axis)
-        processed.append(working)
-        if idx not in reported_indices:
-            _report_progress(idx)
+    parallel_enabled, parallel_workers = _resolve_parallel_settings(solvent_cfg)
+    run_parallel = (
+        module_id == "ftir"
+        and parallel_enabled
+        and len(per_spectrum_tasks) > 1
+        and parallel_workers > 1
+    )
+    if run_parallel:
+        ctx = multiprocessing.get_context("spawn")
+        results: List[Dict[str, Any] | None] = [None for _ in per_spectrum_tasks]
+        with ProcessPoolExecutor(mp_context=ctx, max_workers=parallel_workers) as executor:
+            future_map = {
+                executor.submit(_process_spectrum_task, task): task["index"]
+                for task in per_spectrum_tasks
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                try:
+                    results[idx] = future.result()
+                except Exception:
+                    logger.exception("Spectrum task failed at index %s.", idx)
+                    raise
+                _report_progress(idx)
+        for idx, result in enumerate(results):
+            if result is None:
+                logger.error("Spectrum task returned no result for index %s.", idx)
+                raise RuntimeError("Missing spectrum task result.")
+            error = result.get("solvent_error")
+            if error:
+                _log_solvent_subtraction_error(samples[idx], idx, error)
+                failure_count += 1
+            processed.append(_spectrum_from_payload(result["spectrum"]))
+    else:
+        for task in per_spectrum_tasks:
+            result = _process_spectrum_task(task)
+            error = result.get("solvent_error")
+            if error:
+                _log_solvent_subtraction_error(samples[task["index"]], task["index"], error)
+                failure_count += 1
+            processed.append(_spectrum_from_payload(result["spectrum"]))
+            if task["index"] not in reported_indices:
+                _report_progress(task["index"])
 
     drift_map = qc_engine.compute_uvvis_drift_map(processed, recipe)
     qc_rows = [
