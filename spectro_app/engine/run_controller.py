@@ -1,7 +1,7 @@
 import copy
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Protocol
 
 from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.solvent_reference import build_reference_spectrum
@@ -28,10 +28,18 @@ def _flatten_recipe(recipe: Optional[dict]) -> dict:
 
     return flattened
 
+
+class SpectrumProgressCallback(Protocol):
+    def __call__(
+        self, completed: int, total: int, spectrum_id: str | int | None
+    ) -> None:
+        ...
+
+
 class JobSignals(QObject):
     progress = pyqtSignal(int)
     message = pyqtSignal(str)
-    item_processed = pyqtSignal(int, int)
+    item_processed = pyqtSignal(int, int, object)
     finished = pyqtSignal(object)  # BatchResult or Exception
 
 def _sanitize_export_for_preview(recipe: dict) -> dict:
@@ -157,7 +165,7 @@ class RunController(QObject):
     job_finished = pyqtSignal(object)
     job_progress = pyqtSignal(int)
     job_message = pyqtSignal(str)
-    job_item_processed = pyqtSignal(int, int)
+    job_item_processed = pyqtSignal(int, int, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

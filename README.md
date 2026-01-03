@@ -9,8 +9,9 @@ individual scripts. Internally, the launcher hands control to
 [`spectro_app/main.py`](spectro_app/main.py), which wires up the Qt event loop
 and the shared application context.
 During batch runs, the main window keeps the status bar and log panel updated
-with per-spectrum progress messages so operators can see each spectrum complete
-in real time alongside the overall progress bar.
+with per-spectrum progress messages (including the spectrum ID when available)
+so operators can see each spectrum complete in real time alongside the overall
+progress bar, which also surfaces the running spectrum counts.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in
