@@ -6,7 +6,10 @@ modalities can share the same preprocessing and QC flow.
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+import logging
+import multiprocessing
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -38,6 +41,8 @@ __all__ = [
     "normalize_blank_match_strategy",
     "run_pipeline",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -218,6 +223,52 @@ def despike_spectrum(
 
 def smooth_spectrum(*args: Any, **kwargs: Any) -> Spectrum:
     return uvvis_pipeline.smooth_spectrum(*args, **kwargs)
+
+
+@dataclass(frozen=True)
+class SolventSubtractionTaskResult:
+    spectrum: Spectrum
+    error: str | None = None
+
+
+def _solvent_subtraction_config(
+    solvent_cfg: Mapping[str, Any],
+    *,
+    reference_id: str | None,
+) -> Dict[str, Any]:
+    shift_cfg = solvent_cfg.get("shift_compensation")
+    shift_payload = dict(shift_cfg) if isinstance(shift_cfg, Mapping) else {}
+    return {
+        "reference_id": reference_id,
+        "scale": solvent_cfg.get("scale"),
+        "fit_scale": solvent_cfg.get("fit_scale", True),
+        "ridge_alpha": solvent_cfg.get("ridge_alpha"),
+        "include_offset": solvent_cfg.get("include_offset", False),
+        "shift_compensation": shift_payload,
+    }
+
+
+def _apply_solvent_subtraction_task(
+    spec: Spectrum,
+    solvent_reference: Spectrum | Sequence[Spectrum],
+    cfg: Mapping[str, Any],
+    axis: AxisAdapter,
+) -> SolventSubtractionTaskResult:
+    try:
+        corrected = apply_solvent_subtraction(
+            spec,
+            solvent_reference,
+            reference_id=cfg.get("reference_id"),
+            scale=cfg.get("scale"),
+            fit_scale=cfg.get("fit_scale", True),
+            ridge_alpha=cfg.get("ridge_alpha"),
+            include_offset=cfg.get("include_offset", False),
+            shift_compensation=cfg.get("shift_compensation"),
+        )
+        return SolventSubtractionTaskResult(spectrum=corrected)
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        return SolventSubtractionTaskResult(spectrum=spec, error=error_text)
 
 
 def apply_solvent_subtraction(
@@ -853,7 +904,7 @@ def run_pipeline(
     blank_lookup = _lookup_blanks(blanks, strategy)
     fallback_identifier = _normalize_identifier(blank_cfg.get("default") or blank_cfg.get("fallback"))
 
-    processed: List[Spectrum] = []
+    pre_solvent: List[Spectrum] = []
     for spec in samples:
         working = spec
         if subtract_blank_flag:
@@ -871,20 +922,83 @@ def run_pipeline(
                 "iterations": baseline_cfg.get("iterations", 24),
             }
             params["anchor"] = baseline_cfg.get("anchor")
-            working = apply_baseline(working, str(baseline_cfg.get("method")), axis=axis, **params)
-
-        if solvent_enabled and solvent_reference is not None:
-            working = apply_solvent_subtraction(
-                working,
-                solvent_reference,
-                reference_id=solvent_reference_id,
-                scale=solvent_cfg.get("scale"),
-                fit_scale=solvent_cfg.get("fit_scale", True),
-                ridge_alpha=solvent_cfg.get("ridge_alpha"),
-                include_offset=solvent_cfg.get("include_offset", False),
-                shift_compensation=solvent_cfg.get("shift_compensation"),
+            working = apply_baseline(
+                working, str(baseline_cfg.get("method")), axis=axis, **params
             )
 
+        pre_solvent.append(working)
+
+    solvent_results = pre_solvent
+    if solvent_enabled and solvent_reference is not None:
+        solvent_task_cfg = _solvent_subtraction_config(
+            solvent_cfg, reference_id=solvent_reference_id
+        )
+        parallel_enabled = bool(solvent_cfg.get("use_multiprocessing", False))
+        if parallel_enabled and len(pre_solvent) > 1:
+            ctx = multiprocessing.get_context("spawn")
+            results: List[SolventSubtractionTaskResult | None] = [
+                None for _ in pre_solvent
+            ]
+            with ProcessPoolExecutor(mp_context=ctx) as executor:
+                future_map = {
+                    executor.submit(
+                        _apply_solvent_subtraction_task,
+                        spec,
+                        solvent_reference,
+                        solvent_task_cfg,
+                        axis,
+                    ): idx
+                    for idx, spec in enumerate(pre_solvent)
+                }
+                for future in as_completed(future_map):
+                    idx = future_map[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as exc:
+                        error_text = f"{type(exc).__name__}: {exc}"
+                        logger.exception(
+                            "Solvent subtraction task failed for spectrum %s: %s",
+                            idx,
+                            error_text,
+                        )
+                        results[idx] = SolventSubtractionTaskResult(
+                            spectrum=pre_solvent[idx], error=error_text
+                        )
+            solvent_results = []
+            for idx, result in enumerate(results):
+                if result is None:
+                    logger.error(
+                        "Solvent subtraction task returned no result for spectrum %s",
+                        idx,
+                    )
+                    solvent_results.append(pre_solvent[idx])
+                    continue
+                if result.error:
+                    logger.error(
+                        "Solvent subtraction failed for spectrum %s: %s",
+                        idx,
+                        result.error,
+                    )
+                solvent_results.append(result.spectrum)
+        else:
+            solvent_results = []
+            for idx, spec in enumerate(pre_solvent):
+                result = _apply_solvent_subtraction_task(
+                    spec,
+                    solvent_reference,
+                    solvent_task_cfg,
+                    axis,
+                )
+                if result.error:
+                    logger.error(
+                        "Solvent subtraction failed for spectrum %s: %s",
+                        idx,
+                        result.error,
+                    )
+                solvent_results.append(result.spectrum)
+
+    processed: List[Spectrum] = []
+    for working in solvent_results:
         if smoothing_cfg.get("enabled"):
             join_indices = working.meta.get("join_indices")
             working = smooth_spectrum(
