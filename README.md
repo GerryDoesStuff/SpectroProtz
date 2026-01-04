@@ -137,12 +137,12 @@ that processed traces remain representative of their raw counterparts:
   the full sample range while keeping fit diagnostics scoped to the true overlap.
   The metadata channel records the edge handling strategy under
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability. When multiple
-  solvent references are configured, the pipeline evaluates each reference
-  independently (including shift/scale/offset fitting), computes the RMSE on the
-  overlap region for the best shift candidate, and then selects the single
-  reference with the lowest RMSE for subtraction (ties resolve to the earliest
-  reference in the input list). The per-reference fit details (reference
-  identifier, RMSE, shift, scale, and offset) are captured in
+  solvent references are selected (or the multi-reference option is enabled),
+  the pipeline evaluates each reference individually and chooses the fit with
+  the lowest RMSE for subtraction (ties resolve to the earliest reference in
+  the input list). Shift compensation, scale, and offset fitting are applied to
+  every candidate before the RMSE comparison. The per-reference fit details
+  (reference identifier, RMSE, shift, scale, and offset) are captured in
   `meta["solvent_subtraction"]["candidate_scores"]` so debugging and audits can
   review every candidate considered, matching the recipe editor option to
   select the best reference by RMSE.
