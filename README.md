@@ -105,6 +105,13 @@ entries are stored in `~/SpectroApp/solvent_references.json` by default and are
 available in the **Reference** selector inside the recipe editor’s solvent
 subtraction panel.
 
+The solvent subtraction panel now includes selection controls for multi-
+reference fits: choose the selection metric (RMSE or pattern correlation),
+optionally constrain scoring to a wavenumber region, and adjust the region-
+weight slider/spin box to emphasize that band. These settings are stored in the
+recipe payload so preset exports and subsequent runs reuse the same selection
+criteria.
+
 When you open **Select Solvent Reference**, the dialog lists stored entries,
 shows their metadata, and lets you browse a new file. Use **Edit Metadata…** to
 update the name, tags, metadata fields, or default status of an existing
