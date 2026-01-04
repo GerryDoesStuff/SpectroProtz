@@ -129,6 +129,8 @@ name and its corresponding value. The dialog opens from the Peak detection
 section and stores the entered fields directly into the recipe under
 `features.peaks.variable_fields`, so the settings round-trip with presets and
 batch recipes.
+The button tooltip summarizes how many variable fields are currently configured,
+helping operators confirm at a glance that their annotations are attached.
 
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm

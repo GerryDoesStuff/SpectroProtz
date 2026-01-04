@@ -2119,11 +2119,11 @@ class RecipeEditorDock(QDockWidget):
     def _update_peaks_variable_fields_button(self) -> None:
         count = len(self._peaks_variable_fields)
         if count:
-            summary = f\"Configured variable fields: {count}\"
+            summary = f"Configured variable fields: {count}"
         else:
-            summary = \"No variable fields configured yet.\"
+            summary = "No variable fields configured yet."
         self.peaks_variable_fields_button.setToolTip(
-            \"Define custom name/value pairs to attach to peak-detection outputs.\\n\"
+            "Define custom name/value pairs to attach to peak-detection outputs.\n"
             + summary
         )
 
