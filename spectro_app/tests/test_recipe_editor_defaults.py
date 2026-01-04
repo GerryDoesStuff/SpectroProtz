@@ -124,11 +124,6 @@ def test_peak_detection_roundtrip(qt_app):
         dock.peaks_cwt_width_max.setValue(50.0)
         dock.peaks_cwt_width_step.setValue(4.0)
         dock.peaks_cwt_cluster_tolerance.setValue(7.0)
-        variable_fields = [
-            {"name": "Operator", "value": "Avery"},
-            {"name": "Batch", "value": "B-12"},
-        ]
-        dock._set_peaks_variable_fields(variable_fields)
         qt_app.processEvents()
 
         dock._update_model_from_ui(force=True)
@@ -160,7 +155,6 @@ def test_peak_detection_roundtrip(qt_app):
         assert peaks.get("cwt_width_max") == pytest.approx(50.0)
         assert peaks.get("cwt_width_step") == pytest.approx(4.0)
         assert peaks.get("cwt_cluster_tolerance") == pytest.approx(7.0)
-        assert peaks.get("variable_fields") == variable_fields
 
         recipe_dict = dock.recipe_dict()
         dock.set_recipe(recipe_dict)
@@ -193,7 +187,6 @@ def test_peak_detection_roundtrip(qt_app):
         assert dock.peaks_cwt_width_max.value() == pytest.approx(50.0)
         assert dock.peaks_cwt_width_step.value() == pytest.approx(4.0)
         assert dock.peaks_cwt_cluster_tolerance.value() == pytest.approx(7.0)
-        assert dock._peaks_variable_fields == variable_fields
 
         dock.peaks_enable.setChecked(False)
         qt_app.processEvents()
@@ -236,7 +229,6 @@ def test_peak_detection_roundtrip(qt_app):
                 "peaks_cwt_width_max",
                 "peaks_cwt_width_step",
                 "peaks_cwt_cluster_tolerance",
-                "peaks_variable_fields_button",
             ],
             True,
         ),

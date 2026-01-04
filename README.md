@@ -120,17 +120,20 @@ future selections reflect the updated information. The edit action stays
 disabled until a list entry is selected, and selecting a reference refreshes the
 detail pane immediately.
 
-## Peak detection variable fields
-The recipe editor’s **Peak detection** panel now includes an **Edit variable
-fields…** button for attaching custom name/value pairs to peak detection
-outputs. Use this window to capture operator notes, batch identifiers, or other
-context that should travel with detected peaks; each row represents one field
-name and its corresponding value. The dialog opens from the Peak detection
-section and stores the entered fields directly into the recipe under
-`features.peaks.variable_fields`, so the settings round-trip with presets and
-batch recipes.
-The button tooltip summarizes how many variable fields are currently configured,
-helping operators confirm at a glance that their annotations are attached.
+## Peak detection configuration
+The recipe editor’s **Peak detection** panel focuses on tuning how peaks are
+found, filtered, and classified. Enable peak detection to record peak
+wavelength, height, and width statistics in analysis outputs, then adjust the
+prominence floor, minimum absorbance threshold, noise sigma multiplier, and
+noise window (global or regional) to control which candidates are kept. Use the
+minimum-distance controls to enforce spacing between peaks, optionally switching
+to adaptive spacing based on median FWHM and tightening or loosening the
+distance fraction. Width bounds, a maximum candidate count, and a negative-peak
+toggle help shape the candidate set further. Additional controls cover merge and
+close-peak tolerances, plateau detection sensitivity, shoulder detection
+thresholds, and optional CWT-based detection with configurable width ranges and
+cluster tolerances so the feature set stays consistent across UV-Vis and FTIR
+recipes.
 
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm

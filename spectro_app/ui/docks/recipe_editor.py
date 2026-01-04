@@ -37,7 +37,6 @@ from PyQt6.QtWidgets import (
 )
 
 from spectro_app.engine.recipe_model import Recipe
-from spectro_app.ui.dialogs.variable_fields import VariableFieldsDialog
 
 
 class CollapsibleSection(QWidget):
@@ -107,7 +106,6 @@ class RecipeEditorDock(QDockWidget):
         self._baseline_anchor_errors: list[str] = []
         self._despike_exclusion_errors: list[str] = []
         self._solvent_reference_entries: dict[str, dict[str, object]] = {}
-        self._peaks_variable_fields: list[dict[str, str]] = []
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -999,10 +997,6 @@ class RecipeEditorDock(QDockWidget):
             "Detect prominent spectral peaks and report their wavelength, height,"
             " and width statistics in analysis outputs."
         )
-        self.peaks_variable_fields_button = QPushButton("Edit variable fields…")
-        self.peaks_variable_fields_button.setToolTip(
-            "Define custom name/value pairs to attach to peak-detection outputs."
-        )
         self.peaks_prominence = QDoubleSpinBox()
         self.peaks_prominence.setDecimals(4)
         self.peaks_prominence.setRange(0.0, 1e6)
@@ -1192,7 +1186,6 @@ class RecipeEditorDock(QDockWidget):
         )
 
         peaks_form.addRow(self.peaks_enable)
-        peaks_form.addRow("Variable fields", self.peaks_variable_fields_button)
         peaks_form.addRow("Prominence", self.peaks_prominence)
         peaks_form.addRow("Min absorbance threshold", self.peaks_min_absorbance_threshold)
         peaks_form.addRow("Noise sigma multiplier", self.peaks_noise_sigma_multiplier)
@@ -1367,9 +1360,6 @@ class RecipeEditorDock(QDockWidget):
         self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
         self.stitch_enable.toggled.connect(self._update_feature_controls_enabled)
         self.peaks_enable.toggled.connect(self._update_feature_controls_enabled)
-        self.peaks_variable_fields_button.clicked.connect(
-            self._on_peaks_variable_fields_clicked
-        )
         self.despike_enable.toggled.connect(self._update_feature_controls_enabled)
         self.join_enable.toggled.connect(self._update_feature_controls_enabled)
         self.blank_subtract.toggled.connect(self._update_feature_controls_enabled)
@@ -1747,7 +1737,6 @@ class RecipeEditorDock(QDockWidget):
                     self.peaks_cwt_cluster_tolerance.value(),
                 )
             )
-            self._set_peaks_variable_fields(peaks_cfg.get("variable_fields"))
 
             baseline_cfg = (
                 params.get("baseline", {}) if isinstance(params.get("baseline"), dict) else {}
@@ -2086,47 +2075,6 @@ class RecipeEditorDock(QDockWidget):
             return ""
         return str(value)
 
-    def _normalise_peak_variable_fields(
-        self, value: object
-    ) -> list[dict[str, str]]:
-        fields: list[dict[str, str]] = []
-        if isinstance(value, Mapping):
-            for key, field_value in value.items():
-                name = str(key).strip()
-                if not name:
-                    continue
-                fields.append({"name": name, "value": str(field_value or "").strip()})
-            return fields
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            for entry in value:
-                if not isinstance(entry, Mapping):
-                    continue
-                name = entry.get("name") or entry.get("field") or entry.get("key")
-                if name is None:
-                    continue
-                name_text = str(name).strip()
-                if not name_text:
-                    continue
-                field_value = entry.get("value", "")
-                value_text = "" if field_value is None else str(field_value).strip()
-                fields.append({"name": name_text, "value": value_text})
-        return fields
-
-    def _set_peaks_variable_fields(self, fields: object) -> None:
-        self._peaks_variable_fields = self._normalise_peak_variable_fields(fields)
-        self._update_peaks_variable_fields_button()
-
-    def _update_peaks_variable_fields_button(self) -> None:
-        count = len(self._peaks_variable_fields)
-        if count:
-            summary = f"Configured variable fields: {count}"
-        else:
-            summary = "No variable fields configured yet."
-        self.peaks_variable_fields_button.setToolTip(
-            "Define custom name/value pairs to attach to peak-detection outputs.\n"
-            + summary
-        )
-
     def _load_despike_exclusions(self, config) -> None:
         self.despike_exclusions_table.setRowCount(0)
         windows_iter: Sequence[object] | None = None
@@ -2446,7 +2394,6 @@ class RecipeEditorDock(QDockWidget):
         self.peaks_cwt_width_max.setEnabled(peaks_enabled)
         self.peaks_cwt_width_step.setEnabled(peaks_enabled)
         self.peaks_cwt_cluster_tolerance.setEnabled(peaks_enabled)
-        self.peaks_variable_fields_button.setEnabled(peaks_enabled)
 
         stitch_enabled = self.stitch_enable.isChecked()
         self.stitch_shoulder_points.setEnabled(stitch_enabled)
@@ -2496,15 +2443,6 @@ class RecipeEditorDock(QDockWidget):
         self._update_join_window_buttons()
         self._update_stitch_window_buttons()
 
-    def _on_peaks_variable_fields_clicked(self) -> None:
-        dialog = VariableFieldsDialog(
-            fields_default=self._peaks_variable_fields,
-            parent=self,
-        )
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        self._set_peaks_variable_fields(dialog.fields())
-        self._update_model_from_ui(force=True)
 
     def _update_solvent_controls_enabled(self) -> None:
         solvent_enabled = self.solvent_enable.isChecked()
@@ -3375,11 +3313,6 @@ class RecipeEditorDock(QDockWidget):
             shoulder_min_distance = float(self.peaks_shoulder_min_distance.value())
             if shoulder_min_distance > 0:
                 peak_payload["shoulder_min_distance_cm"] = shoulder_min_distance
-            variable_fields = self._normalise_peak_variable_fields(
-                self._peaks_variable_fields
-            )
-            if variable_fields:
-                peak_payload["variable_fields"] = variable_fields
             features_cfg["peaks"] = peak_payload
         else:
             features_cfg["peaks"] = {"enabled": False}
