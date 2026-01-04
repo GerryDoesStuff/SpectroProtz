@@ -476,6 +476,8 @@ def apply_solvent_subtraction(
         shift_min, shift_max = shift_max, shift_min
     if shift_step <= 0:
         shift_step = 0.1
+    min_overlap_points = 10
+    rmse_tolerance = 1.0e-6
 
     offset_used = bool(include_offset)
     if shift_enabled:
@@ -524,11 +526,24 @@ def apply_solvent_subtraction(
             return np.asarray(coef[:-1], dtype=float), float(coef[-1])
         return np.asarray(coef, dtype=float), 0.0
 
-    def _evaluate_reference(ref_spec: Spectrum) -> dict[str, Any] | None:
+    def _evaluate_reference(ref_spec: Spectrum) -> dict[str, Any]:
+        def _empty_result(overlap_points: int) -> dict[str, Any]:
+            return {
+                "ref_spec": ref_spec,
+                "shift": 0.0,
+                "error": None,
+                "ref_matrix": None,
+                "fit_mask": None,
+                "coef": None,
+                "offset": 0.0,
+                "overlap_points": overlap_points,
+                "eligible": False,
+            }
+
         ref_axis = np.asarray(ref_spec.wavelength, dtype=float)
         limits = _axis_limits(ref_axis)
         if limits is None:
-            return None
+            return _empty_result(0)
         if shift_enabled:
             ref_min = limits[0] + shift_min
             ref_max = limits[1] + shift_max
@@ -538,10 +553,12 @@ def apply_solvent_subtraction(
         overlap_min = max(target_limits[0], ref_min)
         overlap_max = min(target_limits[1], ref_max)
         if overlap_min >= overlap_max:
-            return None
+            return _empty_result(0)
         overlap_mask = (x >= overlap_min) & (x <= overlap_max)
         if not np.any(overlap_mask):
-            return None
+            return _empty_result(0)
+        available_mask = overlap_mask & np.isfinite(y)
+        overlap_points_available = int(np.count_nonzero(available_mask))
 
         best: dict[str, Any] = {
             "shift": 0.0,
@@ -550,11 +567,15 @@ def apply_solvent_subtraction(
             "fit_mask": None,
             "coef": None,
             "offset": 0.0,
+            "overlap_points": 0,
         }
         for shift in candidates:
             ref_interp = _interp_reference(x, ref_spec, shift=shift)
             ref_matrix = ref_interp[:, None]
-            fit_mask = overlap_mask & np.isfinite(y) & np.isfinite(ref_interp)
+            fit_mask = available_mask & np.isfinite(ref_interp)
+            overlap_points = int(np.count_nonzero(fit_mask))
+            if overlap_points == 0:
+                continue
             coef, offset = _fit_coefficients(ref_matrix, fit_mask, ref_count=1)
             if coef is None:
                 continue
@@ -574,11 +595,14 @@ def apply_solvent_subtraction(
                         "fit_mask": fit_mask,
                         "coef": coef,
                         "offset": offset,
+                        "overlap_points": overlap_points,
                     }
                 )
-        if best["coef"] is None or best["ref_matrix"] is None or best["fit_mask"] is None:
-            return None
-        return {"ref_spec": ref_spec, **best}
+        has_fit = best["coef"] is not None and best["ref_matrix"] is not None and best["fit_mask"] is not None
+        if not has_fit:
+            return _empty_result(overlap_points_available)
+        eligible = best["overlap_points"] >= min_overlap_points
+        return {"ref_spec": ref_spec, "eligible": eligible, **best}
 
     candidate_scores = []
 
@@ -590,13 +614,19 @@ def apply_solvent_subtraction(
         return _normalize_identifier(reference_meta.get("reference_name"))
 
     selected = None
+    evaluated_candidates = 0
+    low_overlap_rejections = 0
+    eligible_candidates = 0
     if len(ref_specs) > 1:
         best_rmse = None
+        best_overlap_points = None
         for ref in ref_specs:
             result = _evaluate_reference(ref)
-            if result is None or result["error"] is None:
-                continue
-            rmse = float(np.sqrt(result["error"]))
+            evaluated_candidates += 1
+            overlap_points = int(result.get("overlap_points") or 0)
+            if overlap_points < min_overlap_points:
+                low_overlap_rejections += 1
+            rmse = float(np.sqrt(result["error"])) if result.get("error") is not None else None
             candidate_scores.append(
                 {
                     "reference_id": _candidate_reference_id(ref),
@@ -604,29 +634,98 @@ def apply_solvent_subtraction(
                     "shift": float(result["shift"]),
                     "scale": float(result["coef"][0]) if result["coef"] is not None else None,
                     "offset": float(result["offset"]) if offset_used else None,
+                    "overlap_points": overlap_points,
                 }
             )
-            if best_rmse is None or rmse < best_rmse:
+            if not result.get("eligible") or rmse is None:
+                continue
+            eligible_candidates += 1
+            if (
+                best_rmse is None
+                or rmse < best_rmse - rmse_tolerance
+                or (
+                    best_rmse is not None
+                    and abs(rmse - best_rmse) <= rmse_tolerance
+                    and (best_overlap_points is None or overlap_points > best_overlap_points)
+                )
+            ):
                 selected = result
                 best_rmse = rmse
+                best_overlap_points = overlap_points
         if selected is None:
+            warnings = []
+            if evaluated_candidates and low_overlap_rejections == evaluated_candidates:
+                warnings.append(
+                    f"All solvent references rejected due to low overlap "
+                    f"(min_overlap_points={min_overlap_points})."
+                )
+            if warnings:
+                meta = dict(spec.meta or {})
+                solvent_meta = dict(meta.get("solvent_subtraction") or {})
+                solvent_meta.update(
+                    {
+                        "enabled": False,
+                        "skipped": True,
+                        "skip_reason": "low_overlap",
+                        "candidate_scores": candidate_scores,
+                        "warning_thresholds": {"min_overlap_points": min_overlap_points},
+                        "warnings": warnings,
+                    }
+                )
+                meta["solvent_subtraction"] = solvent_meta
+                meta["solvent_subtracted"] = False
+                return Spectrum(
+                    wavelength=x.copy(),
+                    intensity=y.copy(),
+                    meta=meta,
+                )
             return spec
         ref_specs = [selected["ref_spec"]]
     else:
         selected = _evaluate_reference(ref_specs[0])
-        if selected is None:
+        evaluated_candidates = 1
+        overlap_points = int(selected.get("overlap_points") or 0)
+        if overlap_points < min_overlap_points:
+            low_overlap_rejections = 1
+        rmse = float(np.sqrt(selected["error"])) if selected.get("error") is not None else None
+        candidate_scores.append(
+            {
+                "reference_id": _candidate_reference_id(ref_specs[0]),
+                "rmse": rmse,
+                "shift": float(selected["shift"]),
+                "scale": float(selected["coef"][0]) if selected["coef"] is not None else None,
+                "offset": float(selected["offset"]) if offset_used else None,
+                "overlap_points": overlap_points,
+            }
+        )
+        if not selected.get("eligible"):
+            warnings = []
+            if low_overlap_rejections:
+                warnings.append(
+                    f"Solvent reference rejected due to low overlap "
+                    f"(min_overlap_points={min_overlap_points})."
+                )
+            if warnings:
+                meta = dict(spec.meta or {})
+                solvent_meta = dict(meta.get("solvent_subtraction") or {})
+                solvent_meta.update(
+                    {
+                        "enabled": False,
+                        "skipped": True,
+                        "skip_reason": "low_overlap",
+                        "candidate_scores": candidate_scores,
+                        "warning_thresholds": {"min_overlap_points": min_overlap_points},
+                        "warnings": warnings,
+                    }
+                )
+                meta["solvent_subtraction"] = solvent_meta
+                meta["solvent_subtracted"] = False
+                return Spectrum(
+                    wavelength=x.copy(),
+                    intensity=y.copy(),
+                    meta=meta,
+                )
             return spec
-        if selected["error"] is not None:
-            rmse = float(np.sqrt(selected["error"]))
-            candidate_scores.append(
-                {
-                    "reference_id": _candidate_reference_id(ref_specs[0]),
-                    "rmse": rmse,
-                    "shift": float(selected["shift"]),
-                    "scale": float(selected["coef"][0]) if selected["coef"] is not None else None,
-                    "offset": float(selected["offset"]) if offset_used else None,
-                }
-            )
 
     ref_count = len(ref_specs)
     best = selected
@@ -730,7 +829,7 @@ def apply_solvent_subtraction(
         },
     }
     warning_thresholds = {
-        "min_overlap_points": 10,
+        "min_overlap_points": min_overlap_points,
         "max_negative_fraction": 0.1,
         "max_derivative_corr_abs": 0.7,
         "max_condition_number": 1.0e6,

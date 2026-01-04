@@ -146,13 +146,19 @@ that processed traces remain representative of their raw counterparts:
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability. When multiple
   solvent references are selected (or the multi-reference option is enabled),
   the pipeline evaluates each reference individually and chooses the fit with
-  the lowest RMSE for subtraction (ties resolve to the earliest reference in
-  the input list). Shift compensation, scale, and offset fitting are applied to
-  every candidate before the RMSE comparison. The per-reference fit details
-  (reference identifier, RMSE, shift, scale, and offset) are captured in
-  `meta["solvent_subtraction"]["candidate_scores"]` so debugging and audits can
-  review every candidate considered, matching the recipe editor option to
-  select the best reference by RMSE.
+  the lowest RMSE for subtraction once a minimum overlap coverage requirement
+  is satisfied; candidates that fall below the overlap threshold are excluded
+  from selection so the chosen reference remains representative of the sample.
+  If RMSEs are within a small tolerance, the selection prefers the candidate
+  with the larger overlap. Shift compensation, scale, and offset fitting are
+  applied to every candidate before the RMSE comparison. The per-reference fit
+  details (reference identifier, RMSE, shift, scale, offset, and overlap
+  points) are captured in `meta["solvent_subtraction"]["candidate_scores"]` so
+  debugging and audits can review every candidate considered, matching the
+  recipe editor option to select the best reference by RMSE. When all
+  candidates are rejected due to insufficient overlap, the solvent subtraction
+  metadata records a warning explaining that the overlap requirement was not
+  met and the subtraction was skipped.
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
   per-spectrum pipeline in multiprocessing when multiple spectra are queued and
   more than one worker is available. The
