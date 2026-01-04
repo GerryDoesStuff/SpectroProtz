@@ -146,25 +146,25 @@ that processed traces remain representative of their raw counterparts:
   `meta["solvent_subtraction"]["candidate_scores"]` so debugging and audits can
   review every candidate considered, matching the recipe editor option to
   select the best reference by RMSE.
-- **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
-  per-spectrum pipeline by configuring a `multiprocessing` block in the recipe
-  (`enabled`, `workers`, `chunk_size`, `max_tasks_per_child`). The pipeline
-  builds explicit per-spectrum tasks (recipe snapshot + axis metadata + sample
-  data) and executes them in a spawn-safe process pool so coerce-domain,
-  stitching, join correction, despiking, blank subtraction, baseline correction,
-  solvent subtraction, smoothing, and peak detection all run in subprocesses.
-  Results are reassembled in input order for deterministic outputs, with any
-  failed spectrum tasks omitted from the final result set so partial success is
-  still returned. Worker tasks capture exceptions (type/message/stack trace) and
-  the main process logs each failure alongside the spectrum ID/path in the same
-  log folder exposed by **Tools → Open Log Folder**, then continues processing
-  the remaining spectra. Solvent-subtraction exceptions are logged similarly and
-  fall back to the original pre-solvent spectrum for that entry, with a warning
-  summarizing how many spectra failed solvent subtraction at the end of the run.
-  Multiprocessing is enabled by default for FTIR runs with a worker count of
-  `min(4, os.cpu_count())`, while `chunk_size` batches multiple spectra per
-  worker submission and `max_tasks_per_child` can recycle processes to limit
-  long-lived memory growth. Set `enabled: false` or `workers: 1` to opt out.
+- **Parallel per-spectrum FTIR processing.** FTIR batches always fan out the full
+  per-spectrum pipeline whenever there is more than one spectrum and the worker
+  count is greater than 1. The pipeline builds explicit per-spectrum tasks
+  (recipe snapshot + axis metadata + sample data) and executes them in a
+  spawn-safe process pool so coerce-domain, stitching, join correction,
+  despiking, blank subtraction, baseline correction, solvent subtraction,
+  smoothing, and peak detection all run in subprocesses. Results are reassembled
+  in input order for deterministic outputs, with any failed spectrum tasks
+  omitted from the final result set so partial success is still returned. Worker
+  tasks capture exceptions (type/message/stack trace) and the main process logs
+  each failure alongside the spectrum ID/path in the same log folder exposed by
+  **Tools → Open Log Folder**, then continues processing the remaining spectra.
+  Solvent-subtraction exceptions are logged similarly and fall back to the
+  original pre-solvent spectrum for that entry, with a warning summarizing how
+  many spectra failed solvent subtraction at the end of the run. FTIR
+  multiprocessing defaults to a worker count of `min(4, os.cpu_count())`, while
+  `chunk_size` batches multiple spectra per worker submission and
+  `max_tasks_per_child` can recycle processes to limit long-lived memory growth.
+  Set `workers: 1` to keep processing on the main process.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
