@@ -337,6 +337,8 @@ def _coerce_optional_positive_int(value: Any) -> int | None:
 def _resolve_multiprocessing_settings(
     recipe: Mapping[str, Any],
     solvent_cfg: Mapping[str, Any],
+    *,
+    module_id: str = "",
 ) -> tuple[bool, int, int | None, int | None]:
     multiprocessing_cfg = recipe.get("multiprocessing")
     if not isinstance(multiprocessing_cfg, Mapping):
@@ -351,7 +353,10 @@ def _resolve_multiprocessing_settings(
         enabled = legacy_parallel_cfg.get("enabled")
     if enabled is None and "use_multiprocessing" in solvent_cfg:
         enabled = solvent_cfg.get("use_multiprocessing")
-    parallel_enabled = bool(enabled) if enabled is not None else True
+    if str(module_id).strip().lower() == "ftir":
+        parallel_enabled = True
+    else:
+        parallel_enabled = bool(enabled) if enabled is not None else True
 
     workers_value = multiprocessing_cfg.get("workers")
     if workers_value is None:
@@ -1298,12 +1303,11 @@ def run_pipeline(
         on_item_processed(index + 1, total_items, spectrum_id)
         reported_indices.add(index)
     processed: List[Spectrum] = []
-    parallel_enabled, parallel_workers, chunk_size, max_tasks_per_child = _resolve_multiprocessing_settings(
-        recipe, solvent_cfg
+    _parallel_enabled, parallel_workers, chunk_size, max_tasks_per_child = _resolve_multiprocessing_settings(
+        recipe, solvent_cfg, module_id=module_id
     )
     run_parallel = (
         module_id == "ftir"
-        and parallel_enabled
         and len(per_spectrum_tasks) > 1
         and parallel_workers > 1
     )
