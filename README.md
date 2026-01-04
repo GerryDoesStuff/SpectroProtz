@@ -120,6 +120,16 @@ future selections reflect the updated information. The edit action stays
 disabled until a list entry is selected, and selecting a reference refreshes the
 detail pane immediately.
 
+## Peak detection variable fields
+The recipe editor’s **Peak detection** panel now includes an **Edit variable
+fields…** button for attaching custom name/value pairs to peak detection
+outputs. Use this window to capture operator notes, batch identifiers, or other
+context that should travel with detected peaks; each row represents one field
+name and its corresponding value. The dialog opens from the Peak detection
+section and stores the entered fields directly into the recipe under
+`features.peaks.variable_fields`, so the settings round-trip with presets and
+batch recipes.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:
