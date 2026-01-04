@@ -106,11 +106,11 @@ available in the **Reference** selector inside the recipe editor’s solvent
 subtraction panel.
 
 The solvent subtraction panel now includes selection controls for multi-
-reference fits: choose the selection metric (RMSE or pattern correlation),
-optionally constrain scoring to a wavenumber region, and adjust the region-
-weight slider/spin box to emphasize that band. These settings are stored in the
-recipe payload so preset exports and subsequent runs reuse the same selection
-criteria.
+reference fits: best-reference selection runs per spectrum, you can choose the
+selection metric (RMSE or pattern correlation), and optionally apply region
+weighting with a global coverage requirement plus a focused window to emphasize
+diagnostic bands. These settings are stored in the recipe payload so preset
+exports and subsequent runs reuse the same selection criteria.
 
 When you open **Select Solvent Reference**, the dialog lists stored entries,
 shows their metadata, and lets you browse a new file. Use **Edit Metadata…** to
@@ -152,25 +152,22 @@ that processed traces remain representative of their raw counterparts:
   The metadata channel records the edge handling strategy under
   `meta["solvent_subtraction"]["edge_strategy"]` for traceability. When multiple
   solvent references are selected (or the multi-reference option is enabled),
-  the pipeline evaluates each reference individually and chooses the fit with
-  the lowest RMSE for subtraction once a minimum overlap coverage requirement
-  is satisfied; candidates that fall below the overlap threshold are excluded
-  from selection so the chosen reference remains representative of the sample.
-  If RMSEs are within a small tolerance, the selection prefers the candidate
-  with the larger overlap. When the recipe sets
-  `solvent_subtraction.selection_metric` to `pattern_correlation`, the pipeline
-  instead compares the absolute correlation between each fitted reference
-  pattern and the overlap portion of the sample (after any fitted offset is
-  removed), selecting the strongest match. Shift compensation, scale, and
-  offset fitting are applied to every candidate before the metric comparison.
-  The per-reference fit details (reference identifier, RMSE, pattern
-  correlation, selection metric/score, shift, scale, offset, and overlap
-  points) are captured in `meta["solvent_subtraction"]["candidate_scores"]` so
-  debugging and audits can review every candidate considered, matching the
-  recipe editor option to select the best reference by RMSE or pattern
-  correlation. When all candidates are rejected due to insufficient overlap,
-  the solvent subtraction metadata records a warning explaining that the
-  overlap requirement was not met and the subtraction was skipped.
+  the pipeline evaluates each reference individually and chooses the best fit
+  per spectrum once a minimum overlap coverage requirement is satisfied;
+  candidates that fall below the overlap threshold are excluded from selection
+  so the chosen reference remains representative of the sample. The selection
+  metric can be RMSE or pattern correlation, and scoring can optionally blend
+  global overlap coverage with a weighted window so emphasized bands influence
+  the final rank. Shift compensation, scale, and offset fitting are applied to
+  every candidate before the metric comparison. The per-reference fit details
+  (reference identifier, RMSE, pattern correlation, selection metric/score,
+  shift, scale, offset, overlap points, and any region weighting settings) are
+  captured in `meta["solvent_subtraction"]["candidate_scores"]` so debugging and
+  audits can review every candidate considered, matching the recipe editor
+  option to select the best reference by RMSE or pattern correlation. When all
+  candidates are rejected due to insufficient overlap, the solvent subtraction
+  metadata records a warning explaining that the overlap requirement was not
+  met and the subtraction was skipped.
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
   per-spectrum pipeline in multiprocessing when multiple spectra are queued and
   more than one worker is available. The
