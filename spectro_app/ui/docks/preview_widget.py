@@ -363,29 +363,36 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     any_data = True
 
             features = dict(meta.get("features") or {})
+            axis_key = str(meta.get("axis_key") or meta.get("axis_type") or "wavelength").strip().lower()
+            if not axis_key:
+                axis_key = "wavelength"
             peaks_meta = features.get("peaks", [])
             if isinstance(peaks_meta, Sequence) and not isinstance(peaks_meta, (str, bytes)):
-                peak_wavelengths: List[float] = []
+                peak_axis_values: List[float] = []
                 peak_intensities: List[float] = []
                 for peak in peaks_meta:
                     if not isinstance(peak, dict):
                         continue
-                    wavelength = peak.get("wavelength")
+                    axis_value = peak.get(axis_key)
+                    if axis_value is None and axis_key != "wavelength":
+                        axis_value = peak.get("wavelength")
+                    if axis_value is None:
+                        axis_value = peak.get("center")
                     intensity_val = peak.get("intensity")
-                    if wavelength is None or intensity_val is None:
+                    if axis_value is None or intensity_val is None:
                         continue
                     try:
-                        wl_float = float(wavelength)
+                        axis_float = float(axis_value)
                         int_float = float(intensity_val)
                     except (TypeError, ValueError):
                         continue
-                    if not (np.isfinite(wl_float) and np.isfinite(int_float)):
+                    if not (np.isfinite(axis_float) and np.isfinite(int_float)):
                         continue
-                    peak_wavelengths.append(wl_float)
+                    peak_axis_values.append(axis_float)
                     peak_intensities.append(int_float)
-                if peak_wavelengths and peak_intensities:
+                if peak_axis_values and peak_intensities:
                     self._all_peak_points[label] = (
-                        np.asarray(peak_wavelengths, dtype=float),
+                        np.asarray(peak_axis_values, dtype=float),
                         np.asarray(peak_intensities, dtype=float),
                     )
 

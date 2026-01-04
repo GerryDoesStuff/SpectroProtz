@@ -210,6 +210,12 @@ that processed traces remain representative of their raw counterparts:
   peak section or explicitly disables it, the pipeline skips peak detection and
   leaves the spectrum metadata unchanged, preventing defaults from silently
   inserting peak annotations.
+- **Peak overlays follow spectrum axes.** When peak markers are available in
+  `meta["features"]["peaks"]`, the preview plot reads the spectrum axis key
+  from `meta["axis_key"]` (or `meta["axis_type"]`) to decide which coordinate
+  to plot. Wavelength spectra continue to use the `wavelength` peak field,
+  while wavenumber spectra use `wavenumber`, keeping peak markers aligned with
+  whichever axis the spectrum declares.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
