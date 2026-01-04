@@ -1299,6 +1299,8 @@ def run_pipeline(
     def _report_progress(index: int) -> None:
         if on_item_processed is None:
             return
+        if index in reported_indices:
+            return
         spectrum_id = _spectrum_identifier(samples[index], index)
         on_item_processed(index + 1, total_items, spectrum_id)
         reported_indices.add(index)
@@ -1366,6 +1368,8 @@ def run_pipeline(
                 task_failure_count += 1
                 continue
             processed.append(_spectrum_from_payload(spectrum_payload))
+        for idx in range(total_items):
+            _report_progress(idx)
     else:
         for task in per_spectrum_tasks:
             result = _process_spectrum_task(task)
@@ -1389,8 +1393,7 @@ def run_pipeline(
                     task_failure_count += 1
                 else:
                     processed.append(_spectrum_from_payload(spectrum_payload))
-            if task["index"] not in reported_indices:
-                _report_progress(task["index"])
+            _report_progress(task["index"])
 
     drift_map = qc_engine.compute_uvvis_drift_map(processed, recipe)
     qc_rows = [
