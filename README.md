@@ -141,7 +141,10 @@ that processed traces remain representative of their raw counterparts:
   independently (including shift compensation and scaling), computes the RMSE on
   the overlap region for the best shift candidate, and then selects the single
   reference with the lowest RMSE for subtraction (ties resolve to the earliest
-  reference in the input list).
+  reference in the input list). The per-reference fit details (reference
+  identifier, RMSE, shift, scale, and offset) are captured in
+  `meta["solvent_subtraction"]["candidate_scores"]` so debugging and audits can
+  review every candidate considered.
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
   per-spectrum pipeline by configuring a `multiprocessing` block in the recipe
   (`enabled`, `workers`, `chunk_size`, `max_tasks_per_child`). The pipeline

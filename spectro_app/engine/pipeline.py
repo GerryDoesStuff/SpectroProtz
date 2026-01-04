@@ -575,6 +575,15 @@ def apply_solvent_subtraction(
             return None
         return {"ref_spec": ref_spec, **best}
 
+    candidate_scores = []
+
+    def _candidate_reference_id(ref_spec: Spectrum) -> str | None:
+        ident = _reference_identifier(ref_spec)
+        if ident:
+            return ident
+        reference_meta = dict(ref_spec.meta or {})
+        return _normalize_identifier(reference_meta.get("reference_name"))
+
     selected = None
     if len(ref_specs) > 1:
         best_rmse = None
@@ -583,6 +592,15 @@ def apply_solvent_subtraction(
             if result is None or result["error"] is None:
                 continue
             rmse = float(np.sqrt(result["error"]))
+            candidate_scores.append(
+                {
+                    "reference_id": _candidate_reference_id(ref),
+                    "rmse": rmse,
+                    "shift": float(result["shift"]),
+                    "scale": float(result["coef"][0]) if result["coef"] is not None else None,
+                    "offset": float(result["offset"]) if offset_used else None,
+                }
+            )
             if best_rmse is None or rmse < best_rmse:
                 selected = result
                 best_rmse = rmse
@@ -593,6 +611,17 @@ def apply_solvent_subtraction(
         selected = _evaluate_reference(ref_specs[0])
         if selected is None:
             return spec
+        if selected["error"] is not None:
+            rmse = float(np.sqrt(selected["error"]))
+            candidate_scores.append(
+                {
+                    "reference_id": _candidate_reference_id(ref_specs[0]),
+                    "rmse": rmse,
+                    "shift": float(selected["shift"]),
+                    "scale": float(selected["coef"][0]) if selected["coef"] is not None else None,
+                    "offset": float(selected["offset"]) if offset_used else None,
+                }
+            )
 
     ref_count = len(ref_specs)
     best = selected
@@ -763,6 +792,7 @@ def apply_solvent_subtraction(
             "reference_id": reference_id or (ref_ids[0] if len(ref_ids) == 1 else None),
             "reference_ids": ref_ids if len(ref_ids) > 1 else None,
             "reference_count": int(ref_count),
+            "candidate_scores": candidate_scores,
             "scale_input": float(scale) if scale is not None else None,
             "scale": float(coef[0]) if coef is not None and coef.size == 1 else None,
             "coefficients": [float(val) for val in coef] if coef is not None and coef.size > 1 else None,
