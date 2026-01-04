@@ -31,49 +31,46 @@ def _close_event():
     return QtGui.QCloseEvent()
 
 
-def test_close_event_cancel_job_requests_cancel(main_window):
+def test_close_event_cancel_job_allows_exit(main_window):
     main_window.appctx.set_job_running(True)
 
     called = {}
 
     def fake_prompt():
-        return "cancel"
+        return True
 
     def fake_cancel():
         called["cancelled"] = True
-
-    main_window._prompt_job_running_action = fake_prompt
-    main_window.on_cancel = fake_cancel
-    event = _close_event()
-
-    main_window.closeEvent(event)
-
-    assert called == {"cancelled": True}
-    assert not event.isAccepted()
-    assert main_window.appctx.is_job_running()
-
-
-def test_close_event_force_stop_allows_close(main_window):
-    main_window.appctx.set_job_running(True)
-
-    cancelled = {}
-
-    def fake_prompt():
-        return "force"
-
-    def fake_cancel_job():
-        cancelled["runctl"] = True
         return True
 
     main_window._prompt_job_running_action = fake_prompt
-    main_window.runctl.cancel = fake_cancel_job
+    main_window.runctl.cancel = fake_cancel
+    main_window.runctl.pool.waitForDone = lambda: called.setdefault("waited", True)
     event = _close_event()
 
     main_window.closeEvent(event)
 
-    assert cancelled == {"runctl": True}
-    assert main_window.appctx.is_job_running() is False
+    assert called == {"cancelled": True, "waited": True}
     assert event.isAccepted()
+    assert main_window.appctx.is_job_running() is False
+
+
+def test_close_event_job_prompt_abort(main_window):
+    main_window.appctx.set_job_running(True)
+
+    called = {}
+
+    def fake_prompt():
+        return False
+
+    main_window._prompt_job_running_action = fake_prompt
+    event = _close_event()
+
+    main_window.closeEvent(event)
+
+    assert called == {}
+    assert main_window.appctx.is_job_running() is True
+    assert not event.isAccepted()
 
 
 def test_close_event_dirty_save(main_window):

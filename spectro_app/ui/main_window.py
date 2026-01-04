@@ -1099,17 +1099,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"Opened log folder: {log_dir}", 5000)
 
     def closeEvent(self, e):
-        if self.appctx.is_job_running():
-            job_action = self._prompt_job_running_action()
-            if job_action == "cancel":
-                self.on_cancel()
-                e.ignore()
-                return
-            if job_action != "force":
+        job_running = self.appctx.is_job_running() or self.runctl.is_running()
+        if job_running:
+            if not self._prompt_job_running_action():
                 e.ignore()
                 return
             if self.runctl.cancel():
-                self.status.showMessage("Force stopping job...", 5000)
+                self.status.showMessage("Cancelling job before exit...", 5000)
             self._job_running = False
             self.appctx.set_job_running(False)
 
@@ -1127,30 +1123,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.appctx.set_dirty(False)
 
         self.save_state()
+        self.runctl.pool.waitForDone()
         super().closeEvent(e)
 
-    def _prompt_job_running_action(self) -> str:
+    def _prompt_job_running_action(self) -> bool:
         box = QtWidgets.QMessageBox(self)
         box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         box.setWindowTitle("Job Running")
-        box.setText(
-            "A processing job is currently running. Choose an option to continue."
+        box.setText("A job is still running. Cancel and exit?")
+        cancel_exit = box.addButton(
+            "Cancel and Exit", QtWidgets.QMessageBox.ButtonRole.AcceptRole
         )
-        cancel_job = box.addButton(
-            "Cancel Job", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        stay_open = box.addButton(
+            "Stay Open", QtWidgets.QMessageBox.ButtonRole.RejectRole
         )
-        force_stop = box.addButton(
-            "Force Stop", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
-        )
-        stay_open = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(stay_open)
         box.exec()
-        clicked = box.clickedButton()
-        if clicked == cancel_job:
-            return "cancel"
-        if clicked == force_stop:
-            return "force"
-        return "abort"
+        return box.clickedButton() == cancel_exit
 
     def _prompt_unsaved_changes(self) -> str:
         box = QtWidgets.QMessageBox(self)

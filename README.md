@@ -12,6 +12,9 @@ During batch runs, the main window keeps the status bar and log panel updated
 with per-spectrum progress messages (including the spectrum ID when available)
 so operators can see each spectrum complete in real time alongside the overall
 progress bar, which also surfaces the running spectrum counts.
+When closing the application, SpectroProtz warns if a processing job is still
+running, cancels the job on request, and waits for background thread-pool work
+to finish before the UI is destroyed to avoid leaving silent work in flight.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in
