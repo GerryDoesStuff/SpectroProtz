@@ -498,7 +498,13 @@ class UvVisPlugin(SpectroscopyPlugin):
             for p in paths
         )
 
-    def load(self, paths: Iterable[str]) -> List[Spectrum]:
+    def load(
+        self, paths: Iterable[str], cancelled=None
+    ) -> List[Spectrum]:
+        def _raise_if_cancelled() -> None:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelled")
+
         self._reset_report_context()
         spectra: List[Spectrum] = []
         path_objects = [Path(p) for p in paths]
@@ -522,6 +528,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         )
 
         for path_str in paths:
+            _raise_if_cancelled()
             path = Path(path_str)
             is_manifest = self._is_manifest_file(path)
             if is_manifest and manifest_allowed:
@@ -546,6 +553,7 @@ class UvVisPlugin(SpectroscopyPlugin):
         manifest_lookup_hits = 0
         blank_count = 0
         for path in data_paths:
+            _raise_if_cancelled()
             suffix = path.suffix.lower()
             file_records: List[Dict[str, object]]
 
@@ -566,6 +574,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                 raise ValueError(f"Unsupported UV-Vis file type: {suffix}")
 
             for record in file_records:
+                _raise_if_cancelled()
                 wl = np.asarray(record["wavelength"], dtype=float)
                 inten = np.asarray(record["intensity"], dtype=float)
                 meta = dict(record.get("meta", {}))
@@ -634,6 +643,7 @@ class UvVisPlugin(SpectroscopyPlugin):
                     manifest_index_hits += 1
                 if lookup_hit:
                     manifest_lookup_hits += 1
+            _raise_if_cancelled()
 
         ingestion_ctx["manifest_entry_count"] = len(manifest_entries) if manifest_allowed else 0
         ingestion_ctx["manifest_index_hits"] = (

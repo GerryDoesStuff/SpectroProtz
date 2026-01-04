@@ -11,7 +11,9 @@ class PeesPlugin(SpectroscopyPlugin):
     def detect(self, paths):
         return any(str(p).lower().endswith((".csv", ".txt")) for p in paths)
 
-    def load(self, paths):
+    def load(self, paths, cancelled=None):
+        if cancelled is not None and cancelled():
+            raise RuntimeError("Cancelled")
         x = np.linspace(0, 1, 1001)
         y = np.zeros_like(x)
         return [Spectrum(wavelength=x, intensity=y, meta={"source": "stub"})]

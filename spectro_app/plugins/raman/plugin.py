@@ -15,11 +15,15 @@ class RamanPlugin(SpectroscopyPlugin):
             for p in paths
         )
 
-    def load(self, paths):
+    def load(self, paths, cancelled=None):
         spectra = []
         for path in paths:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelled")
             if is_opus_path(path):
                 spectra.extend(load_opus_spectra(path, technique="raman"))
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelled")
         if spectra:
             return spectra
         wn = np.linspace(100, 3500, 3401)

@@ -13,13 +13,17 @@ class FtirPlugin(SpectroscopyPlugin):
             for p in paths
         )
 
-    def load(self, paths):
+    def load(self, paths, cancelled=None):
         spectra = []
         for path in paths:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelled")
             if is_opus_path(path):
                 # Allow load_opus_spectra errors to propagate so callers can
                 # surface the real parsing failure.
                 spectra.extend(load_opus_spectra(path, technique="ftir"))
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelled")
         if not spectra:
             raise ValueError("No OPUS spectra were loaded from the provided paths.")
         return spectra
