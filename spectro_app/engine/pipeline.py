@@ -940,13 +940,18 @@ def _select_blank(
 def _detect_peaks(spec: Spectrum, recipe: Dict[str, Any], axis: AxisAdapter) -> Spectrum:
     features_cfg = dict(recipe.get("features", {})) if recipe else {}
     peak_cfg = dict(features_cfg.get("peaks", {}))
+    meta = spec.meta if isinstance(spec.meta, Mapping) else {}
+    file_path = meta.get("source_path") or meta.get("source_file")
+    spectrum_id = meta.get("id") or meta.get("label") or _spectrum_identifier(spec, 0)
     peaks = detect_peaks_for_features(
         np.asarray(spec.wavelength, dtype=float),
         np.asarray(spec.intensity, dtype=float),
         resolve_peak_config(peak_cfg),
         axis_key=axis.axis_key,
+        file_path=str(file_path) if file_path else None,
+        spectrum_id=spectrum_id,
     )
-    meta = dict(spec.meta or {})
+    meta = dict(meta)
     meta.setdefault("features", {})
     meta["features"]["peaks"] = peaks
     return Spectrum(

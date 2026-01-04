@@ -2373,7 +2373,7 @@ def detect_and_refine_with_retries(
     y_abs: np.ndarray | None = None,
     resolution_cm: float | None = None,
     file_path: str | None = None,
-    spectrum_id: int | None = None,
+    spectrum_id: str | int | None = None,
     fit_errors: Optional[List[Dict[str, object]]] = None,
     progress_callback: Optional[callable] = None,
     min_peaks: int = 2,
@@ -2495,6 +2495,8 @@ def detect_peaks_for_features(
     *,
     axis_key: str = "wavelength",
     resolution_cm: float | None = None,
+    file_path: str | None = None,
+    spectrum_id: str | int | None = None,
 ) -> List[Dict[str, object]]:
     config = resolve_peak_config(peak_cfg)
     if not bool(config.get("enabled", True)):
@@ -2521,6 +2523,8 @@ def detect_peaks_for_features(
         config,
         y_abs=y,
         resolution_cm=resolution_cm,
+        file_path=file_path,
+        spectrum_id=spectrum_id,
         min_peaks=1,
     )
     return build_peak_features(
