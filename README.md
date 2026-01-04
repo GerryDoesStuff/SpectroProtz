@@ -134,7 +134,12 @@ that processed traces remain representative of their raw counterparts:
   reference remains finite at the sample boundaries, allowing subtraction across
   the full sample range while keeping fit diagnostics scoped to the true overlap.
   The metadata channel records the edge handling strategy under
-  `meta["solvent_subtraction"]["edge_strategy"]` for traceability.
+  `meta["solvent_subtraction"]["edge_strategy"]` for traceability. When multiple
+  solvent references are configured, the pipeline evaluates each reference
+  independently (including shift compensation and scaling), computes the RMSE on
+  the overlap region for the best shift candidate, and then selects the single
+  reference with the lowest RMSE for subtraction (ties resolve to the earliest
+  reference in the input list).
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
   per-spectrum pipeline by configuring a `multiprocessing` block in the recipe
   (`enabled`, `workers`, `chunk_size`, `max_tasks_per_child`). The pipeline

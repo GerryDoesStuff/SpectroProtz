@@ -25,14 +25,19 @@ def test_solvent_subtraction_recovers_scale_single_reference():
     spec = _spectrum(x, target, meta={"role": "sample"})
     ref_spec = _spectrum(x, ref, meta={"reference_id": "solvent-a"})
 
-    corrected = apply_solvent_subtraction(spec, ref_spec, fit_scale=True)
+    corrected = apply_solvent_subtraction(
+        spec,
+        ref_spec,
+        fit_scale=True,
+        shift_compensation={"enabled": False},
+    )
     solvent_meta = corrected.meta["solvent_subtraction"]
 
     assert solvent_meta["scale"] == pytest.approx(scale, rel=1e-2, abs=2e-3)
     assert solvent_meta["reference_id"] == "solvent-a"
 
 
-def test_solvent_subtraction_recovers_coefficients_multi_reference():
+def test_solvent_subtraction_selects_best_reference_multi_reference():
     x = np.linspace(1000.0, 1100.0, 201)
     ref_a = _gaussian(x, 1020.0, 4.0, amp=1.0)
     ref_b = _gaussian(x, 1085.0, 5.5, amp=0.9)
@@ -40,8 +45,8 @@ def test_solvent_subtraction_recovers_coefficients_multi_reference():
     rng = np.random.default_rng(7)
     noise = rng.normal(0.0, 0.001, size=x.size)
 
-    coef_a, coef_b = 0.55, 1.15
-    target = coef_a * ref_a + coef_b * ref_b + solute + noise
+    coef_a = 0.55
+    target = coef_a * ref_a + solute + noise
     spec = _spectrum(x, target, meta={"role": "sample"})
     ref_specs = [
         _spectrum(x, ref_a, meta={"reference_id": "ref-a"}),
@@ -50,8 +55,27 @@ def test_solvent_subtraction_recovers_coefficients_multi_reference():
 
     corrected = apply_solvent_subtraction(spec, ref_specs, fit_scale=True)
     solvent_meta = corrected.meta["solvent_subtraction"]
-    assert solvent_meta["coefficients"] == pytest.approx([coef_a, coef_b], rel=2e-2, abs=2e-3)
-    assert solvent_meta["reference_count"] == 2
+    assert solvent_meta["reference_id"] == "ref-a"
+    assert solvent_meta["reference_count"] == 1
+    assert solvent_meta["scale"] == pytest.approx(coef_a, rel=2e-2, abs=2e-3)
+    assert solvent_meta["coefficients"] is None
+
+
+def test_solvent_subtraction_prefers_first_reference_on_tie():
+    x = np.linspace(1000.0, 1100.0, 201)
+    ref = _gaussian(x, 1040.0, 4.5, amp=1.0)
+    solute = _gaussian(x, 1070.0, 3.0, amp=0.2)
+
+    target = 0.8 * ref + solute
+    spec = _spectrum(x, target, meta={"role": "sample"})
+    ref_specs = [
+        _spectrum(x, ref, meta={"reference_id": "ref-first"}),
+        _spectrum(x, ref, meta={"reference_id": "ref-second"}),
+    ]
+
+    corrected = apply_solvent_subtraction(spec, ref_specs, fit_scale=True)
+    solvent_meta = corrected.meta["solvent_subtraction"]
+    assert solvent_meta["reference_id"] == "ref-first"
 
 
 def test_solvent_subtraction_recovers_shift():
@@ -87,10 +111,20 @@ def test_solvent_subtraction_handles_partial_overlap():
     spec = _spectrum(x, target, meta={"role": "sample"})
     ref_spec = _spectrum(ref_x, ref, meta={"reference_id": "partial"})
 
-    corrected = apply_solvent_subtraction(spec, ref_spec, fit_scale=True)
+    corrected = apply_solvent_subtraction(
+        spec,
+        ref_spec,
+        fit_scale=True,
+        shift_compensation={"enabled": False},
+    )
 
     overlap_mask = np.isfinite(ref_interp)
-    assert np.allclose(corrected.intensity[~overlap_mask], target[~overlap_mask])
+    assert np.allclose(
+        corrected.intensity[~overlap_mask],
+        target[~overlap_mask],
+        atol=1.0e-5,
+        rtol=0.0,
+    )
     assert corrected.meta["solvent_subtraction"]["overlap_points"] == int(np.count_nonzero(overlap_mask))
 
 
