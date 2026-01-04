@@ -164,7 +164,11 @@ that processed traces remain representative of their raw counterparts:
   multiprocessing defaults to a worker count of `min(4, os.cpu_count())`, while
   `chunk_size` batches multiple spectra per worker submission and
   `max_tasks_per_child` can recycle processes to limit long-lived memory growth.
-  Set `workers: 1` to keep processing on the main process.
+  The per-spectrum progress callback fires for every completed spectrum even
+  when multiprocessing is active or when processing falls back to the main
+  process (for example with a single spectrum or `workers: 1`), ensuring the UI
+  continues to log each finished item. Set `workers: 1` to keep processing on
+  the main process.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
