@@ -102,7 +102,9 @@ When you open **Select Solvent Reference**, the dialog lists stored entries,
 shows their metadata, and lets you browse a new file. Use **Edit Metadata…** to
 update the name, tags, metadata fields, or default status of an existing
 reference; changes are saved back to the solvent reference store immediately so
-future selections reflect the updated information.
+future selections reflect the updated information. The edit action stays
+disabled until a list entry is selected, and selecting a reference refreshes the
+detail pane immediately.
 
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
