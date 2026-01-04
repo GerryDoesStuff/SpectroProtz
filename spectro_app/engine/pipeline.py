@@ -462,14 +462,6 @@ def apply_solvent_subtraction(
     target_limits = _axis_limits(x)
     if target_limits is None:
         return spec
-    ref_limits = []
-    for ref in ref_specs:
-        ref_axis = np.asarray(ref.wavelength, dtype=float)
-        limits = _axis_limits(ref_axis)
-        if limits is None:
-            return spec
-        ref_limits.append(limits)
-
     shift_cfg = dict(shift_compensation or {})
     shift_enabled = bool(shift_cfg.get("enabled", True))
     shift_min = float(shift_cfg.get("min", -2.0))
@@ -479,22 +471,7 @@ def apply_solvent_subtraction(
         shift_min, shift_max = shift_max, shift_min
     if shift_step <= 0:
         shift_step = 0.1
-    if shift_enabled:
-        ref_min_candidates = [limits[0] + shift_min for limits in ref_limits]
-        ref_max_candidates = [limits[1] + shift_max for limits in ref_limits]
-    else:
-        ref_min_candidates = [limits[0] for limits in ref_limits]
-        ref_max_candidates = [limits[1] for limits in ref_limits]
-    overlap_min = max([target_limits[0]] + ref_min_candidates)
-    overlap_max = min([target_limits[1]] + ref_max_candidates)
-    if overlap_min >= overlap_max:
-        return spec
 
-    overlap_mask = (x >= overlap_min) & (x <= overlap_max)
-    if not np.any(overlap_mask):
-        return spec
-
-    ref_count = len(ref_specs)
     offset_used = bool(include_offset)
     if shift_enabled:
         candidates = np.arange(shift_min, shift_max + (shift_step / 2.0), shift_step)
@@ -504,7 +481,7 @@ def apply_solvent_subtraction(
         candidates = np.array([0.0], dtype=float)
 
     def _fit_coefficients(
-        ref_matrix: np.ndarray, fit_mask: np.ndarray
+        ref_matrix: np.ndarray, fit_mask: np.ndarray, *, ref_count: int
     ) -> tuple[np.ndarray | None, float]:
         if not np.any(fit_mask):
             return None, 0.0
@@ -542,46 +519,83 @@ def apply_solvent_subtraction(
             return np.asarray(coef[:-1], dtype=float), float(coef[-1])
         return np.asarray(coef, dtype=float), 0.0
 
-    best = {
-        "shift": 0.0,
-        "error": None,
-        "ref_matrix": None,
-        "fit_mask": None,
-        "coef": None,
-        "offset": 0.0,
-    }
-    for shift in candidates:
-        ref_interp_list = [_interp_reference(x, ref, shift=shift) for ref in ref_specs]
-        ref_matrix = np.column_stack(ref_interp_list)
-        fit_mask = overlap_mask & np.isfinite(y)
-        if ref_matrix.shape[1] == 1:
-            fit_mask &= np.isfinite(ref_matrix[:, 0])
+    def _evaluate_reference(ref_spec: Spectrum) -> dict[str, Any] | None:
+        ref_axis = np.asarray(ref_spec.wavelength, dtype=float)
+        limits = _axis_limits(ref_axis)
+        if limits is None:
+            return None
+        if shift_enabled:
+            ref_min = limits[0] + shift_min
+            ref_max = limits[1] + shift_max
         else:
-            fit_mask &= np.all(np.isfinite(ref_matrix), axis=1)
-        coef, offset = _fit_coefficients(ref_matrix, fit_mask)
-        if coef is None:
-            continue
-        fitted = ref_matrix @ coef
-        if offset_used:
-            fitted = fitted + offset
-        residual = y[fit_mask] - fitted[fit_mask]
-        error = float(np.mean(residual * residual)) if residual.size else None
-        if error is None:
-            continue
-        if best["error"] is None or error < best["error"]:
-            best.update(
-                {
-                    "shift": float(shift),
-                    "error": error,
-                    "ref_matrix": ref_matrix,
-                    "fit_mask": fit_mask,
-                    "coef": coef,
-                    "offset": offset,
-                }
-            )
+            ref_min = limits[0]
+            ref_max = limits[1]
+        overlap_min = max(target_limits[0], ref_min)
+        overlap_max = min(target_limits[1], ref_max)
+        if overlap_min >= overlap_max:
+            return None
+        overlap_mask = (x >= overlap_min) & (x <= overlap_max)
+        if not np.any(overlap_mask):
+            return None
 
-    if best["coef"] is None or best["ref_matrix"] is None or best["fit_mask"] is None:
-        return spec
+        best: dict[str, Any] = {
+            "shift": 0.0,
+            "error": None,
+            "ref_matrix": None,
+            "fit_mask": None,
+            "coef": None,
+            "offset": 0.0,
+        }
+        for shift in candidates:
+            ref_interp = _interp_reference(x, ref_spec, shift=shift)
+            ref_matrix = ref_interp[:, None]
+            fit_mask = overlap_mask & np.isfinite(y) & np.isfinite(ref_interp)
+            coef, offset = _fit_coefficients(ref_matrix, fit_mask, ref_count=1)
+            if coef is None:
+                continue
+            fitted = ref_matrix @ coef
+            if offset_used:
+                fitted = fitted + offset
+            residual = y[fit_mask] - fitted[fit_mask]
+            if residual.size == 0:
+                continue
+            error = float(np.mean(residual * residual))
+            if best["error"] is None or error < best["error"]:
+                best.update(
+                    {
+                        "shift": float(shift),
+                        "error": error,
+                        "ref_matrix": ref_matrix,
+                        "fit_mask": fit_mask,
+                        "coef": coef,
+                        "offset": offset,
+                    }
+                )
+        if best["coef"] is None or best["ref_matrix"] is None or best["fit_mask"] is None:
+            return None
+        return {"ref_spec": ref_spec, **best}
+
+    selected = None
+    if len(ref_specs) > 1:
+        best_rmse = None
+        for ref in ref_specs:
+            result = _evaluate_reference(ref)
+            if result is None or result["error"] is None:
+                continue
+            rmse = float(np.sqrt(result["error"]))
+            if best_rmse is None or rmse < best_rmse:
+                selected = result
+                best_rmse = rmse
+        if selected is None:
+            return spec
+        ref_specs = [selected["ref_spec"]]
+    else:
+        selected = _evaluate_reference(ref_specs[0])
+        if selected is None:
+            return spec
+
+    ref_count = len(ref_specs)
+    best = selected
 
     ref_matrix = best["ref_matrix"]
     fit_mask = best["fit_mask"]
