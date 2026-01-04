@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -848,6 +849,65 @@ class RecipeEditorDock(QDockWidget):
             "the reference with the lowest RMSE is chosen. Candidate scores are "
             "recorded in metadata."
         )
+        self.solvent_selection_metric = QComboBox()
+        self.solvent_selection_metric.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.solvent_selection_metric.addItem("RMSE (global)", "rmse")
+        self.solvent_selection_metric.addItem(
+            "Pattern correlation", "pattern_correlation"
+        )
+        self.solvent_selection_metric.setToolTip(
+            "Metric used to select the best solvent reference when multiple "
+            "candidates are evaluated."
+        )
+
+        self.solvent_selection_region_min = QLineEdit()
+        self.solvent_selection_region_min.setPlaceholderText("Min cm⁻¹")
+        self.solvent_selection_region_min.setToolTip(
+            "Optional minimum wavenumber for reference selection scoring."
+        )
+        self.solvent_selection_region_min.setValidator(
+            QDoubleValidator(-99999.0, 99999.0, 6, self)
+        )
+        self.solvent_selection_region_max = QLineEdit()
+        self.solvent_selection_region_max.setPlaceholderText("Max cm⁻¹")
+        self.solvent_selection_region_max.setToolTip(
+            "Optional maximum wavenumber for reference selection scoring."
+        )
+        self.solvent_selection_region_max.setValidator(
+            QDoubleValidator(-99999.0, 99999.0, 6, self)
+        )
+        selection_region_row = QWidget()
+        selection_region_layout = QHBoxLayout(selection_region_row)
+        selection_region_layout.setContentsMargins(0, 0, 0, 0)
+        selection_region_layout.setSpacing(6)
+        selection_region_layout.addWidget(self.solvent_selection_region_min, 1)
+        selection_region_layout.addWidget(self.solvent_selection_region_max, 1)
+
+        self.solvent_selection_weight_slider = QSlider(
+            QtCore.Qt.Orientation.Horizontal
+        )
+        self.solvent_selection_weight_slider.setRange(0, 100)
+        self.solvent_selection_weight_slider.setValue(100)
+        self.solvent_selection_weight_slider.setToolTip(
+            "Weight applied to the selection region scoring (0–1)."
+        )
+        self.solvent_selection_weight_spin = QDoubleSpinBox()
+        self.solvent_selection_weight_spin.setDecimals(2)
+        self.solvent_selection_weight_spin.setRange(0.0, 1.0)
+        self.solvent_selection_weight_spin.setSingleStep(0.05)
+        self.solvent_selection_weight_spin.setValue(1.0)
+        self.solvent_selection_weight_spin.setToolTip(
+            "Weight applied to the selection region scoring (0–1)."
+        )
+        selection_weight_row = QWidget()
+        selection_weight_layout = QHBoxLayout(selection_weight_row)
+        selection_weight_layout.setContentsMargins(0, 0, 0, 0)
+        selection_weight_layout.setSpacing(6)
+        selection_weight_layout.addWidget(self.solvent_selection_weight_slider, 1)
+        selection_weight_layout.addWidget(self.solvent_selection_weight_spin)
+
         self.solvent_reference_list = QListWidget()
         self.solvent_reference_list.setSelectionMode(
             QAbstractItemView.SelectionMode.MultiSelection
@@ -879,6 +939,11 @@ class RecipeEditorDock(QDockWidget):
         solvent_form.addRow(self.solvent_shift_enable)
         solvent_form.addRow("Shift bounds (min / max / step)", shift_bounds_row)
         solvent_form.addRow(self.solvent_multi_reference_enable)
+        solvent_form.addRow("Selection metric", self.solvent_selection_metric)
+        solvent_form.addRow(
+            "Selection region (min / max cm⁻¹)", selection_region_row
+        )
+        solvent_form.addRow("Selection region weight", selection_weight_row)
         solvent_form.addRow("Additional references", self.solvent_reference_list)
         self._solvent_reference_list_row = solvent_form.rowCount() - 1
         solvent_form.addRow(self.solvent_ridge_enable)
@@ -1280,6 +1345,12 @@ class RecipeEditorDock(QDockWidget):
         self.solvent_multi_reference_enable.toggled.connect(
             self._update_solvent_controls_enabled
         )
+        self.solvent_selection_weight_slider.valueChanged.connect(
+            self._on_solvent_weight_slider_changed
+        )
+        self.solvent_selection_weight_spin.valueChanged.connect(
+            self._on_solvent_weight_spin_changed
+        )
         self.solvent_ridge_enable.toggled.connect(
             self._update_solvent_controls_enabled
         )
@@ -1338,6 +1409,10 @@ class RecipeEditorDock(QDockWidget):
             self.solvent_shift_max.valueChanged,
             self.solvent_shift_step.valueChanged,
             self.solvent_multi_reference_enable.toggled,
+            self.solvent_selection_metric.currentIndexChanged,
+            self.solvent_selection_region_min.textChanged,
+            self.solvent_selection_region_max.textChanged,
+            self.solvent_selection_weight_spin.valueChanged,
             self.solvent_reference_list.itemSelectionChanged,
             self.solvent_ridge_enable.toggled,
             self.solvent_ridge_alpha.valueChanged,
@@ -1753,6 +1828,41 @@ class RecipeEditorDock(QDockWidget):
             self.solvent_multi_reference_enable.setChecked(
                 bool(solvent_cfg.get("multi_reference", False))
             )
+            selection_metric = str(
+                solvent_cfg.get("selection_metric") or "rmse"
+            ).strip().lower()
+            if selection_metric not in {"rmse", "pattern_correlation"}:
+                selection_metric = "rmse"
+            selection_metric_index = self.solvent_selection_metric.findData(
+                selection_metric, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if selection_metric_index < 0:
+                selection_metric_index = 0
+            self.solvent_selection_metric.setCurrentIndex(selection_metric_index)
+            selection_region = solvent_cfg.get("selection_region")
+            selection_min = None
+            selection_max = None
+            if isinstance(selection_region, Mapping):
+                selection_min = selection_region.get("min", selection_region.get("min_cm"))
+                selection_max = selection_region.get("max", selection_region.get("max_cm"))
+            elif isinstance(selection_region, Sequence) and not isinstance(
+                selection_region, (str, bytes)
+            ):
+                if len(selection_region) > 0:
+                    selection_min = selection_region[0]
+                if len(selection_region) > 1:
+                    selection_max = selection_region[1]
+            self.solvent_selection_region_min.setText(
+                self._format_optional(selection_min)
+            )
+            self.solvent_selection_region_max.setText(
+                self._format_optional(selection_max)
+            )
+            selection_weight = self._safe_float(
+                solvent_cfg.get("selection_region_weight"),
+                self.solvent_selection_weight_spin.value(),
+            )
+            self._set_solvent_selection_weight(selection_weight)
             ridge_alpha = solvent_cfg.get("ridge_alpha")
             self.solvent_ridge_enable.setChecked(ridge_alpha is not None)
             self.solvent_ridge_alpha.setValue(
@@ -2346,6 +2456,11 @@ class RecipeEditorDock(QDockWidget):
         multi_enabled = (
             solvent_enabled and self.solvent_multi_reference_enable.isChecked()
         )
+        self.solvent_selection_metric.setEnabled(multi_enabled)
+        self.solvent_selection_region_min.setEnabled(multi_enabled)
+        self.solvent_selection_region_max.setEnabled(multi_enabled)
+        self.solvent_selection_weight_slider.setEnabled(multi_enabled)
+        self.solvent_selection_weight_spin.setEnabled(multi_enabled)
         self.solvent_reference_list.setEnabled(multi_enabled)
         self.solvent_reference_list.setVisible(multi_enabled)
         if hasattr(self, "_solvent_form"):
@@ -2361,6 +2476,29 @@ class RecipeEditorDock(QDockWidget):
         )
         self.solvent_ridge_alpha.setEnabled(ridge_enabled)
         self.solvent_offset_enable.setEnabled(solvent_enabled)
+
+    def _set_solvent_selection_weight(self, value: float) -> None:
+        clamped = max(0.0, min(1.0, float(value)))
+        slider_value = int(round(clamped * 100))
+        spin_blocked = self.solvent_selection_weight_spin.blockSignals(True)
+        slider_blocked = self.solvent_selection_weight_slider.blockSignals(True)
+        try:
+            self.solvent_selection_weight_spin.setValue(clamped)
+            self.solvent_selection_weight_slider.setValue(slider_value)
+        finally:
+            self.solvent_selection_weight_spin.blockSignals(spin_blocked)
+            self.solvent_selection_weight_slider.blockSignals(slider_blocked)
+
+    def _on_solvent_weight_slider_changed(self, value: int) -> None:
+        self.solvent_selection_weight_spin.setValue(value / 100.0)
+
+    def _on_solvent_weight_spin_changed(self, value: float) -> None:
+        slider_value = int(round(max(0.0, min(1.0, float(value))) * 100))
+        slider_blocked = self.solvent_selection_weight_slider.blockSignals(True)
+        try:
+            self.solvent_selection_weight_slider.setValue(slider_value)
+        finally:
+            self.solvent_selection_weight_slider.blockSignals(slider_blocked)
 
     def _current_solvent_reference_id(self) -> str | None:
         current = self.solvent_reference_combo.currentData(
@@ -3071,6 +3209,34 @@ class RecipeEditorDock(QDockWidget):
                     solvent_cfg.pop("reference_ids", None)
             else:
                 solvent_cfg.pop("reference_ids", None)
+            selection_metric_data = self.solvent_selection_metric.currentData(
+                QtCore.Qt.ItemDataRole.UserRole
+            )
+            selection_metric_value = (
+                str(selection_metric_data).strip().lower()
+                if isinstance(selection_metric_data, str)
+                else ""
+            )
+            if selection_metric_value:
+                solvent_cfg["selection_metric"] = selection_metric_value
+            else:
+                solvent_cfg.pop("selection_metric", None)
+            selection_region_min = self._parse_optional_float(
+                self.solvent_selection_region_min.text()
+            )
+            selection_region_max = self._parse_optional_float(
+                self.solvent_selection_region_max.text()
+            )
+            if selection_region_min is None and selection_region_max is None:
+                solvent_cfg.pop("selection_region", None)
+            else:
+                solvent_cfg["selection_region"] = {
+                    "min": selection_region_min,
+                    "max": selection_region_max,
+                }
+            solvent_cfg["selection_region_weight"] = float(
+                self.solvent_selection_weight_spin.value()
+            )
             shift_cfg = self._ensure_dict(solvent_cfg, "shift_compensation")
             shift_cfg["enabled"] = bool(self.solvent_shift_enable.isChecked())
             shift_cfg["min"] = float(self.solvent_shift_min.value())
