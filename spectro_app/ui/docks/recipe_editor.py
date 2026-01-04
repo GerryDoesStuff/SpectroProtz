@@ -840,9 +840,13 @@ class RecipeEditorDock(QDockWidget):
         shift_bounds_layout.addWidget(self.solvent_shift_max)
         shift_bounds_layout.addWidget(self.solvent_shift_step)
 
-        self.solvent_multi_reference_enable = QCheckBox("Enable multi-reference fit")
+        self.solvent_multi_reference_enable = QCheckBox(
+            "Select best reference (RMSE)"
+        )
         self.solvent_multi_reference_enable.setToolTip(
-            "Fit multiple solvent references at once; useful for mixed solvents."
+            "Each selected reference is fit individually (shift/scale/offset) and "
+            "the reference with the lowest RMSE is chosen. Candidate scores are "
+            "recorded in metadata."
         )
         self.solvent_reference_list = QListWidget()
         self.solvent_reference_list.setSelectionMode(
