@@ -142,12 +142,15 @@ that processed traces remain representative of their raw counterparts:
   data) and executes them in a spawn-safe process pool so coerce-domain,
   stitching, join correction, despiking, blank subtraction, baseline correction,
   solvent subtraction, smoothing, and peak detection all run in subprocesses.
-  Results are reassembled in input order for deterministic outputs. The worker
-  tasks still log any solvent-subtraction exceptions (including the spectrum
-  ID/path, exception type/message, and stack trace), fall back to the original
-  pre-solvent spectrum for that entry, and the run concludes with a warning
-  summarizing how many spectra failed solvent subtraction. Multiprocessing is
-  enabled by default for FTIR runs with a worker count of
+  Results are reassembled in input order for deterministic outputs, with any
+  failed spectrum tasks omitted from the final result set so partial success is
+  still returned. Worker tasks capture exceptions (type/message/stack trace) and
+  the main process logs each failure alongside the spectrum ID/path in the same
+  log folder exposed by **Tools → Open Log Folder**, then continues processing
+  the remaining spectra. Solvent-subtraction exceptions are logged similarly and
+  fall back to the original pre-solvent spectrum for that entry, with a warning
+  summarizing how many spectra failed solvent subtraction at the end of the run.
+  Multiprocessing is enabled by default for FTIR runs with a worker count of
   `min(4, os.cpu_count())`, while `chunk_size` batches multiple spectra per
   worker submission and `max_tasks_per_child` can recycle processes to limit
   long-lived memory growth. Set `enabled: false` or `workers: 1` to opt out.
