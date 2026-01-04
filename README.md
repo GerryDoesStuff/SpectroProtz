@@ -167,7 +167,9 @@ that processed traces remain representative of their raw counterparts:
   `max_tasks_per_child` can recycle processes to limit long-lived memory growth.
   The per-spectrum progress callback fires for every completed spectrum even
   when multiprocessing is active, ensuring the UI continues to log each
-  finished item.
+  finished item. Peak-fit retries and failures now include the originating
+  spectrum ID/label and `source_path`/`source_file` metadata in the log entries
+  so you can trace troublesome fits back to the precise input.
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
