@@ -939,7 +939,11 @@ def _select_blank(
 
 def _detect_peaks(spec: Spectrum, recipe: Dict[str, Any], axis: AxisAdapter) -> Spectrum:
     features_cfg = dict(recipe.get("features", {})) if recipe else {}
-    peak_cfg = dict(features_cfg.get("peaks", {}))
+    if not features_cfg or "peaks" not in features_cfg:
+        return spec
+    peak_cfg = dict(features_cfg.get("peaks") or {})
+    if peak_cfg.get("enabled") is False:
+        return spec
     meta = spec.meta if isinstance(spec.meta, Mapping) else {}
     file_path = meta.get("source_path") or meta.get("source_file")
     spectrum_id = meta.get("id") or meta.get("label") or _spectrum_identifier(spec, 0)

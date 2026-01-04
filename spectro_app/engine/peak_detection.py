@@ -2498,7 +2498,8 @@ def detect_peaks_for_features(
     file_path: str | None = None,
     spectrum_id: str | int | None = None,
 ) -> List[Dict[str, object]]:
-    config = resolve_peak_config(peak_cfg)
+    config_input = peak_cfg if peak_cfg is not None else {"enabled": False}
+    config = resolve_peak_config(config_input)
     if not bool(config.get("enabled", True)):
         return []
     if x.size < 3 or y.size < 3:

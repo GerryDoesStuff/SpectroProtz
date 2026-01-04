@@ -3148,7 +3148,7 @@ class RecipeEditorDock(QDockWidget):
                 peak_payload["shoulder_min_distance_cm"] = shoulder_min_distance
             features_cfg["peaks"] = peak_payload
         else:
-            features_cfg.pop("peaks", None)
+            features_cfg["peaks"] = {"enabled": False}
 
         if not features_cfg:
             params.pop("features", None)
