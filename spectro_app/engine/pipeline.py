@@ -316,6 +316,7 @@ def _solvent_subtraction_config(
         "fit_scale": solvent_cfg.get("fit_scale", True),
         "ridge_alpha": solvent_cfg.get("ridge_alpha"),
         "include_offset": solvent_cfg.get("include_offset", False),
+        "selection_metric": solvent_cfg.get("selection_metric"),
         "shift_compensation": shift_payload,
     }
 
@@ -403,6 +404,7 @@ def _apply_solvent_subtraction_task(
             fit_scale=cfg.get("fit_scale", True),
             ridge_alpha=cfg.get("ridge_alpha"),
             include_offset=cfg.get("include_offset", False),
+            selection_metric=cfg.get("selection_metric"),
             shift_compensation=cfg.get("shift_compensation"),
         )
         return SolventSubtractionTaskResult(spectrum=corrected)
@@ -421,6 +423,7 @@ def apply_solvent_subtraction(
     fit_scale: bool = True,
     ridge_alpha: float | None = None,
     include_offset: bool = False,
+    selection_metric: str | None = None,
     shift_compensation: Mapping[str, Any] | None = None,
 ) -> Spectrum:
     x = np.asarray(spec.wavelength, dtype=float)
@@ -434,6 +437,10 @@ def apply_solvent_subtraction(
 
     if x.size == 0:
         return spec
+
+    selection_metric_normalized = str(selection_metric or "rmse").strip().lower()
+    if selection_metric_normalized not in {"rmse", "pattern_correlation"}:
+        selection_metric_normalized = "rmse"
 
     def _interp_reference(
         target_x: np.ndarray, ref_spec: Spectrum, *, shift: float = 0.0
@@ -532,6 +539,7 @@ def apply_solvent_subtraction(
                 "ref_spec": ref_spec,
                 "shift": 0.0,
                 "error": None,
+                "pattern_correlation": None,
                 "ref_matrix": None,
                 "fit_mask": None,
                 "coef": None,
@@ -563,6 +571,7 @@ def apply_solvent_subtraction(
         best: dict[str, Any] = {
             "shift": 0.0,
             "error": None,
+            "pattern_correlation": None,
             "ref_matrix": None,
             "fit_mask": None,
             "coef": None,
@@ -586,11 +595,28 @@ def apply_solvent_subtraction(
             if residual.size == 0:
                 continue
             error = float(np.mean(residual * residual))
+            pattern_correlation = None
+            sample_pattern = y[fit_mask]
+            if offset_used:
+                sample_pattern = sample_pattern - offset
+            ref_pattern = ref_matrix[fit_mask, 0]
+            if ref_pattern.size >= 3:
+                ref_std = float(np.std(ref_pattern))
+                sample_std = float(np.std(sample_pattern))
+                if (
+                    np.isfinite(ref_std)
+                    and np.isfinite(sample_std)
+                    and ref_std > 0.0
+                    and sample_std > 0.0
+                ):
+                    corr = np.corrcoef(ref_pattern, sample_pattern)
+                    pattern_correlation = float(corr[0, 1])
             if best["error"] is None or error < best["error"]:
                 best.update(
                     {
                         "shift": float(shift),
                         "error": error,
+                        "pattern_correlation": pattern_correlation,
                         "ref_matrix": ref_matrix,
                         "fit_mask": fit_mask,
                         "coef": coef,
@@ -620,6 +646,7 @@ def apply_solvent_subtraction(
     if len(ref_specs) > 1:
         best_rmse = None
         best_overlap_points = None
+        best_score = None
         for ref in ref_specs:
             result = _evaluate_reference(ref)
             evaluated_candidates += 1
@@ -627,31 +654,59 @@ def apply_solvent_subtraction(
             if overlap_points < min_overlap_points:
                 low_overlap_rejections += 1
             rmse = float(np.sqrt(result["error"])) if result.get("error") is not None else None
+            pattern_correlation = result.get("pattern_correlation")
+            selection_score = None
+            if selection_metric_normalized == "pattern_correlation":
+                if pattern_correlation is not None and np.isfinite(pattern_correlation):
+                    selection_score = abs(float(pattern_correlation))
+            elif rmse is not None:
+                selection_score = float(rmse)
             candidate_scores.append(
                 {
                     "reference_id": _candidate_reference_id(ref),
                     "rmse": rmse,
+                    "pattern_correlation": pattern_correlation,
+                    "selection_metric": selection_metric_normalized,
+                    "selection_score": selection_score,
                     "shift": float(result["shift"]),
                     "scale": float(result["coef"][0]) if result["coef"] is not None else None,
                     "offset": float(result["offset"]) if offset_used else None,
                     "overlap_points": overlap_points,
                 }
             )
-            if not result.get("eligible") or rmse is None:
+            if not result.get("eligible"):
                 continue
             eligible_candidates += 1
-            if (
-                best_rmse is None
-                or rmse < best_rmse - rmse_tolerance
-                or (
-                    best_rmse is not None
-                    and abs(rmse - best_rmse) <= rmse_tolerance
-                    and (best_overlap_points is None or overlap_points > best_overlap_points)
-                )
-            ):
-                selected = result
-                best_rmse = rmse
-                best_overlap_points = overlap_points
+            if selection_metric_normalized == "pattern_correlation":
+                if selection_score is None:
+                    continue
+                if (
+                    best_score is None
+                    or selection_score > best_score + rmse_tolerance
+                    or (
+                        best_score is not None
+                        and abs(selection_score - best_score) <= rmse_tolerance
+                        and (best_overlap_points is None or overlap_points > best_overlap_points)
+                    )
+                ):
+                    selected = result
+                    best_score = selection_score
+                    best_overlap_points = overlap_points
+            else:
+                if rmse is None:
+                    continue
+                if (
+                    best_rmse is None
+                    or rmse < best_rmse - rmse_tolerance
+                    or (
+                        best_rmse is not None
+                        and abs(rmse - best_rmse) <= rmse_tolerance
+                        and (best_overlap_points is None or overlap_points > best_overlap_points)
+                    )
+                ):
+                    selected = result
+                    best_rmse = rmse
+                    best_overlap_points = overlap_points
         if selected is None:
             warnings = []
             if evaluated_candidates and low_overlap_rejections == evaluated_candidates:
@@ -688,10 +743,20 @@ def apply_solvent_subtraction(
         if overlap_points < min_overlap_points:
             low_overlap_rejections = 1
         rmse = float(np.sqrt(selected["error"])) if selected.get("error") is not None else None
+        pattern_correlation = selected.get("pattern_correlation")
+        selection_score = None
+        if selection_metric_normalized == "pattern_correlation":
+            if pattern_correlation is not None and np.isfinite(pattern_correlation):
+                selection_score = abs(float(pattern_correlation))
+        elif rmse is not None:
+            selection_score = float(rmse)
         candidate_scores.append(
             {
                 "reference_id": _candidate_reference_id(ref_specs[0]),
                 "rmse": rmse,
+                "pattern_correlation": pattern_correlation,
+                "selection_metric": selection_metric_normalized,
+                "selection_score": selection_score,
                 "shift": float(selected["shift"]),
                 "scale": float(selected["coef"][0]) if selected["coef"] is not None else None,
                 "offset": float(selected["offset"]) if offset_used else None,
@@ -903,6 +968,7 @@ def apply_solvent_subtraction(
             "offset": float(offset) if offset_used else None,
             "fit_scale": bool(fit_scale),
             "include_offset": bool(include_offset),
+            "selection_metric": selection_metric_normalized,
             "ridge_alpha": float(ridge_alpha) if ridge_alpha is not None else None,
             "weights": None,
             "interpolation": "linear",

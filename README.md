@@ -150,15 +150,20 @@ that processed traces remain representative of their raw counterparts:
   is satisfied; candidates that fall below the overlap threshold are excluded
   from selection so the chosen reference remains representative of the sample.
   If RMSEs are within a small tolerance, the selection prefers the candidate
-  with the larger overlap. Shift compensation, scale, and offset fitting are
-  applied to every candidate before the RMSE comparison. The per-reference fit
-  details (reference identifier, RMSE, shift, scale, offset, and overlap
+  with the larger overlap. When the recipe sets
+  `solvent_subtraction.selection_metric` to `pattern_correlation`, the pipeline
+  instead compares the absolute correlation between each fitted reference
+  pattern and the overlap portion of the sample (after any fitted offset is
+  removed), selecting the strongest match. Shift compensation, scale, and
+  offset fitting are applied to every candidate before the metric comparison.
+  The per-reference fit details (reference identifier, RMSE, pattern
+  correlation, selection metric/score, shift, scale, offset, and overlap
   points) are captured in `meta["solvent_subtraction"]["candidate_scores"]` so
   debugging and audits can review every candidate considered, matching the
-  recipe editor option to select the best reference by RMSE. When all
-  candidates are rejected due to insufficient overlap, the solvent subtraction
-  metadata records a warning explaining that the overlap requirement was not
-  met and the subtraction was skipped.
+  recipe editor option to select the best reference by RMSE or pattern
+  correlation. When all candidates are rejected due to insufficient overlap,
+  the solvent subtraction metadata records a warning explaining that the
+  overlap requirement was not met and the subtraction was skipped.
 - **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
   per-spectrum pipeline in multiprocessing when multiple spectra are queued and
   more than one worker is available. The
