@@ -123,6 +123,9 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         self._detail = QtWidgets.QTextEdit()
         self._detail.setReadOnly(True)
 
+        self._edit_button = QtWidgets.QPushButton("Edit Metadata…")
+        self._edit_button.clicked.connect(self._on_edit_metadata)
+
         default_index = None
         for idx, entry in enumerate(entries):
             label = self._format_entry_label(entry)
@@ -137,9 +140,6 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
             self._list.setCurrentRow(default_index or 0)
 
         self._default_checkbox = QtWidgets.QCheckBox("Mark selected as default")
-
-        self._edit_button = QtWidgets.QPushButton("Edit Metadata…")
-        self._edit_button.clicked.connect(self._on_edit_metadata)
 
         browse_button = QtWidgets.QPushButton("Browse File…")
         browse_button.clicked.connect(self._on_browse)
@@ -191,6 +191,8 @@ class SolventReferenceSelectionDialog(QtWidgets.QDialog):
         meta["reference_metadata"] = dict(entry.get("metadata") or {})
 
     def _update_edit_state(self) -> None:
+        if not hasattr(self, "_edit_button"):
+            return
         has_selection = self._list.currentItem() is not None
         self._edit_button.setEnabled(has_selection)
 
