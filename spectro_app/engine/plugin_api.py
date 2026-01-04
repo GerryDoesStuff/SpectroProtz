@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Any, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 @dataclass
@@ -24,7 +24,11 @@ class SpectroscopyPlugin:
     def detect(self, paths: Iterable[str]) -> bool:
         return False
 
-    def load(self, paths: Iterable[str]) -> List[Spectrum]:
+    def load(
+        self,
+        paths: Iterable[str],
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> List[Spectrum]:
         raise NotImplementedError
 
     def validate(self, specs: List[Spectrum], recipe: Dict[str, Any]) -> List[str]:

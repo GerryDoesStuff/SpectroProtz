@@ -1155,7 +1155,12 @@ def run_pipeline(
     *,
     axis: AxisAdapter | None = None,
     on_item_processed: Optional[Callable[[int, int, str | int | None], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Spectrum], List[Dict[str, Any]]]:
+    def _raise_if_cancelled() -> None:
+        if cancelled is not None and cancelled():
+            raise RuntimeError("Cancelled")
+
     specs_list = list(specs)
     if not specs_list:
         return [], []
@@ -1177,12 +1182,14 @@ def run_pipeline(
     for idx, spec in enumerate(specs_list):
         if spec.meta.get("role") != "blank":
             continue
+        _raise_if_cancelled()
         result = _process_spectrum_task(
             {
                 **preprocess_task_base,
                 "spectrum": _spectrum_to_payload(spec),
             }
         )
+        _raise_if_cancelled()
         task_error = result.get("error")
         if task_error:
             _log_pipeline_task_error(spec, idx, task_error)
@@ -1215,12 +1222,14 @@ def run_pipeline(
         for idx, spec in enumerate(specs_list):
             if _normalize_role(spec.meta.get("role")) not in reference_role_set:
                 continue
+            _raise_if_cancelled()
             result = _process_spectrum_task(
                 {
                     **preprocess_task_base,
                     "spectrum": _spectrum_to_payload(spec),
                 }
             )
+            _raise_if_cancelled()
             task_error = result.get("error")
             if task_error:
                 _log_pipeline_task_error(spec, idx, task_error)
@@ -1339,6 +1348,10 @@ def run_pipeline(
                 for batch in batches
             }
             for future in as_completed(future_map):
+                if cancelled is not None and cancelled():
+                    for pending in future_map:
+                        pending.cancel()
+                    raise RuntimeError("Cancelled")
                 batch = future_map[future]
                 try:
                     batch_results = future.result()
@@ -1357,6 +1370,7 @@ def run_pipeline(
                 for idx, result in batch_results:
                     results[idx] = result
                     _report_progress(idx)
+                _raise_if_cancelled()
         for idx, result in enumerate(results):
             if result is None:
                 logger.error("Spectrum task returned no result for index %s.", idx)
@@ -1381,7 +1395,9 @@ def run_pipeline(
             _report_progress(idx)
     else:
         for task in per_spectrum_tasks:
+            _raise_if_cancelled()
             result = _process_spectrum_task(task)
+            _raise_if_cancelled()
             task_error = result.get("error")
             if task_error:
                 _log_pipeline_task_error(samples[task["index"]], task["index"], task_error)

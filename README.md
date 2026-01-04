@@ -12,6 +12,10 @@ During batch runs, the main window keeps the status bar and log panel updated
 with per-spectrum progress messages (including the spectrum ID when available)
 so operators can see each spectrum complete in real time alongside the overall
 progress bar, which also surfaces the running spectrum counts.
+Operators can cancel a running job from the toolbar or **Process → Cancel**; the
+UI switches the action to a “Cancelling…” state while the engine checks
+cancellation signals during file ingestion and pipeline processing, then reports
+“Job cancelled” once the background work has halted.
 When closing the application, SpectroProtz warns if a processing job is still
 running, cancels the job on request, and waits for background thread-pool work
 to finish before the UI is destroyed to avoid leaving silent work in flight.
@@ -149,8 +153,9 @@ that processed traces remain representative of their raw counterparts:
   `meta["solvent_subtraction"]["candidate_scores"]` so debugging and audits can
   review every candidate considered, matching the recipe editor option to
   select the best reference by RMSE.
-- **Parallel per-spectrum FTIR processing.** FTIR batches always fan out the full
-  per-spectrum pipeline in multiprocessing, even for single-spectrum runs. The
+- **Parallel per-spectrum FTIR processing.** FTIR batches can fan out the full
+  per-spectrum pipeline in multiprocessing when multiple spectra are queued and
+  more than one worker is available. The
   pipeline builds explicit per-spectrum tasks (recipe snapshot + axis metadata +
   sample data) and executes them in a spawn-safe process pool so coerce-domain,
   stitching, join correction, despiking, blank subtraction, baseline correction,

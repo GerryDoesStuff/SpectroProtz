@@ -26,7 +26,7 @@ class _PreviewPlugin(SpectroscopyPlugin):
     def detect(self, paths):
         return True
 
-    def load(self, paths):
+    def load(self, paths, cancelled=None):
         return [
             Spectrum(
                 wavelength=np.array([1.0, 2.0, 3.0]),

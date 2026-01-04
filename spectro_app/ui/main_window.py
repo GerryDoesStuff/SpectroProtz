@@ -218,6 +218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._loading_session: bool = False
         self._updating_ui: bool = False
         self._job_running = False
+        self._cancel_in_progress = False
         self._raw_preview_window: Optional[RawDataPreviewWindow] = None
         self._auto_update_preview_enabled: bool = True
         self._auto_run_pending: bool = False
@@ -1023,6 +1024,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._job_running:
             return
         if self.runctl.cancel():
+            self._cancel_in_progress = True
+            self._update_action_states()
             self.status.showMessage("Cancelling job...")
 
     def on_help(self):
@@ -1233,7 +1236,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._run_action:
             self._run_action.setEnabled(not running and has_queue)
         if self._cancel_action:
-            self._cancel_action.setEnabled(running)
+            self._cancel_action.setEnabled(running and not self._cancel_in_progress)
+            self._cancel_action.setText(
+                "Cancelling..." if self._cancel_in_progress else "Cancel"
+            )
         if self._open_action:
             self._open_action.setEnabled(not running)
         if self._mass_load_action:
@@ -2318,6 +2324,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_job_started(self):
         self._job_running = True
         self.appctx.set_job_running(True)
+        self._cancel_in_progress = False
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
@@ -2345,6 +2352,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_job_finished(self, result):
         self._job_running = False
         self.appctx.set_job_running(False)
+        self._cancel_in_progress = False
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         pending_auto = self._auto_run_pending

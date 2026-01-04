@@ -1,7 +1,7 @@
 import copy
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThreadPool, QRunnable
-from typing import Iterable, Optional, Protocol
+from typing import Callable, Iterable, Optional, Protocol
 
 from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.solvent_reference import build_reference_spectrum
@@ -87,7 +87,7 @@ class BatchRunnable(QRunnable):
         try:
             self._emit_message("Loading spectra...")
             self._raise_if_cancelled()
-            specs = self.plugin.load(self.paths)
+            specs = self.plugin.load(self.paths, cancelled=self.is_cancelled)
             self.signals.progress.emit(10)
 
             self._emit_message("Validating recipe...")
@@ -105,6 +105,7 @@ class BatchRunnable(QRunnable):
                 specs,
                 flattened_recipe,
                 on_item_processed=self.signals.item_processed.emit,
+                cancelled=self.is_cancelled,
             )
             self.signals.progress.emit(40)
 
@@ -121,6 +122,7 @@ class BatchRunnable(QRunnable):
                 else flattened_recipe
             )
             result = self.plugin.export(specs, qc, export_recipe)
+            self._raise_if_cancelled()
             self.signals.progress.emit(100)
             self.signals.finished.emit(result)
         except Exception as e:
@@ -129,6 +131,9 @@ class BatchRunnable(QRunnable):
     def cancel(self):
         self._cancelled = True
         self._emit_message("Cancellation requested")
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
 
     def _raise_if_cancelled(self):
         if self._cancelled:
