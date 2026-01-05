@@ -150,6 +150,9 @@ that processed traces remain representative of their raw counterparts:
   showing FTIR data (identified by `technique == "ftir"` or a wavenumber axis),
   an extra **Solvent Subtracted** stage appears so you can compare solvent-
   corrected traces; non-FTIR previews hide this toggle.
+- **Peak markers.** When peak detection metadata is available, the preview
+  plot overlays vertical peak lines at detected positions and provides a
+  **Peaks** toggle to show or hide the markers alongside the spectra.
 - **Quantitative QC metrics.** The QC engine computes diagnostics such as noise
   levels, join offsets, spike counts, smoothing guards, drift, and per-stage
   roughness deltas that compare processed spectra against their retained

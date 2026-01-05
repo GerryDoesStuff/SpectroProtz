@@ -104,11 +104,12 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
 
         label = widget._sample_labels[0]
         assert label in widget._peak_items
-        scatter = widget._peak_items[label]
-        x_data, y_data = scatter.getData()
-        np.testing.assert_allclose(np.array(x_data), np.array([500.0, 600.0]))
-        np.testing.assert_allclose(np.array(y_data), np.array([0.6, 0.3]))
-        assert scatter.isVisible()
+        peak_items = widget._peak_items[label]
+        assert peak_items
+        assert all(isinstance(item, pg.InfiniteLine) for item in peak_items)
+        x_positions = [item.value() for item in peak_items]
+        np.testing.assert_allclose(np.array(x_positions), np.array([500.0, 600.0]))
+        assert all(item.isVisible() for item in peak_items)
 
         assert isinstance(widget.peaks_button, QtWidgets.QCheckBox)
         assert widget.peaks_button.isEnabled()
@@ -116,26 +117,26 @@ def test_peak_markers_created_and_follow_visibility(qt_app):
 
         widget.peaks_button.setChecked(False)
         qt_app.processEvents()
-        assert not scatter.isVisible()
+        assert all(not item.isVisible() for item in peak_items)
 
         widget.peaks_button.setChecked(True)
         qt_app.processEvents()
-        assert scatter.isVisible()
+        assert all(item.isVisible() for item in peak_items)
 
         smoothed_checkbox = widget._stage_controls["smoothed"]
         smoothed_checkbox.setChecked(False)
         qt_app.processEvents()
-        assert not scatter.isVisible()
+        assert all(not item.isVisible() for item in peak_items)
 
         smoothed_checkbox.setChecked(True)
         qt_app.processEvents()
-        assert scatter.isVisible()
+        assert all(item.isVisible() for item in peak_items)
 
         curve = widget._curve_items["smoothed"][0]
         widget._select_curve(curve)
         widget._hide_selected_spectrum()
         qt_app.processEvents()
-        assert not scatter.isVisible()
+        assert all(not item.isVisible() for item in peak_items)
     finally:
         widget.deleteLater()
         qt_app.processEvents()
@@ -163,11 +164,12 @@ def test_wavenumber_peaks_enable_toggle_and_render(qt_app):
         assert widget.peaks_button.isChecked()
 
         label = widget._sample_labels[0]
-        scatter = widget._peak_items[label]
-        x_data, y_data = scatter.getData()
-        np.testing.assert_allclose(np.array(x_data), np.array([1500.0, 1600.0]))
-        np.testing.assert_allclose(np.array(y_data), np.array([0.42, 0.22]))
-        assert scatter.isVisible()
+        peak_items = widget._peak_items[label]
+        assert peak_items
+        assert all(isinstance(item, pg.InfiniteLine) for item in peak_items)
+        x_positions = [item.value() for item in peak_items]
+        np.testing.assert_allclose(np.array(x_positions), np.array([1500.0, 1600.0]))
+        assert all(item.isVisible() for item in peak_items)
     finally:
         widget.deleteLater()
         qt_app.processEvents()
@@ -192,21 +194,21 @@ def test_update_peak_items_visibility_respects_state(qt_app):
         qt_app.processEvents()
 
         label = widget._sample_labels[0]
-        scatter = widget._peak_items[label]
-        assert scatter.isVisible()
+        peak_items = widget._peak_items[label]
+        assert all(item.isVisible() for item in peak_items)
 
         widget._peaks_enabled = False
         widget._update_peak_items_visibility()
-        assert not scatter.isVisible()
+        assert all(not item.isVisible() for item in peak_items)
 
         widget._peaks_enabled = True
         widget._hidden_labels.add(label)
         widget._update_peak_items_visibility()
-        assert not scatter.isVisible()
+        assert all(not item.isVisible() for item in peak_items)
 
         widget._hidden_labels.clear()
         widget._update_peak_items_visibility()
-        assert scatter.isVisible()
+        assert all(item.isVisible() for item in peak_items)
     finally:
         widget.deleteLater()
         qt_app.processEvents()
@@ -236,16 +238,16 @@ def test_peaks_toggle_preserved_with_preserve_view(qt_app):
         assert not widget.peaks_button.isChecked()
 
         first_label = widget._sample_labels[0]
-        first_scatter = widget._peak_items[first_label]
-        assert not first_scatter.isVisible()
+        first_peak_items = widget._peak_items[first_label]
+        assert all(not item.isVisible() for item in first_peak_items)
 
         assert widget.set_spectra([spectrum], preserve_view=True)
         qt_app.processEvents()
 
         assert not widget.peaks_button.isChecked()
         refreshed_label = widget._sample_labels[0]
-        refreshed_scatter = widget._peak_items[refreshed_label]
-        assert not refreshed_scatter.isVisible()
+        refreshed_peak_items = widget._peak_items[refreshed_label]
+        assert all(not item.isVisible() for item in refreshed_peak_items)
     finally:
         widget.deleteLater()
         qt_app.processEvents()
