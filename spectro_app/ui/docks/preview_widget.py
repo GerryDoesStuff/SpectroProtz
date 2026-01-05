@@ -83,10 +83,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._stage_datasets: Dict[str, List[_StageDataset]] = {}
         self._all_stage_datasets: Dict[str, List[_StageDataset]] = {}
         self._curve_items: Dict[str, List[pg.PlotDataItem]] = {}
-        self._peak_items: Dict[str, pg.ScatterPlotItem] = {}
+        self._peak_items: Dict[str, List[pg.InfiniteLine]] = {}
         self._all_peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._peak_points: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        self._peak_styles: Dict[str, tuple[QtGui.QBrush, QtGui.QPen]] = {}
+        self._peak_styles: Dict[str, List[QtGui.QPen]] = {}
         self._peaks_enabled: bool = True
         self._visible_stages: set[str] = set()
         self._color_map: Dict[str, QtGui.QColor] = {}
@@ -632,11 +632,12 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     self.plot.removeItem(curve)
                 except Exception:
                     pass
-        for scatter in self._peak_items.values():
-            try:
-                self.plot.removeItem(scatter)
-            except Exception:
-                pass
+        for peak_items in self._peak_items.values():
+            for line in peak_items:
+                try:
+                    self.plot.removeItem(line)
+                except Exception:
+                    pass
         self._curve_items = {stage: [] for stage in self.STAGE_LABELS}
         self._peak_items = {}
         self._peak_styles = {}
@@ -721,9 +722,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         if not self._peak_items:
             return
 
-        for label, scatter in self._peak_items.items():
+        for label, peak_items in self._peak_items.items():
             visible = self._is_peak_visible(label) and label not in self._hidden_labels
-            scatter.setVisible(visible)
+            for line in peak_items:
+                line.setVisible(visible)
             if visible and label == self._selected_label:
                 self._apply_peak_selection_style(label)
             else:
@@ -871,14 +873,18 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             if peak_x.size == 0 or peak_y.size == 0:
                 continue
             color = self._color_map.get(label, pg.mkColor("#1f77b4"))
-            base_brush = pg.mkBrush(color)
             base_pen = pg.mkPen(color=color, width=1)
-            scatter = pg.ScatterPlotItem(x=peak_x, y=peak_y, brush=base_brush, pen=base_pen, size=9, symbol="o")
-            scatter.setZValue(10)
-            self.plot.addItem(scatter)
-            self._peak_items[label] = scatter
-            self._peak_styles[label] = (QtGui.QBrush(base_brush), QtGui.QPen(base_pen))
-            scatter.setVisible(self._is_peak_visible(label) and label not in self._hidden_labels)
+            peak_items: List[pg.InfiniteLine] = []
+            peak_pens: List[QtGui.QPen] = []
+            for peak_value in peak_x:
+                line = pg.InfiniteLine(pos=peak_value, angle=90, pen=base_pen)
+                line.setZValue(10)
+                self.plot.addItem(line)
+                line.setVisible(self._is_peak_visible(label) and label not in self._hidden_labels)
+                peak_items.append(line)
+                peak_pens.append(QtGui.QPen(base_pen))
+            self._peak_items[label] = peak_items
+            self._peak_styles[label] = peak_pens
 
     def _is_peak_visible(self, label: str) -> bool:
         if not self._peaks_enabled:
@@ -892,22 +898,22 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         return False
 
     def _apply_peak_selection_style(self, label: str) -> None:
-        scatter = self._peak_items.get(label)
-        if scatter is None:
+        peak_items = self._peak_items.get(label)
+        if not peak_items:
             return
-        scatter.setBrush(pg.mkBrush(self._selection_color))
-        scatter.setPen(pg.mkPen(self._selection_color, width=1.5))
+        selection_pen = pg.mkPen(self._selection_color, width=1.5)
+        for line in peak_items:
+            line.setPen(selection_pen)
 
     def _restore_peak_style(self, label: str) -> None:
-        scatter = self._peak_items.get(label)
-        if scatter is None:
+        peak_items = self._peak_items.get(label)
+        if not peak_items:
             return
         original = self._peak_styles.get(label)
-        if original is None:
+        if not original:
             return
-        brush, pen = original
-        scatter.setBrush(QtGui.QBrush(brush))
-        scatter.setPen(QtGui.QPen(pen))
+        for line, pen in zip(peak_items, original):
+            line.setPen(QtGui.QPen(pen))
 
     def _apply_hidden_visibility(self) -> None:
         for curve, (dataset, original_pen, legend_text) in self._curve_metadata.items():
@@ -940,9 +946,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             else:
                 label_item.setText(html.escape(legend_text))
 
-        for label, scatter in self._peak_items.items():
+        for label, peak_items in self._peak_items.items():
             visible = self._is_peak_visible(label) and label not in self._hidden_labels
-            scatter.setVisible(visible)
+            for line in peak_items:
+                line.setVisible(visible)
             if visible and label == self._selected_label:
                 self._apply_peak_selection_style(label)
             else:
