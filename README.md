@@ -213,11 +213,13 @@ If the lookup database contains malformed peak rows (for example missing or
 non-numeric peak data), the plot skips those rows and reports a warning in the
 dialog status area instead of halting the preview.
 When you are ready to compare candidates against live preview data, use
-**Send plot to main preview** to push the currently plotted reference spectra
-into the main preview plot as an overlay. The preview dock now includes an
+**Send overlay to main preview** to push the currently plotted reference
+spectra into the main preview plot as an overlay. The preview dock includes an
 **Identified** checkbox alongside the stage toggles to show or hide those
 reference overlays on demand, keeping the main plot uncluttered while you work
-through match candidates.
+through match candidates. The Identified toggle is persisted with the rest of
+the UI session state, so the visibility preference is restored the next time
+you reopen SpectroProtz.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose
@@ -274,7 +276,7 @@ tooltips.
   tolerance spinner, paging buttons, add/remove actions, and **Send plot to
   main preview**.
 - The **Identified** checkbox in the preview dock shows a tooltip describing
-  the overlay behavior.
+  the overlay behavior and retains its most recent state between sessions.
 - Context menu items supply tooltips when an action is unavailable (for example
   export disabled if PyQtGraph exporters are missing, or lookup disabled when
   the selection lacks FTIR peaks).
@@ -381,7 +383,9 @@ that processed traces remain representative of their raw counterparts:
 - **Identified overlays.** Reference spectra sent from the FTIR lookup window
   appear as dashed overlays in the main preview plot and can be toggled with
   the **Identified** checkbox to quickly compare current samples to matched
-  references without leaving the preview.
+  references without leaving the preview. The toggle state persists with the
+  saved UI session, so you can keep your preferred overlay visibility between
+  launches.
 - **Quantitative QC metrics.** The QC engine computes diagnostics such as noise
   levels, join offsets, spike counts, smoothing guards, drift, and per-stage
   roughness deltas that compare processed spectra against their retained

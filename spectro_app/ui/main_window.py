@@ -524,6 +524,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._auto_update_preview_enabled = stored_auto_update
             self._apply_auto_update_checkbox_state()
 
+            stored_identified_overlay = payload.get("identified_overlay_enabled")
+            if isinstance(stored_identified_overlay, bool):
+                self.previewDock.set_identified_overlay_enabled(stored_identified_overlay)
+
             queue_items: List[str] = []
             stored_queue = payload.get("queue")
             if isinstance(stored_queue, list):
@@ -1228,6 +1232,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             "last_data_dir": str(self._last_browsed_dir) if self._last_browsed_dir else None,
             "auto_update_preview": bool(self._auto_update_preview_enabled),
+            "identified_overlay_enabled": (
+                self.previewDock.identified_overlay_enabled() if self.previewDock else True
+            ),
         }
 
         def _json_default(value: object) -> object:

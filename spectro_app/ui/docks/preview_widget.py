@@ -1593,5 +1593,8 @@ class PreviewDock(QDockWidget):
         if self._spectra_widget is not None:
             self._spectra_widget.set_identified_overlay_enabled(self._identified_overlay_enabled)
 
+    def identified_overlay_enabled(self) -> bool:
+        return bool(self._identified_overlay_enabled)
+
     def _on_identified_overlay_toggled(self, checked: bool) -> None:
         self._identified_overlay_enabled = bool(checked)
