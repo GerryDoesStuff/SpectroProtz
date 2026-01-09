@@ -154,12 +154,15 @@ default.
 SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
 accessible under **Tools → FTIR Reference Lookup...**. The dialog lets you
 point at a `peaks.duckdb` index, run manual searches from a query bar, and view
-matching reference spectra in the left-hand results sidebar. The results list
+matching reference spectra in the left-hand results sidebar. Manual search text
+is debounced, so the lookup only runs after you pause typing instead of on
+every keystroke, keeping the UI responsive on large indexes. The results list
 surfaces the spectrum name, molecular formula, and summary match statistics
 (including matched peak counts) so you can spot likely candidates quickly while
 keeping the original manual query text intact. The list supports multi-selection
-and paginates through large result sets so the sidebar remains responsive when a
-search returns many references. Use the **Add to plot** button or the left
+and paginates through large result sets with a results cap so the sidebar
+remains responsive when a search returns many references. Use the **Add to plot**
+button or the left
 sidebar context menu to move reference spectra into the right-hand plotting
 sidebar, which preserves the order you add items.
 The lookup dialog validates the selected DuckDB file before it queries, and it
@@ -170,7 +173,7 @@ references.
 
 The right sidebar keeps a stable list of selected references with remove controls
 via a **Remove selected** button or right-click menu. Every add, remove, or
-selection change immediately re-plots the top comparison chart in the lookup
+selection change batches re-plotting of the top comparison chart in the lookup
 window, which draws normalized reference spectrum traces and overlays vertical
 peak sticks for each selected reference. The chart also overlays the currently
 selected preview spectrum as a normalized trace, scaling each spectrum’s
@@ -185,6 +188,9 @@ reference’s normalized spectrum and peak sticks in the bottom plot immediately
 and the metadata panel beside the chart summarizes the selected reference’s
 name, formula, and related header fields for quick inspection without leaving
 the lookup dialog.
+Reference spectrum traces and peak sticks are cached within the lookup window
+session so repeated plot updates avoid redundant database or file reads when
+revisiting the same references.
 If the lookup database contains malformed peak rows (for example missing or
 non-numeric peak data), the plot skips those rows and reports a warning in the
 dialog status area instead of halting the preview.
