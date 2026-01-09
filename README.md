@@ -176,9 +176,9 @@ every keystroke, keeping the UI responsive on large indexes. The results list
 surfaces the spectrum name, molecular formula, optional CAS number, and summary
 match statistics (including matched peak counts) so you can spot likely
 candidates quickly while keeping the original manual query text intact. The list
-supports multi-selection, selection-driven previewing of the metadata panel, and
-paginates through large result sets with a results cap so the sidebar
-remains responsive when a search returns many references. Use the transfer
+supports multi-selection, selection-driven previewing of the bottom plot and its
+metadata panel, and paginates through large result sets with a results cap so
+the sidebar remains responsive when a search returns many references. Use the transfer
 buttons between the sidebars or the left sidebar context menu to move reference
 spectra into the right-hand plotting sidebar, which preserves the order shown in
 the results list for predictable comparisons.
@@ -202,9 +202,10 @@ set. Search actions do not change the plot until you explicitly add or remove
 references, keeping comparisons stable while you browse new matches.
 Right-clicking any reference in the left or right sidebar previews that
 reference’s normalized spectrum and peak sticks in the bottom plot immediately,
-and the metadata panel beside the chart summarizes the selected reference’s
-name, formula, and related header fields for quick inspection without leaving
-the lookup dialog.
+and selection changes in either sidebar update the same preview. The metadata
+panel beside the chart summarizes the selected reference’s title, molform
+(formula), CAS, origin, and related header fields for quick inspection without
+leaving the lookup dialog.
 Reference spectrum traces and peak sticks are cached within the lookup window
 session so repeated plot updates avoid redundant database or file reads when
 revisiting the same references.
