@@ -580,7 +580,13 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     def _on_selected_list_selection_changed(self) -> None:
         self._update_remove_button_state()
-        self._request_plot_refresh()
+        items = self._selected_list.selectedItems()
+        if len(items) == 1:
+            entry = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry, LookupResultEntry):
+                self._set_preview_entry(entry)
+                return
+        self._set_preview_entry(None)
 
     def _on_add_selected_results(self) -> None:
         entries = self._selected_results_in_row_order()
