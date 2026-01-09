@@ -175,6 +175,11 @@ subset of references in the right sidebar filters the plot to just those
 entries, while leaving the list unselected shows the full selected-reference
 set. Search actions do not change the plot until you explicitly add or remove
 references, keeping comparisons stable while you browse new matches.
+Right-clicking any reference in the left or right sidebar previews that
+reference’s normalized spectrum and peak sticks in the bottom plot immediately,
+and the metadata panel beside the chart summarizes the selected reference’s
+name, formula, and related header fields for quick inspection without leaving
+the lookup dialog.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose

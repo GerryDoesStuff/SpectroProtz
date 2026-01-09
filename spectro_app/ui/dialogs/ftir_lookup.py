@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import html
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -37,6 +38,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._reference_spectra_cache: Dict[str, tuple[List[float], List[float]]] = {}
         self._reference_spectra_errors: Dict[str, str] = {}
         self._search_in_progress = False
+        self._preview_entry: Optional[LookupResultEntry] = None
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -187,7 +189,23 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
         self._plot_widget.setLabel("left", "Normalized intensity")
         self._plot_widget.setTitle("Selected reference peaks")
-        layout.addWidget(self._plot_widget, 1)
+        self._metadata_label = QtWidgets.QLabel("No reference selected.")
+        self._metadata_label.setWordWrap(True)
+        self._metadata_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._metadata_label.setStyleSheet("color: #444;")
+        metadata_box = QtWidgets.QGroupBox("Reference metadata")
+        metadata_box.setMinimumWidth(240)
+        metadata_layout = QtWidgets.QVBoxLayout(metadata_box)
+        metadata_layout.addWidget(self._metadata_label)
+
+        plot_container = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QHBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.addWidget(self._plot_widget, 3)
+        plot_layout.addWidget(metadata_box, 1)
+        layout.addWidget(plot_container, 1)
         layout.addWidget(splitter, 1)
 
         self._result_entries: List[LookupResultEntry] = []
@@ -381,6 +399,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         peak_counts: Dict[str, int],
     ) -> None:
         self._result_entries = []
+        self._set_preview_entry(None, refresh=False)
         for entry in entries:
             file_id = str(entry.get("file_id") or "").strip()
             self._result_entries.append(
@@ -452,6 +471,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if not isinstance(entry, LookupResultEntry):
             return
+        self._set_preview_entry(entry)
         menu = QtWidgets.QMenu(self)
         add_action = menu.addAction("Add to plot")
         action = menu.exec(self._results_list.mapToGlobal(pos))
@@ -462,6 +482,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         item = self._selected_list.itemAt(pos)
         if item is None:
             return
+        entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(entry, LookupResultEntry):
+            self._set_preview_entry(entry)
         menu = QtWidgets.QMenu(self)
         remove_action = menu.addAction("Remove from plot")
         action = menu.exec(self._selected_list.mapToGlobal(pos))
@@ -557,20 +580,24 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 name=label,
             )
 
-        plot_entries = self._selected_entries_for_plot()
+        preview_entry = self._preview_entry
+        plot_entries = [preview_entry] if preview_entry is not None else self._selected_entries_for_plot()
         if not plot_entries:
             title = "Selected reference peaks"
             if has_selected_spectrum:
                 title = "Selected spectrum"
             self._plot_widget.setTitle(title)
+            self._update_metadata_panel(None, count=0)
             return
         if self._active_index_path is None:
             self._plot_widget.setTitle("Select an index database to plot peaks")
+            self._update_metadata_panel(None, count=len(plot_entries))
             return
 
         file_ids = [entry.file_id for entry in plot_entries if entry.file_id]
         if not file_ids:
             self._plot_widget.setTitle("Selected reference peaks")
+            self._update_metadata_panel(None, count=len(plot_entries))
             return
 
         peaks_by_file: Dict[str, List[tuple[float, float]]] = {}
@@ -629,10 +656,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 pen=pen,
             )
 
-        if has_selected_spectrum:
-            self._plot_widget.setTitle("Selected spectrum + reference traces")
+        if preview_entry is not None:
+            self._plot_widget.setTitle("Reference preview")
+            self._update_metadata_panel(preview_entry, count=1)
         else:
-            self._plot_widget.setTitle("Selected reference traces")
+            if has_selected_spectrum:
+                self._plot_widget.setTitle("Selected spectrum + reference traces")
+            else:
+                self._plot_widget.setTitle("Selected reference traces")
+            if len(plot_entries) == 1:
+                self._update_metadata_panel(plot_entries[0], count=1)
+            else:
+                self._update_metadata_panel(None, count=len(plot_entries))
 
     def _selected_entries_for_plot(self) -> List[LookupResultEntry]:
         if not self._selected_entries:
@@ -683,6 +718,59 @@ class FtirLookupWindow(QtWidgets.QDialog):
         cached = (x_list, y_list)
         self._reference_spectra_cache[entry.file_id] = cached
         return cached
+
+    def _set_preview_entry(
+        self,
+        entry: Optional["LookupResultEntry"],
+        *,
+        refresh: bool = True,
+    ) -> None:
+        self._preview_entry = entry
+        if refresh:
+            self._request_plot_refresh(confirmed=True)
+
+    def _update_metadata_panel(
+        self,
+        entry: Optional["LookupResultEntry"],
+        *,
+        count: int,
+    ) -> None:
+        if entry is None:
+            if count > 1:
+                self._metadata_label.setText(f"{count} references selected.")
+            elif count == 1:
+                self._metadata_label.setText("1 reference selected.")
+            else:
+                self._metadata_label.setText("No reference selected.")
+            return
+
+        meta = entry.metadata
+        name = entry.spectrum_name or "—"
+        formula = entry.formula or meta.get("molform") or "—"
+        matched_peaks = entry.matched_peaks
+        title = meta.get("title") or "—"
+        names = meta.get("names") or "—"
+        origin = meta.get("origin") or "—"
+        cas = meta.get("cas") or "—"
+        path = meta.get("path") or "—"
+        file_id = entry.file_id or "—"
+
+        def fmt(value: object) -> str:
+            text = str(value).strip()
+            return html.escape(text) if text else "—"
+
+        summary = (
+            f"<b>Name:</b> {fmt(name)}<br>"
+            f"<b>Formula:</b> {fmt(formula)}<br>"
+            f"<b>Matched peaks:</b> {fmt(matched_peaks)}<br>"
+            f"<b>File ID:</b> {fmt(file_id)}<br>"
+            f"<b>Title:</b> {fmt(title)}<br>"
+            f"<b>Names:</b> {fmt(names)}<br>"
+            f"<b>Origin:</b> {fmt(origin)}<br>"
+            f"<b>CAS:</b> {fmt(cas)}<br>"
+            f"<b>Path:</b> {fmt(path)}"
+        )
+        self._metadata_label.setText(summary)
 
     def _normalize_spectrum_intensities(self, values: List[float]) -> List[float]:
         if not values:
