@@ -282,6 +282,12 @@ Results are persisted in `peaks.duckdb` under `index_dir` with four tables:
   width, and supporting peak count.
 - `global_consensus` – global consensus clusters aggregating across all files.
 
+When SpectroApp starts, it validates the last-used FTIR index database (if
+configured) against the expected DuckDB schema so missing tables or columns are
+flagged early in the logger panel before lookup workflows proceed.
+Lookup query projections are kept in sync with the index builder schema to
+ensure downstream peak searches request the correct columns.
+
 The `spectra` table includes both foundational bookkeeping fields and promoted
 JCAMP headers for convenient filtering and projection:
 

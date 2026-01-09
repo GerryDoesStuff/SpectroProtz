@@ -14,6 +14,7 @@ from PyQt6.QtGui import QDesktopServices
 
 from spectro_app.engine.plugin_api import BatchResult
 from spectro_app.engine.recipe_model import Recipe
+from spectro_app.engine.ftir_index_schema import validate_ftir_index_schema
 from spectro_app.engine.solvent_reference import (
     SolventReferenceStore,
     build_reference_entry,
@@ -402,6 +403,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._index_status_label.clear()
             self._index_status_label.setToolTip("")
             self._index_status_label.setVisible(False)
+        if display:
+            self._validate_ftir_index_schema(display)
+
+    def _validate_ftir_index_schema(self, path: str) -> None:
+        try:
+            errors = validate_ftir_index_schema(path)
+        except Exception as exc:
+            message = f"FTIR index schema validation failed for {path}: {exc}"
+            logger.warning(message)
+            if hasattr(self, "loggerDock"):
+                self.loggerDock.append_line(message)
+            return
+        if not errors:
+            return
+        header = f"FTIR index schema mismatch for {path}:"
+        logger.warning("%s %s", header, " ".join(errors))
+        if hasattr(self, "loggerDock"):
+            self.loggerDock.append_line(header)
+            for error in errors:
+                self.loggerDock.append_line(f"- {error}")
 
     def _collect_actions(self):
         actions = {action.text(): action for action in self.findChildren(QtGui.QAction)}
