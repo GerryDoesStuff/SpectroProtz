@@ -157,9 +157,17 @@ point at a `peaks.duckdb` index, run manual searches from a query bar, and view
 matching reference spectra in the left-hand results sidebar. The results list
 surfaces the spectrum name, molecular formula, and summary match statistics
 (including matched peak counts) so you can spot likely candidates quickly while
-keeping the original manual query text intact. The list supports selection and
-deselection highlighting, and it paginates through large result sets so the
-sidebar remains responsive when a search returns many references.
+keeping the original manual query text intact. The list supports multi-selection
+and paginates through large result sets so the sidebar remains responsive when a
+search returns many references. Use the **Add to plot** button or the left
+sidebar context menu to move reference spectra into the right-hand plotting
+sidebar, which preserves the order you add items.
+
+The right sidebar keeps a stable list of selected references with remove controls
+via a **Remove selected** button or right-click menu. Every add or remove action
+immediately re-plots the top comparison chart in the lookup window, which draws
+normalized peak sticks for each selected reference. This keeps the plot in sync
+with the chosen references as you curate the selection for further analysis.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose
