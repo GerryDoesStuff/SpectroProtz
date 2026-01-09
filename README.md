@@ -135,6 +135,22 @@ thresholds, and optional CWT-based detection with configurable width ranges and
 cluster tolerances so the feature set stays consistent across UV-Vis and FTIR
 recipes.
 
+When peak detection is enabled, the preview dock renders peak picks as vertical
+marker lines (one per peak) that match the spectrum color, and the **Peaks**
+checkbox lets you show or hide those markers alongside the stage traces. Peaks
+are grouped under the same sample label used in the legend for the spectral
+lines, but the peak markers themselves are not annotated with individual text
+labels inside the plot; use the sample label and hover/cursor readout to
+interpret positions. Peak filters are driven by the minimum absorbance/intensity
+threshold and the maximum peak candidate count in the recipe editor, so you can
+drop low-intensity features and cap the number of peaks retained per spectrum.
+Axis units come from the spectrum metadata (`axis_key` + `axis_unit`) and drive
+both the plot labels and which peak coordinate is read (wavelength/nm for UV-Vis
+or wavenumber/cm⁻¹ for FTIR/Raman). No numeric unit conversion is applied during
+peak rendering; when the pipeline sees a non-nm axis it remaps window keys (for
+example `min_cm`/`max_cm`) into the nm-based config fields while preserving the
+original axis metadata so downstream stages still report the original units.
+
 ## FTIR reference lookup parsing
 The FTIR indexer’s DuckDB outputs can be queried with search-bar style input
 using the helper in `spectro_app/engine/ftir_lookup.py`. The parser accepts
