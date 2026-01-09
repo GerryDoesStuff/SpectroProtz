@@ -164,14 +164,17 @@ sidebar context menu to move reference spectra into the right-hand plotting
 sidebar, which preserves the order you add items.
 
 The right sidebar keeps a stable list of selected references with remove controls
-via a **Remove selected** button or right-click menu. Every add or remove action
-immediately re-plots the top comparison chart in the lookup window, which draws
-normalized peak sticks for each selected reference. The same chart now overlays
-the currently selected preview spectrum as a normalized trace, scaling the
-selected spectrum’s intensities independently from the reference peak heights
-so both datasets fit in a 0–1 range without changing their internal relative
-amplitudes. This keeps the plot in sync with the chosen references and the
-active preview selection as you curate candidates for further analysis.
+via a **Remove selected** button or right-click menu. Every add, remove, or
+selection change immediately re-plots the top comparison chart in the lookup
+window, which draws normalized reference spectrum traces and overlays vertical
+peak sticks for each selected reference. The chart also overlays the currently
+selected preview spectrum as a normalized trace, scaling each spectrum’s
+intensities independently from the reference peak heights so all plotted data
+fits in a 0–1 range without changing internal relative amplitudes. Selecting a
+subset of references in the right sidebar filters the plot to just those
+entries, while leaving the list unselected shows the full selected-reference
+set. Search actions do not change the plot until you explicitly add or remove
+references, keeping comparisons stable while you browse new matches.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose

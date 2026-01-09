@@ -9,6 +9,7 @@ import duckdb
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 
+from scripts.jdxIndexBuilder import parse_jcamp_multispec
 from spectro_app.app_context import AppContext
 from spectro_app.engine.ftir_index_schema import validate_ftir_index_schema
 from spectro_app.engine.ftir_lookup import LookupCriteria, PeakCriterion, build_lookup_queries, parse_lookup_text
@@ -33,6 +34,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._active_index_path: Optional[Path] = None
         self._selected_entries: List[LookupResultEntry] = []
         self._plot_legend: Optional[pg.LegendItem] = None
+        self._reference_spectra_cache: Dict[str, tuple[List[float], List[float]]] = {}
+        self._reference_spectra_errors: Dict[str, str] = {}
+        self._search_in_progress = False
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -146,7 +150,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._selected_list.setToolTip("References included in the comparison plot.")
-        self._selected_list.itemSelectionChanged.connect(self._update_remove_button_state)
+        self._selected_list.itemSelectionChanged.connect(self._on_selected_list_selection_changed)
         self._selected_list.setContextMenuPolicy(
             QtCore.Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -238,7 +242,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._selected_spectrum_label = self._auto_peak_label
 
         self._refresh_auto_status()
-        self._refresh_plot()
+        self._request_plot_refresh()
 
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
@@ -316,6 +320,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         path = self._resolve_index_path()
         if path is None:
             return
+        if self._active_index_path != path:
+            self._reference_spectra_cache.clear()
+            self._reference_spectra_errors.clear()
         self._active_index_path = path
         errors = validate_ftir_index_schema(path)
         if errors:
@@ -331,6 +338,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         queries = build_lookup_queries(criteria)
         entries: List[Dict[str, Any]] = []
+        self._search_in_progress = True
         try:
             con = duckdb.connect(str(path), read_only=True)
             try:
@@ -344,13 +352,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
         except Exception as exc:
             self._status_label.setText(f"Lookup failed: {exc}")
             return
+        finally:
+            self._search_in_progress = False
 
         self._populate_results(entries, peak_counts)
         status = f"{source_label}: {len(entries)} matches"
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
-        self._refresh_plot()
 
     def _fetch_peak_counts(self, con: duckdb.DuckDBPyConnection, queries: Any) -> Dict[str, int]:
         peak_counts: Dict[str, int] = {}
@@ -469,6 +478,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         self._remove_from_plot_button.setEnabled(bool(self._selected_list.selectedItems()))
 
+    def _on_selected_list_selection_changed(self) -> None:
+        self._update_remove_button_state()
+        self._request_plot_refresh()
+
     def _on_add_selected_results(self) -> None:
         items = self._results_list.selectedItems()
         if not items:
@@ -492,7 +505,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._selected_list.addItem(item)
             existing_ids.add(entry.file_id)
         self._sync_selected_entries()
-        self._refresh_plot()
+        self._request_plot_refresh(confirmed=True)
 
     def _on_remove_selected_references(self) -> None:
         items = self._selected_list.selectedItems()
@@ -509,7 +522,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             if row >= 0:
                 self._selected_list.takeItem(row)
         self._sync_selected_entries()
-        self._refresh_plot()
+        self._request_plot_refresh(confirmed=True)
         self._update_remove_button_state()
 
     def _sync_selected_entries(self) -> None:
@@ -520,6 +533,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
             if isinstance(entry, LookupResultEntry):
                 entries.append(entry)
         self._selected_entries = entries
+
+    def _request_plot_refresh(self, *, confirmed: bool = False) -> None:
+        if self._search_in_progress and not confirmed:
+            return
+        self._refresh_plot()
 
     def _refresh_plot(self) -> None:
         self._plot_widget.clear()
@@ -539,7 +557,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 name=label,
             )
 
-        if not self._selected_entries:
+        plot_entries = self._selected_entries_for_plot()
+        if not plot_entries:
             title = "Selected reference peaks"
             if has_selected_spectrum:
                 title = "Selected spectrum"
@@ -549,7 +568,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._plot_widget.setTitle("Select an index database to plot peaks")
             return
 
-        file_ids = [entry.file_id for entry in self._selected_entries if entry.file_id]
+        file_ids = [entry.file_id for entry in plot_entries if entry.file_id]
         if not file_ids:
             self._plot_widget.setTitle("Selected reference peaks")
             return
@@ -582,7 +601,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 (center_value, amplitude_value)
             )
 
-        for idx, entry in enumerate(self._selected_entries):
+        for idx, entry in enumerate(plot_entries):
+            reference_trace = self._load_reference_spectrum(entry)
+            if reference_trace is not None:
+                x_vals, y_vals = reference_trace
+                normalized_trace = self._normalize_spectrum_intensities(y_vals)
+                pen = pg.mkPen(color=pg.intColor(idx), width=2)
+                self._plot_widget.plot(
+                    x_vals,
+                    normalized_trace,
+                    pen=pen,
+                    name=entry.spectrum_name,
+                )
             peaks = peaks_by_file.get(entry.file_id, [])
             if not peaks:
                 continue
@@ -592,18 +622,67 @@ class FtirLookupWindow(QtWidgets.QDialog):
             for (center, _amplitude), height in zip(peaks, normalized_heights):
                 x_values.extend([center, center, float("nan")])
                 y_values.extend([0.0, height, float("nan")])
-            pen = pg.mkPen(color=pg.intColor(idx), width=2)
+            pen = pg.mkPen(color=pg.intColor(idx), width=1, style=QtCore.Qt.PenStyle.DashLine)
             self._plot_widget.plot(
                 x_values,
                 y_values,
                 pen=pen,
-                name=entry.spectrum_name,
             )
 
         if has_selected_spectrum:
-            self._plot_widget.setTitle("Selected spectrum + reference peaks")
+            self._plot_widget.setTitle("Selected spectrum + reference traces")
         else:
-            self._plot_widget.setTitle("Selected reference peaks")
+            self._plot_widget.setTitle("Selected reference traces")
+
+    def _selected_entries_for_plot(self) -> List[LookupResultEntry]:
+        if not self._selected_entries:
+            return []
+        selected_items = self._selected_list.selectedItems()
+        if not selected_items:
+            return list(self._selected_entries)
+        entries: List[LookupResultEntry] = []
+        for item in selected_items:
+            entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry, LookupResultEntry):
+                entries.append(entry)
+        return entries
+
+    def _load_reference_spectrum(
+        self,
+        entry: LookupResultEntry,
+    ) -> Optional[tuple[List[float], List[float]]]:
+        if not entry.file_id:
+            return None
+        cached = self._reference_spectra_cache.get(entry.file_id)
+        if cached is not None:
+            return cached
+        if entry.file_id in self._reference_spectra_errors:
+            return None
+        raw_path = entry.metadata.get("path")
+        if not raw_path:
+            self._reference_spectra_errors[entry.file_id] = "Missing path metadata."
+            return None
+        path = Path(str(raw_path)).expanduser()
+        if not path.exists():
+            self._reference_spectra_errors[entry.file_id] = f"Missing file: {path}"
+            return None
+        try:
+            x_values, spectra, _headers = parse_jcamp_multispec(str(path))
+        except Exception as exc:
+            self._reference_spectra_errors[entry.file_id] = f"Failed to parse {path.name}: {exc}"
+            return None
+        if not spectra:
+            self._reference_spectra_errors[entry.file_id] = f"No spectra in {path.name}"
+            return None
+        y_values = spectra[0]
+        if len(x_values) == 0 or len(y_values) == 0:
+            self._reference_spectra_errors[entry.file_id] = f"Empty spectrum in {path.name}"
+            return None
+        x_list = [float(value) for value in x_values.tolist()]
+        y_list = [float(value) for value in y_values.tolist()]
+        cached = (x_list, y_list)
+        self._reference_spectra_cache[entry.file_id] = cached
+        return cached
 
     def _normalize_spectrum_intensities(self, values: List[float]) -> List[float]:
         if not values:
