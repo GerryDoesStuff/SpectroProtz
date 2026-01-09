@@ -41,6 +41,8 @@ class _StageDataset:
 class SpectraPlotWidget(QtWidgets.QWidget):
     """Interactive preview plot with stage toggles and crosshair readouts."""
 
+    lookup_peaks_requested = QtCore.pyqtSignal(object)
+
     STAGE_LABELS: Dict[str, str] = {
         "raw": "Raw",
         "stitched": "Stitched",
@@ -91,6 +93,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._visible_stages: set[str] = set()
         self._color_map: Dict[str, QtGui.QColor] = {}
         self._legend: Optional[pg.LegendItem] = None
+        self._label_axis_key: Dict[str, str] = {}
         self._last_cursor_result: Optional[tuple[_StageDataset, int, float, float]] = None
         self._last_cursor_pos: Optional[tuple[float, float]] = None
 
@@ -302,6 +305,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._all_peak_points = {}
         self._peak_points = {}
         self._peak_styles = {}
+        self._label_axis_key = {}
         self._visible_stages.clear()
         self._color_map.clear()
         if self._legend is not None:
@@ -366,6 +370,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             axis_key = str(meta.get("axis_key") or meta.get("axis_type") or "wavelength").strip().lower()
             if not axis_key:
                 axis_key = "wavelength"
+            self._label_axis_key[label] = axis_key
             peaks_meta = features.get("peaks", [])
             if isinstance(peaks_meta, Sequence) and not isinstance(peaks_meta, (str, bytes)):
                 peak_axis_values: List[float] = []
@@ -1150,6 +1155,12 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             )
         reset_action = menu.addAction("Reset view")
         menu.addSeparator()
+        lookup_action = menu.addAction("Use selected peaks for reference lookup")
+        if not self._can_request_lookup():
+            lookup_action.setEnabled(False)
+            lookup_action.setToolTip(
+                "Select a spectrum with FTIR peak metadata to enable lookup."
+            )
         hide_action = menu.addAction("Hide selected spectrum")
         show_hidden_action = menu.addAction("Show hidden spectra")
         menu.addSeparator()
@@ -1170,6 +1181,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 self._show_export_unavailable_message()
         elif action == reset_action:
             self._reset_view()
+        elif action == lookup_action:
+            self._emit_lookup_peaks()
         elif action == hide_action:
             self._hide_selected_spectrum()
         elif action == show_hidden_action:
@@ -1185,6 +1198,28 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                 self._apply_zoom(0.8, center)
             else:
                 self._apply_zoom(1.25, center)
+
+    def _can_request_lookup(self) -> bool:
+        label = self._selected_label
+        if not label:
+            return False
+        if label not in self._all_peak_points:
+            return False
+        axis_key = self._label_axis_key.get(label, "").strip().lower()
+        return axis_key in {"wavenumber", "wavenumbers", "cm-1", "cm^-1", "cm⁻¹"}
+
+    def _emit_lookup_peaks(self) -> None:
+        label = self._selected_label
+        if not label or label not in self._all_peak_points:
+            return
+        axis_key = self._label_axis_key.get(label, "wavelength")
+        peak_values, _peak_intensities = self._all_peak_points.get(label, (np.array([]), np.array([])))
+        payload = {
+            "label": label,
+            "axis_key": axis_key,
+            "peaks": peak_values.tolist(),
+        }
+        self.lookup_peaks_requested.emit(payload)
 
     def _hide_selected_spectrum(self) -> None:
         label = self._selected_label
@@ -1256,6 +1291,8 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
 
 class PreviewDock(QDockWidget):
+    lookup_peaks_requested = QtCore.pyqtSignal(object)
+
     def __init__(self, parent=None):
         super().__init__("Preview", parent)
         self.setObjectName("PreviewDock")
@@ -1317,6 +1354,11 @@ class PreviewDock(QDockWidget):
                     self._spectra_widget = None
                     shown = False
         if shown and spectra_widget is not None:
+            try:
+                spectra_widget.lookup_peaks_requested.disconnect(self.lookup_peaks_requested)
+            except TypeError:
+                pass
+            spectra_widget.lookup_peaks_requested.connect(self.lookup_peaks_requested)
             self.tabs.addTab(spectra_widget, "Spectra")
         else:
             message = "Interactive plotting is unavailable for these results."

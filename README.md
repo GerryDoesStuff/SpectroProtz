@@ -150,6 +150,23 @@ whitespace-only searches are handled defensively by returning queries that
 produce no rows, ensuring the lookup flow never issues an unbounded query by
 default.
 
+## FTIR reference lookup window
+SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
+accessible under **Tools → FTIR Reference Lookup...**. The dialog lets you
+point at a `peaks.duckdb` index, run manual searches from a query bar, and view
+matching reference spectra in the left-hand results sidebar. The results list
+surfaces the most relevant metadata (title/name, CAS, formula) so you can spot
+likely candidates quickly while keeping the original manual query text intact.
+
+Preview peak identification can also feed the lookup workflow without
+overwriting manual search state. From the preview plot context menu, choose
+**Use selected peaks for reference lookup** to capture the currently selected
+spectrum’s FTIR peaks. The lookup window stores those peaks as a pending
+auto-search request, shows how many were captured, and waits for you to press
+**Apply preview peaks** (with a configurable tolerance) before it refreshes the
+left sidebar with auto-search matches. Manual search inputs remain unchanged
+until you explicitly trigger the preview-driven search.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:

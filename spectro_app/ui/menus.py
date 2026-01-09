@@ -55,6 +55,15 @@ def build_menus(window):
         )
     )
     tools_menu.addAction(
+        _act(
+            window,
+            "FTIR Reference Lookup...",
+            slot=window.on_open_ftir_lookup,
+            status_tip="Search FTIR reference indexes by peak criteria.",
+            tool_tip="Search FTIR reference indexes by peak criteria.",
+        )
+    )
+    tools_menu.addAction(
         _act(window, "Open Log Folder", slot=window.on_open_log_folder)
     )
 
