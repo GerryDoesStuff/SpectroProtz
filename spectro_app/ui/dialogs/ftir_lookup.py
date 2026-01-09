@@ -128,7 +128,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         )
         self._results_list.setToolTip("Reference spectra matching the active search criteria.")
         self._results_list.itemClicked.connect(self._on_result_item_clicked)
-        self._results_list.itemSelectionChanged.connect(self._update_add_button_state)
+        self._results_list.itemSelectionChanged.connect(self._on_results_selection_changed)
         self._results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self._results_list.customContextMenuRequested.connect(self._show_results_context_menu)
 
@@ -556,6 +556,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         self._add_to_plot_button.setEnabled(bool(self._results_list.selectedItems()))
 
+    def _on_results_selection_changed(self) -> None:
+        items = self._results_list.selectedItems()
+        if not items:
+            if self._preview_entry is not None:
+                self._set_preview_entry(None)
+            self._update_add_button_state()
+            return
+        entry = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(entry, LookupResultEntry):
+            self._set_preview_entry(entry)
+        self._update_add_button_state()
+
     def _update_remove_button_state(self) -> None:
         if not hasattr(self, "_remove_from_plot_button"):
             return
@@ -978,10 +990,15 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     def _format_entry_label(self, entry: "LookupResultEntry") -> str:
         formula = entry.formula or "—"
+        cas = (entry.metadata.get("cas") or "").strip()
         peak_text = "peak" if entry.matched_peaks == 1 else "peaks"
+        summary_parts = [f"Formula: {formula}"]
+        if cas:
+            summary_parts.append(f"CAS: {cas}")
+        summary_parts.append(f"Matches: {entry.matched_peaks} {peak_text}")
         return (
             f"{entry.spectrum_name}\n"
-            f"Formula: {formula} • Matched {entry.matched_peaks} {peak_text}"
+            f"{' • '.join(summary_parts)}"
         )
 
     def _on_search_text_changed(self, text: str) -> None:
