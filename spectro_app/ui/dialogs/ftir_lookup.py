@@ -236,11 +236,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         plot_layout.addWidget(metadata_box, 1)
         layout.addWidget(plot_container, 1)
 
-        self._send_to_main_plot_button = QtWidgets.QToolButton()
-        self._send_to_main_plot_button.setText("Send plot to main preview")
+        self._send_to_main_plot_button = QtWidgets.QPushButton()
+        self._send_to_main_plot_button.setText("Send overlay to main preview")
         self._send_to_main_plot_button.setToolTip(
             "Overlay the current reference plot in the main preview window."
         )
+        self._send_to_main_plot_button.setEnabled(False)
         self._send_to_main_plot_button.clicked.connect(self._on_send_to_main_plot)
 
         send_row = QtWidgets.QHBoxLayout()
@@ -258,6 +259,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._result_limit_hit = False
 
         self._restore_index_path()
+        self._update_send_button_state()
 
     def set_auto_search_peaks(self, payload: Dict[str, object]) -> None:
         peaks_raw = payload.get("peaks")
@@ -646,6 +648,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             if isinstance(entry, LookupResultEntry):
                 entries.append(entry)
         self._selected_entries = entries
+        self._update_send_button_state()
 
     def _on_send_to_main_plot(self) -> None:
         overlays = self._collect_plot_overlays()
@@ -654,6 +657,13 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         self.identified_overlay_requested.emit(overlays)
         self._status_label.setText("Sent reference overlays to the main preview plot.")
+        self._update_send_button_state()
+
+    def _update_send_button_state(self) -> None:
+        if not hasattr(self, "_send_to_main_plot_button"):
+            return
+        has_plot_entries = self._preview_entry is not None or bool(self._selected_entries)
+        self._send_to_main_plot_button.setEnabled(has_plot_entries)
 
     def _collect_plot_overlays(self) -> List[Dict[str, object]]:
         preview_entry = self._preview_entry
@@ -866,6 +876,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         refresh: bool = True,
     ) -> None:
         self._preview_entry = entry
+        self._update_send_button_state()
         if refresh:
             self._request_plot_refresh(confirmed=True)
 
