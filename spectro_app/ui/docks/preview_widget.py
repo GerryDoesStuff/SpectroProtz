@@ -1214,10 +1214,23 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             return
         axis_key = self._label_axis_key.get(label, "wavelength")
         peak_values, _peak_intensities = self._all_peak_points.get(label, (np.array([]), np.array([])))
+        spectrum_x: List[float] = []
+        spectrum_y: List[float] = []
+        if self._selected_curve is not None:
+            metadata = self._curve_metadata.get(self._selected_curve)
+            if metadata is not None:
+                dataset = metadata[0]
+                if dataset.label == label and dataset.x.size == dataset.y.size and dataset.x.size > 0:
+                    finite_mask = np.isfinite(dataset.x) & np.isfinite(dataset.y)
+                    if finite_mask.any():
+                        spectrum_x = dataset.x[finite_mask].tolist()
+                        spectrum_y = dataset.y[finite_mask].tolist()
         payload = {
             "label": label,
             "axis_key": axis_key,
             "peaks": peak_values.tolist(),
+            "spectrum_x": spectrum_x,
+            "spectrum_y": spectrum_y,
         }
         self.lookup_peaks_requested.emit(payload)
 

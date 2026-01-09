@@ -27,6 +27,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._auto_peak_centers: List[float] = []
         self._auto_peak_label: Optional[str] = None
         self._auto_peak_axis_key: Optional[str] = None
+        self._selected_spectrum_x: List[float] = []
+        self._selected_spectrum_y: List[float] = []
+        self._selected_spectrum_label: Optional[str] = None
         self._active_index_path: Optional[Path] = None
         self._selected_entries: List[LookupResultEntry] = []
         self._plot_legend: Optional[pg.LegendItem] = None
@@ -194,6 +197,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         peaks_raw = payload.get("peaks")
         label = payload.get("label")
         axis_key = payload.get("axis_key")
+        spectrum_x_raw = payload.get("spectrum_x")
+        spectrum_y_raw = payload.get("spectrum_y")
 
         peaks: List[float] = []
         if isinstance(peaks_raw, Iterable) and not isinstance(peaks_raw, (str, bytes)):
@@ -210,8 +215,30 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._auto_peak_centers = peaks
         self._auto_peak_label = str(label) if label is not None else None
         self._auto_peak_axis_key = axis_text or None
+        self._selected_spectrum_x = []
+        self._selected_spectrum_y = []
+        self._selected_spectrum_label = None
+        if (
+            isinstance(spectrum_x_raw, Iterable)
+            and isinstance(spectrum_y_raw, Iterable)
+            and not isinstance(spectrum_x_raw, (str, bytes))
+            and not isinstance(spectrum_y_raw, (str, bytes))
+        ):
+            for x_value, y_value in zip(spectrum_x_raw, spectrum_y_raw):
+                try:
+                    x_float = float(x_value)
+                    y_float = float(y_value)
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(x_float) and math.isfinite(y_float)):
+                    continue
+                self._selected_spectrum_x.append(x_float)
+                self._selected_spectrum_y.append(y_float)
+        if self._selected_spectrum_x and self._selected_spectrum_y:
+            self._selected_spectrum_label = self._auto_peak_label
 
         self._refresh_auto_status()
+        self._refresh_plot()
 
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
@@ -500,8 +527,23 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._plot_widget.removeItem(self._plot_legend)
         self._plot_legend = self._plot_widget.addLegend(offset=(10, 10))
 
+        has_selected_spectrum = bool(self._selected_spectrum_x and self._selected_spectrum_y)
+        if has_selected_spectrum:
+            normalized_y = self._normalize_spectrum_intensities(self._selected_spectrum_y)
+            label = self._selected_spectrum_label or "Selected spectrum"
+            pen = pg.mkPen(color="#444444", width=2)
+            self._plot_widget.plot(
+                self._selected_spectrum_x,
+                normalized_y,
+                pen=pen,
+                name=label,
+            )
+
         if not self._selected_entries:
-            self._plot_widget.setTitle("Selected reference peaks")
+            title = "Selected reference peaks"
+            if has_selected_spectrum:
+                title = "Selected spectrum"
+            self._plot_widget.setTitle(title)
             return
         if self._active_index_path is None:
             self._plot_widget.setTitle("Select an index database to plot peaks")
@@ -544,11 +586,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
             peaks = peaks_by_file.get(entry.file_id, [])
             if not peaks:
                 continue
-            max_amp = max(abs(amp) for _, amp in peaks) or 1.0
+            normalized_heights = self._normalize_peak_heights(peaks)
             x_values: List[float] = []
             y_values: List[float] = []
-            for center, amplitude in peaks:
-                height = abs(amplitude) / max_amp
+            for (center, _amplitude), height in zip(peaks, normalized_heights):
                 x_values.extend([center, center, float("nan")])
                 y_values.extend([0.0, height, float("nan")])
             pen = pg.mkPen(color=pg.intColor(idx), width=2)
@@ -558,6 +599,29 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 pen=pen,
                 name=entry.spectrum_name,
             )
+
+        if has_selected_spectrum:
+            self._plot_widget.setTitle("Selected spectrum + reference peaks")
+        else:
+            self._plot_widget.setTitle("Selected reference peaks")
+
+    def _normalize_spectrum_intensities(self, values: List[float]) -> List[float]:
+        if not values:
+            return []
+        min_val = min(values)
+        max_val = max(values)
+        if not (math.isfinite(min_val) and math.isfinite(max_val)):
+            return [0.0 for _ in values]
+        span = max_val - min_val
+        if span == 0:
+            return [0.0 for _ in values]
+        return [(value - min_val) / span for value in values]
+
+    def _normalize_peak_heights(self, peaks: List[tuple[float, float]]) -> List[float]:
+        if not peaks:
+            return []
+        max_amp = max(abs(amplitude) for _center, amplitude in peaks) or 1.0
+        return [abs(amplitude) / max_amp for _center, amplitude in peaks]
 
     def _format_entry_name(self, entry: Dict[str, Any]) -> str:
         title = (entry.get("title") or "").strip()
