@@ -180,6 +180,12 @@ reference’s normalized spectrum and peak sticks in the bottom plot immediately
 and the metadata panel beside the chart summarizes the selected reference’s
 name, formula, and related header fields for quick inspection without leaving
 the lookup dialog.
+When you are ready to compare candidates against live preview data, use
+**Send plot to main preview** to push the currently plotted reference spectra
+into the main preview plot as an overlay. The preview dock now includes an
+**Identified** checkbox alongside the stage toggles to show or hide those
+reference overlays on demand, keeping the main plot uncluttered while you work
+through match candidates.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose
@@ -208,6 +214,10 @@ that processed traces remain representative of their raw counterparts:
 - **Peak markers.** When peak detection metadata is available, the preview
   plot overlays vertical peak lines at detected positions and provides a
   **Peaks** toggle to show or hide the markers alongside the spectra.
+- **Identified overlays.** Reference spectra sent from the FTIR lookup window
+  appear as dashed overlays in the main preview plot and can be toggled with
+  the **Identified** checkbox to quickly compare current samples to matched
+  references without leaving the preview.
 - **Quantitative QC metrics.** The QC engine computes diagnostics such as noise
   levels, join offsets, spike counts, smoothing guards, drift, and per-stage
   roughness deltas that compare processed spectra against their retained
