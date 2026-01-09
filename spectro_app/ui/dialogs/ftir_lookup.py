@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import duckdb
+import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 
 from spectro_app.app_context import AppContext
@@ -26,6 +27,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._auto_peak_centers: List[float] = []
         self._auto_peak_label: Optional[str] = None
         self._auto_peak_axis_key: Optional[str] = None
+        self._active_index_path: Optional[Path] = None
+        self._selected_entries: List[LookupResultEntry] = []
+        self._plot_legend: Optional[pg.LegendItem] = None
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -86,9 +90,20 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         self._results_list = QtWidgets.QListWidget()
         self._results_list.setWordWrap(True)
-        self._results_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self._results_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self._results_list.setToolTip("Reference spectra matching the active search criteria.")
         self._results_list.itemClicked.connect(self._on_result_item_clicked)
+        self._results_list.itemSelectionChanged.connect(self._update_add_button_state)
+        self._results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self._results_list.customContextMenuRequested.connect(self._show_results_context_menu)
+
+        self._add_to_plot_button = QtWidgets.QToolButton()
+        self._add_to_plot_button.setText("Add to plot →")
+        self._add_to_plot_button.setEnabled(False)
+        self._add_to_plot_button.setToolTip("Add selected lookup results to the plotting sidebar.")
+        self._add_to_plot_button.clicked.connect(self._on_add_selected_results)
 
         self._results_page_label = QtWidgets.QLabel()
         self._results_page_label.setStyleSheet("color: #666;")
@@ -106,23 +121,43 @@ class FtirLookupWindow(QtWidgets.QDialog):
         pager_row.addWidget(self._prev_page_button)
         pager_row.addWidget(self._next_page_button)
 
+        add_row = QtWidgets.QHBoxLayout()
+        add_row.addStretch(1)
+        add_row.addWidget(self._add_to_plot_button)
+
         left_layout = QtWidgets.QVBoxLayout()
         left_layout.addWidget(self._results_summary)
         left_layout.addWidget(self._results_list, 1)
+        left_layout.addLayout(add_row)
         left_layout.addLayout(pager_row)
         left_container = QtWidgets.QWidget()
         left_container.setLayout(left_layout)
 
-        placeholder = QtWidgets.QLabel(
-            "Select a reference spectrum to view details.\n"
-            "(Detailed view and plotting are handled elsewhere.)"
-        )
-        placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        placeholder.setWordWrap(True)
-        placeholder.setStyleSheet("color: #777;")
-
         right_layout = QtWidgets.QVBoxLayout()
-        right_layout.addWidget(placeholder, 1)
+        right_header = QtWidgets.QLabel("Selected references")
+        right_header.setStyleSheet("font-weight: 600;")
+        right_layout.addWidget(right_header)
+
+        self._selected_list = QtWidgets.QListWidget()
+        self._selected_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self._selected_list.setToolTip("References included in the comparison plot.")
+        self._selected_list.itemSelectionChanged.connect(self._update_remove_button_state)
+        self._selected_list.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._selected_list.customContextMenuRequested.connect(
+            self._show_selected_context_menu
+        )
+        right_layout.addWidget(self._selected_list, 1)
+
+        self._remove_from_plot_button = QtWidgets.QToolButton()
+        self._remove_from_plot_button.setText("Remove selected")
+        self._remove_from_plot_button.setEnabled(False)
+        self._remove_from_plot_button.setToolTip("Remove selected references from the plot.")
+        self._remove_from_plot_button.clicked.connect(self._on_remove_selected_references)
+        right_layout.addWidget(self._remove_from_plot_button)
         right_container = QtWidgets.QWidget()
         right_container.setLayout(right_layout)
 
@@ -139,6 +174,13 @@ class FtirLookupWindow(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(auto_box)
         layout.addWidget(self._status_label)
+        self._plot_widget = pg.PlotWidget(background="w")
+        self._plot_widget.setMinimumHeight(220)
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self._plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
+        self._plot_widget.setLabel("left", "Normalized intensity")
+        self._plot_widget.setTitle("Selected reference peaks")
+        layout.addWidget(self._plot_widget, 1)
         layout.addWidget(splitter, 1)
 
         self._result_entries: List[LookupResultEntry] = []
@@ -247,6 +289,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         path = self._resolve_index_path()
         if path is None:
             return
+        self._active_index_path = path
         errors = validate_ftir_index_schema(path)
         if errors:
             joined = "\n".join(errors)
@@ -280,6 +323,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
+        self._refresh_plot()
 
     def _fetch_peak_counts(self, con: duckdb.DuckDBPyConnection, queries: Any) -> Dict[str, int]:
         peak_counts: Dict[str, int] = {}
@@ -324,6 +368,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._results_page_label.setText("No results")
             self._prev_page_button.setEnabled(False)
             self._next_page_button.setEnabled(False)
+            self._update_add_button_state()
             return
 
         start = self._current_page * self._page_size
@@ -338,6 +383,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_page_label.setText(f"Showing {start + 1}-{end} of {total}")
         self._prev_page_button.setEnabled(self._current_page > 0)
         self._next_page_button.setEnabled(end < total)
+        self._update_add_button_state()
 
     def _on_prev_page(self) -> None:
         if self._current_page <= 0:
@@ -362,6 +408,156 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._last_selected_row = None
             return
         self._last_selected_row = row
+
+    def _show_results_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self._results_list.itemAt(pos)
+        if item is None:
+            return
+        entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(entry, LookupResultEntry):
+            return
+        menu = QtWidgets.QMenu(self)
+        add_action = menu.addAction("Add to plot")
+        action = menu.exec(self._results_list.mapToGlobal(pos))
+        if action == add_action:
+            self._add_entries_to_plot([entry])
+
+    def _show_selected_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self._selected_list.itemAt(pos)
+        if item is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        remove_action = menu.addAction("Remove from plot")
+        action = menu.exec(self._selected_list.mapToGlobal(pos))
+        if action == remove_action:
+            self._remove_selected_references([item])
+
+    def _update_add_button_state(self) -> None:
+        if not hasattr(self, "_add_to_plot_button"):
+            return
+        self._add_to_plot_button.setEnabled(bool(self._results_list.selectedItems()))
+
+    def _update_remove_button_state(self) -> None:
+        if not hasattr(self, "_remove_from_plot_button"):
+            return
+        self._remove_from_plot_button.setEnabled(bool(self._selected_list.selectedItems()))
+
+    def _on_add_selected_results(self) -> None:
+        items = self._results_list.selectedItems()
+        if not items:
+            return
+        entries: List[LookupResultEntry] = []
+        for item in items:
+            entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry, LookupResultEntry):
+                entries.append(entry)
+        self._add_entries_to_plot(entries)
+
+    def _add_entries_to_plot(self, entries: List[LookupResultEntry]) -> None:
+        if not entries:
+            return
+        existing_ids = {entry.file_id for entry in self._selected_entries}
+        for entry in entries:
+            if entry.file_id in existing_ids:
+                continue
+            item = QtWidgets.QListWidgetItem(self._format_entry_label(entry))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
+            self._selected_list.addItem(item)
+            existing_ids.add(entry.file_id)
+        self._sync_selected_entries()
+        self._refresh_plot()
+
+    def _on_remove_selected_references(self) -> None:
+        items = self._selected_list.selectedItems()
+        if not items:
+            return
+        self._remove_selected_references(items)
+
+    def _remove_selected_references(
+        self,
+        items: List[QtWidgets.QListWidgetItem],
+    ) -> None:
+        for item in items:
+            row = self._selected_list.row(item)
+            if row >= 0:
+                self._selected_list.takeItem(row)
+        self._sync_selected_entries()
+        self._refresh_plot()
+        self._update_remove_button_state()
+
+    def _sync_selected_entries(self) -> None:
+        entries: List[LookupResultEntry] = []
+        for idx in range(self._selected_list.count()):
+            item = self._selected_list.item(idx)
+            entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry, LookupResultEntry):
+                entries.append(entry)
+        self._selected_entries = entries
+
+    def _refresh_plot(self) -> None:
+        self._plot_widget.clear()
+        if self._plot_legend is not None:
+            self._plot_widget.removeItem(self._plot_legend)
+        self._plot_legend = self._plot_widget.addLegend(offset=(10, 10))
+
+        if not self._selected_entries:
+            self._plot_widget.setTitle("Selected reference peaks")
+            return
+        if self._active_index_path is None:
+            self._plot_widget.setTitle("Select an index database to plot peaks")
+            return
+
+        file_ids = [entry.file_id for entry in self._selected_entries if entry.file_id]
+        if not file_ids:
+            self._plot_widget.setTitle("Selected reference peaks")
+            return
+
+        peaks_by_file: Dict[str, List[tuple[float, float]]] = {}
+        placeholders = ", ".join(["?"] * len(file_ids))
+        sql = (
+            "SELECT file_id, center, amplitude FROM peaks "
+            f"WHERE file_id IN ({placeholders})"
+        )
+        try:
+            con = duckdb.connect(str(self._active_index_path), read_only=True)
+            try:
+                rows = con.execute(sql, file_ids).fetchall()
+            finally:
+                con.close()
+        except Exception as exc:
+            self._status_label.setText(f"Plot refresh failed: {exc}")
+            return
+
+        for file_id, center, amplitude in rows:
+            if file_id is None or center is None:
+                continue
+            try:
+                center_value = float(center)
+                amplitude_value = float(amplitude) if amplitude is not None else 1.0
+            except (TypeError, ValueError):
+                continue
+            peaks_by_file.setdefault(str(file_id), []).append(
+                (center_value, amplitude_value)
+            )
+
+        for idx, entry in enumerate(self._selected_entries):
+            peaks = peaks_by_file.get(entry.file_id, [])
+            if not peaks:
+                continue
+            max_amp = max(abs(amp) for _, amp in peaks) or 1.0
+            x_values: List[float] = []
+            y_values: List[float] = []
+            for center, amplitude in peaks:
+                height = abs(amplitude) / max_amp
+                x_values.extend([center, center, float("nan")])
+                y_values.extend([0.0, height, float("nan")])
+            pen = pg.mkPen(color=pg.intColor(idx), width=2)
+            self._plot_widget.plot(
+                x_values,
+                y_values,
+                pen=pen,
+                name=entry.spectrum_name,
+            )
 
     def _format_entry_name(self, entry: Dict[str, Any]) -> str:
         title = (entry.get("title") or "").strip()
