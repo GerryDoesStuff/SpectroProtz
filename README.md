@@ -135,6 +135,21 @@ thresholds, and optional CWT-based detection with configurable width ranges and
 cluster tolerances so the feature set stays consistent across UV-Vis and FTIR
 recipes.
 
+## FTIR reference lookup parsing
+The FTIR indexer’s DuckDB outputs can be queried with search-bar style input
+using the helper in `spectro_app/engine/ftir_lookup.py`. The parser accepts
+numeric peak positions with optional tolerances (for example `1720±5` or
+`1720 +/- 5`) and metadata filters written as `key:value` or `key=value`
+tokens. Filters map to promoted FTIR metadata columns such as `title`, `origin`,
+`cas`, `names`, `molform`, `state`, and `nist_source`, with aliases like `name`
+or `formula` automatically normalized. The parser returns structured criteria
+with error messages for invalid tokens, then maps them to parameterized DuckDB
+SQL: one query for matching reference spectra and another for the peak rows
+that satisfy the same metadata filters plus any requested peak ranges. Empty or
+whitespace-only searches are handled defensively by returning queries that
+produce no rows, ensuring the lookup flow never issues an unbounded query by
+default.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:
