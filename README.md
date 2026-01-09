@@ -166,8 +166,12 @@ sidebar, which preserves the order you add items.
 The right sidebar keeps a stable list of selected references with remove controls
 via a **Remove selected** button or right-click menu. Every add or remove action
 immediately re-plots the top comparison chart in the lookup window, which draws
-normalized peak sticks for each selected reference. This keeps the plot in sync
-with the chosen references as you curate the selection for further analysis.
+normalized peak sticks for each selected reference. The same chart now overlays
+the currently selected preview spectrum as a normalized trace, scaling the
+selected spectrum’s intensities independently from the reference peak heights
+so both datasets fit in a 0–1 range without changing their internal relative
+amplitudes. This keeps the plot in sync with the chosen references and the
+active preview selection as you curate candidates for further analysis.
 
 Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose
