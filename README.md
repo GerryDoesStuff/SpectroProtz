@@ -162,6 +162,11 @@ and paginates through large result sets so the sidebar remains responsive when a
 search returns many references. Use the **Add to plot** button or the left
 sidebar context menu to move reference spectra into the right-hand plotting
 sidebar, which preserves the order you add items.
+The lookup dialog validates the selected DuckDB file before it queries, and it
+reports clear errors when the database is missing, unreadable, or cannot be
+opened. Searches that return no matches show an empty-state message in the
+results list so you know the query executed successfully but yielded no
+references.
 
 The right sidebar keeps a stable list of selected references with remove controls
 via a **Remove selected** button or right-click menu. Every add, remove, or
@@ -180,6 +185,9 @@ reference’s normalized spectrum and peak sticks in the bottom plot immediately
 and the metadata panel beside the chart summarizes the selected reference’s
 name, formula, and related header fields for quick inspection without leaving
 the lookup dialog.
+If the lookup database contains malformed peak rows (for example missing or
+non-numeric peak data), the plot skips those rows and reports a warning in the
+dialog status area instead of halting the preview.
 When you are ready to compare candidates against live preview data, use
 **Send plot to main preview** to push the currently plotted reference spectra
 into the main preview plot as an overlay. The preview dock now includes an
