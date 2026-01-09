@@ -60,6 +60,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._plot_refresh_timer.setSingleShot(True)
         self._plot_refresh_timer.setInterval(90)
         self._plot_refresh_timer.timeout.connect(self._refresh_plot)
+        self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
+        self._last_search_source: Optional[str] = None
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -284,6 +286,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         self._refresh_auto_status()
         self._request_plot_refresh()
+        self._auto_search_from_preview()
 
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
@@ -312,22 +315,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._run_lookup(criteria, source_label="Manual search")
 
     def _on_apply_auto_search(self) -> None:
-        if not self._auto_peak_centers:
-            self._status_label.setText("No preview peaks are available to search.")
-            return
-        if not self._is_wavenumber_axis(self._auto_peak_axis_key):
-            self._status_label.setText(
-                "Preview peaks are not in wavenumber units; auto-search only supports FTIR wavenumber peaks."
-            )
-            return
-
-        tolerance = float(self._tolerance_spin.value())
-        criteria = LookupCriteria(
-            peaks=[PeakCriterion(center=center, tolerance=tolerance) for center in self._auto_peak_centers],
-            filters={},
-            errors=[],
-        )
-        self._run_lookup(criteria, source_label="Preview peak auto-search")
+        self._auto_search_from_preview(force=True)
 
     def _refresh_auto_status(self) -> None:
         if not self._auto_peak_centers:
@@ -420,6 +408,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._search_in_progress = False
 
         self._populate_results(entries, peak_counts)
+        self._last_search_source = source_label
         match_count = len(entries)
         if match_count == 0:
             status = f"{source_label}: no matches found."
@@ -1021,6 +1010,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._current_page = 0
         self._last_selected_row = None
         self._last_search_text = None
+        self._last_search_source = None
         self._results_list.clear()
         self._results_summary.setText("Matches: 0")
         self._results_page_label.setText("No results")
@@ -1028,6 +1018,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._next_page_button.setEnabled(False)
         self._status_label.setText("Enter a search query or apply preview peaks to run a lookup.")
         self._update_add_button_state()
+        self._auto_search_from_preview()
 
     def _cache_reference_spectrum(
         self,
@@ -1057,6 +1048,41 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return []
         self._reference_peaks_cache.move_to_end(file_id)
         return cached
+
+    def _auto_search_from_preview(self, *, force: bool = False) -> None:
+        if not self._auto_peak_centers:
+            if force:
+                self._status_label.setText("No preview peaks are available to search.")
+            return
+        if not self._is_wavenumber_axis(self._auto_peak_axis_key):
+            if force:
+                self._status_label.setText(
+                    "Preview peaks are not in wavenumber units; auto-search only supports FTIR wavenumber peaks."
+                )
+            return
+        if not force and self._search_edit.text().strip():
+            return
+        tolerance = float(self._tolerance_spin.value())
+        signature = (
+            tuple(round(center, 6) for center in self._auto_peak_centers),
+            round(tolerance, 6),
+        )
+        if (
+            not force
+            and signature == self._last_auto_signature
+            and self._last_search_source == "Preview peak auto-search"
+        ):
+            return
+        criteria = LookupCriteria(
+            peaks=[
+                PeakCriterion(center=center, tolerance=tolerance)
+                for center in self._auto_peak_centers
+            ],
+            filters={},
+            errors=[],
+        )
+        self._run_lookup(criteria, source_label="Preview peak auto-search")
+        self._last_auto_signature = signature
 
 
 @dataclass(frozen=True)
