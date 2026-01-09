@@ -191,10 +191,10 @@ The right sidebar keeps a stable list of selected references with remove control
 via a **Remove selected** button or right-click menu. Every add, remove, or
 selection change batches re-plotting of the top comparison chart in the lookup
 window, which draws normalized reference spectrum traces and overlays vertical
-peak sticks for each selected reference. The chart also overlays the currently
-selected preview spectrum as a normalized trace, scaling each spectrum’s
-intensities independently from the reference peak heights so all plotted data
-fits in a 0–1 range without changing internal relative amplitudes. Selecting a
+peak sticks for each selected reference. The chart also overlays any currently
+selected preview spectra as normalized traces, scaling each selected spectrum
+independently into a 0–1 range while rendering each reference’s peak sticks
+with their own 0–1 normalization based on reference amplitudes. Selecting a
 subset of references in the right sidebar filters the plot to just those
 entries, while leaving the list unselected shows the full selected-reference
 set. Search actions do not change the plot until you explicitly add or remove

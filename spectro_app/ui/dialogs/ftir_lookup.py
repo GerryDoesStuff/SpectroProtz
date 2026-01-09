@@ -17,6 +17,13 @@ from spectro_app.engine.ftir_index_schema import validate_ftir_index_schema
 from spectro_app.engine.ftir_lookup import LookupCriteria, PeakCriterion, build_lookup_queries, parse_lookup_text
 
 
+@dataclass
+class _SelectedSpectrum:
+    label: Optional[str]
+    x: List[float]
+    y: List[float]
+
+
 class FtirLookupWindow(QtWidgets.QDialog):
     """Reference lookup window for FTIR peak matching."""
 
@@ -32,9 +39,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._auto_peak_centers: List[float] = []
         self._auto_peak_label: Optional[str] = None
         self._auto_peak_axis_key: Optional[str] = None
-        self._selected_spectrum_x: List[float] = []
-        self._selected_spectrum_y: List[float] = []
-        self._selected_spectrum_label: Optional[str] = None
+        self._selected_spectra: List[_SelectedSpectrum] = []
         self._active_index_path: Optional[Path] = None
         self._selected_entries: List[LookupResultEntry] = []
         self._plot_legend: Optional[pg.LegendItem] = None
@@ -253,6 +258,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         axis_key = payload.get("axis_key")
         spectrum_x_raw = payload.get("spectrum_x")
         spectrum_y_raw = payload.get("spectrum_y")
+        spectra_raw = payload.get("selected_spectra")
 
         peaks: List[float] = []
         if isinstance(peaks_raw, Iterable) and not isinstance(peaks_raw, (str, bytes)):
@@ -269,27 +275,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._auto_peak_centers = peaks
         self._auto_peak_label = str(label) if label is not None else None
         self._auto_peak_axis_key = axis_text or None
-        self._selected_spectrum_x = []
-        self._selected_spectrum_y = []
-        self._selected_spectrum_label = None
-        if (
-            isinstance(spectrum_x_raw, Iterable)
-            and isinstance(spectrum_y_raw, Iterable)
-            and not isinstance(spectrum_x_raw, (str, bytes))
-            and not isinstance(spectrum_y_raw, (str, bytes))
-        ):
-            for x_value, y_value in zip(spectrum_x_raw, spectrum_y_raw):
-                try:
-                    x_float = float(x_value)
-                    y_float = float(y_value)
-                except (TypeError, ValueError):
-                    continue
-                if not (math.isfinite(x_float) and math.isfinite(y_float)):
-                    continue
-                self._selected_spectrum_x.append(x_float)
-                self._selected_spectrum_y.append(y_float)
-        if self._selected_spectrum_x and self._selected_spectrum_y:
-            self._selected_spectrum_label = self._auto_peak_label
+        self._selected_spectra = self._parse_selected_spectra(
+            spectra_raw,
+            fallback_label=self._auto_peak_label,
+            spectrum_x_raw=spectrum_x_raw,
+            spectrum_y_raw=spectrum_y_raw,
+        )
 
         self._refresh_auto_status()
         self._request_plot_refresh()
@@ -680,24 +671,25 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._plot_widget.removeItem(self._plot_legend)
         self._plot_legend = self._plot_widget.addLegend(offset=(10, 10))
 
-        has_selected_spectrum = bool(self._selected_spectrum_x and self._selected_spectrum_y)
-        if has_selected_spectrum:
-            normalized_y = self._normalize_spectrum_intensities(self._selected_spectrum_y)
-            label = self._selected_spectrum_label or "Selected spectrum"
-            pen = pg.mkPen(color="#444444", width=2)
-            self._plot_widget.plot(
-                self._selected_spectrum_x,
-                normalized_y,
-                pen=pen,
-                name=label,
-            )
+        has_selected_spectra = bool(self._selected_spectra)
+        if has_selected_spectra:
+            for idx, spectrum in enumerate(self._selected_spectra):
+                normalized_y = self._normalize_spectrum_intensities(spectrum.y)
+                label = spectrum.label or "Selected spectrum"
+                pen = pg.mkPen(color=pg.intColor(idx), width=2)
+                self._plot_widget.plot(
+                    spectrum.x,
+                    normalized_y,
+                    pen=pen,
+                    name=label,
+                )
 
         preview_entry = self._preview_entry
         plot_entries = [preview_entry] if preview_entry is not None else self._selected_entries_for_plot()
         if not plot_entries:
             title = "Selected reference peaks"
-            if has_selected_spectrum:
-                title = "Selected spectrum"
+            if has_selected_spectra:
+                title = "Selected spectra"
             self._plot_widget.setTitle(title)
             self._update_metadata_panel(None, count=0)
             return
@@ -788,8 +780,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._plot_widget.setTitle("Reference preview")
             self._update_metadata_panel(preview_entry, count=1)
         else:
-            if has_selected_spectrum:
-                self._plot_widget.setTitle("Selected spectrum + reference traces")
+            if has_selected_spectra:
+                self._plot_widget.setTitle("Selected spectra + reference traces")
             else:
                 self._plot_widget.setTitle("Selected reference traces")
             if len(plot_entries) == 1:
@@ -930,6 +922,61 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return []
         max_amp = max(abs(amplitude) for _center, amplitude in peaks) or 1.0
         return [abs(amplitude) / max_amp for _center, amplitude in peaks]
+
+    def _parse_selected_spectra(
+        self,
+        spectra_raw: object,
+        *,
+        fallback_label: Optional[str],
+        spectrum_x_raw: object,
+        spectrum_y_raw: object,
+    ) -> List[_SelectedSpectrum]:
+        parsed: List[_SelectedSpectrum] = []
+        if isinstance(spectra_raw, Iterable) and not isinstance(spectra_raw, (str, bytes)):
+            for entry in spectra_raw:
+                if not isinstance(entry, dict):
+                    continue
+                label = entry.get("label")
+                x_raw = entry.get("x")
+                y_raw = entry.get("y")
+                spectrum = self._parse_selected_spectrum(label, x_raw, y_raw)
+                if spectrum is not None:
+                    parsed.append(spectrum)
+
+        if parsed:
+            return parsed
+
+        spectrum = self._parse_selected_spectrum(fallback_label, spectrum_x_raw, spectrum_y_raw)
+        return [spectrum] if spectrum is not None else []
+
+    def _parse_selected_spectrum(
+        self,
+        label: object,
+        x_raw: object,
+        y_raw: object,
+    ) -> Optional[_SelectedSpectrum]:
+        if (
+            not isinstance(x_raw, Iterable)
+            or not isinstance(y_raw, Iterable)
+            or isinstance(x_raw, (str, bytes))
+            or isinstance(y_raw, (str, bytes))
+        ):
+            return None
+        x_vals: List[float] = []
+        y_vals: List[float] = []
+        for x_value, y_value in zip(x_raw, y_raw):
+            try:
+                x_float = float(x_value)
+                y_float = float(y_value)
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(x_float) and math.isfinite(y_float)):
+                continue
+            x_vals.append(x_float)
+            y_vals.append(y_float)
+        if not x_vals or not y_vals:
+            return None
+        return _SelectedSpectrum(label=str(label) if label is not None else None, x=x_vals, y=y_vals)
 
     def _format_entry_name(self, entry: Dict[str, Any]) -> str:
         title = (entry.get("title") or "").strip()

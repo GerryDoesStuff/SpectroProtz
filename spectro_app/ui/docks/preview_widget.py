@@ -1310,21 +1310,53 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         peak_values, _peak_intensities = self._all_peak_points.get(label, (np.array([]), np.array([])))
         spectrum_x: List[float] = []
         spectrum_y: List[float] = []
+        selected_stage: Optional[str] = None
         if self._selected_curve is not None:
             metadata = self._curve_metadata.get(self._selected_curve)
             if metadata is not None:
                 dataset = metadata[0]
+                selected_stage = dataset.stage
                 if dataset.label == label and dataset.x.size == dataset.y.size and dataset.x.size > 0:
                     finite_mask = np.isfinite(dataset.x) & np.isfinite(dataset.y)
                     if finite_mask.any():
                         spectrum_x = dataset.x[finite_mask].tolist()
                         spectrum_y = dataset.y[finite_mask].tolist()
+        labels_for_payload = self._current_single_labels() if self._single_mode else [label]
+        selected_spectra: List[Dict[str, object]] = []
+        for spectrum_label in labels_for_payload:
+            dataset = None
+            if selected_stage:
+                for candidate in self._stage_datasets.get(selected_stage, []):
+                    if candidate.label == spectrum_label:
+                        dataset = candidate
+                        break
+            if dataset is None:
+                for stage_datasets in self._stage_datasets.values():
+                    for candidate in stage_datasets:
+                        if candidate.label == spectrum_label:
+                            dataset = candidate
+                            break
+                    if dataset is not None:
+                        break
+            if dataset is None or dataset.x.size != dataset.y.size or dataset.x.size == 0:
+                continue
+            finite_mask = np.isfinite(dataset.x) & np.isfinite(dataset.y)
+            if not finite_mask.any():
+                continue
+            selected_spectra.append(
+                {
+                    "label": spectrum_label,
+                    "x": dataset.x[finite_mask].tolist(),
+                    "y": dataset.y[finite_mask].tolist(),
+                }
+            )
         payload = {
             "label": label,
             "axis_key": axis_key,
             "peaks": peak_values.tolist(),
             "spectrum_x": spectrum_x,
             "spectrum_y": spectrum_y,
+            "selected_spectra": selected_spectra,
         }
         self.lookup_peaks_requested.emit(payload)
 
