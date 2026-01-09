@@ -133,9 +133,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_list.customContextMenuRequested.connect(self._show_results_context_menu)
 
         self._add_to_plot_button = QtWidgets.QToolButton()
-        self._add_to_plot_button.setText("Add to plot →")
+        self._add_to_plot_button.setText("Add →")
         self._add_to_plot_button.setEnabled(False)
-        self._add_to_plot_button.setToolTip("Add selected lookup results to the plotting sidebar.")
+        self._add_to_plot_button.setToolTip("Move selected lookup results into the plotting sidebar.")
         self._add_to_plot_button.clicked.connect(self._on_add_selected_results)
 
         self._results_page_label = QtWidgets.QLabel()
@@ -154,17 +154,28 @@ class FtirLookupWindow(QtWidgets.QDialog):
         pager_row.addWidget(self._prev_page_button)
         pager_row.addWidget(self._next_page_button)
 
-        add_row = QtWidgets.QHBoxLayout()
-        add_row.addStretch(1)
-        add_row.addWidget(self._add_to_plot_button)
-
         left_layout = QtWidgets.QVBoxLayout()
         left_layout.addWidget(self._results_summary)
         left_layout.addWidget(self._results_list, 1)
-        left_layout.addLayout(add_row)
         left_layout.addLayout(pager_row)
         left_container = QtWidgets.QWidget()
         left_container.setLayout(left_layout)
+
+        self._remove_from_plot_button = QtWidgets.QToolButton()
+        self._remove_from_plot_button.setText("← Remove")
+        self._remove_from_plot_button.setEnabled(False)
+        self._remove_from_plot_button.setToolTip(
+            "Remove selected references from the plotting sidebar."
+        )
+        self._remove_from_plot_button.clicked.connect(self._on_remove_selected_references)
+
+        transfer_layout = QtWidgets.QVBoxLayout()
+        transfer_layout.addStretch(1)
+        transfer_layout.addWidget(self._add_to_plot_button)
+        transfer_layout.addWidget(self._remove_from_plot_button)
+        transfer_layout.addStretch(1)
+        transfer_container = QtWidgets.QWidget()
+        transfer_container.setLayout(transfer_layout)
 
         right_layout = QtWidgets.QVBoxLayout()
         right_header = QtWidgets.QLabel("Selected references")
@@ -184,20 +195,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._show_selected_context_menu
         )
         right_layout.addWidget(self._selected_list, 1)
-
-        self._remove_from_plot_button = QtWidgets.QToolButton()
-        self._remove_from_plot_button.setText("Remove selected")
-        self._remove_from_plot_button.setEnabled(False)
-        self._remove_from_plot_button.setToolTip("Remove selected references from the plot.")
-        self._remove_from_plot_button.clicked.connect(self._on_remove_selected_references)
-        right_layout.addWidget(self._remove_from_plot_button)
         right_container = QtWidgets.QWidget()
         right_container.setLayout(right_layout)
 
         splitter = QtWidgets.QSplitter()
         splitter.addWidget(left_container)
+        splitter.addWidget(transfer_container)
         splitter.addWidget(right_container)
-        splitter.setSizes([280, 600])
+        splitter.setSizes([280, 80, 600])
 
         form = QtWidgets.QFormLayout()
         form.addRow("Index DB", index_container)
@@ -578,15 +583,22 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._request_plot_refresh()
 
     def _on_add_selected_results(self) -> None:
+        entries = self._selected_results_in_row_order()
+        if not entries:
+            return
+        self._add_entries_to_plot(entries)
+
+    def _selected_results_in_row_order(self) -> List[LookupResultEntry]:
         items = self._results_list.selectedItems()
         if not items:
-            return
+            return []
+        ordered_items = sorted(items, key=self._results_list.row)
         entries: List[LookupResultEntry] = []
-        for item in items:
+        for item in ordered_items:
             entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
             if isinstance(entry, LookupResultEntry):
                 entries.append(entry)
-        self._add_entries_to_plot(entries)
+        return entries
 
     def _add_entries_to_plot(self, entries: List[LookupResultEntry]) -> None:
         if not entries:

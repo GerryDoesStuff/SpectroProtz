@@ -178,10 +178,10 @@ match statistics (including matched peak counts) so you can spot likely
 candidates quickly while keeping the original manual query text intact. The list
 supports multi-selection, selection-driven previewing of the metadata panel, and
 paginates through large result sets with a results cap so the sidebar
-remains responsive when a search returns many references. Use the **Add to plot**
-button or the left
-sidebar context menu to move reference spectra into the right-hand plotting
-sidebar, which preserves the order you add items.
+remains responsive when a search returns many references. Use the transfer
+buttons between the sidebars or the left sidebar context menu to move reference
+spectra into the right-hand plotting sidebar, which preserves the order shown in
+the results list for predictable comparisons.
 The lookup dialog validates the selected DuckDB file before it queries, and it
 reports clear errors when the database is missing, unreadable, or cannot be
 opened. Searches that return no matches show an empty-state message in the
@@ -189,10 +189,10 @@ results list so you know the query executed successfully but yielded no
 references.
 
 The right sidebar keeps a stable list of selected references with remove controls
-via a **Remove selected** button or right-click menu. Every add, remove, or
-selection change batches re-plotting of the top comparison chart in the lookup
-window, which draws normalized reference spectrum traces and overlays vertical
-peak sticks for each selected reference. The chart also overlays any currently
+via the transfer buttons or right-click menu. Every add, remove, or selection
+change batches re-plotting of the top comparison chart in the lookup window,
+which draws normalized reference spectrum traces and overlays vertical peak
+sticks for each selected reference. The chart also overlays any currently
 selected preview spectra as normalized traces, scaling each selected spectrum
 independently into a 0–1 range while rendering each reference’s peak sticks
 with their own 0–1 normalization based on reference amplitudes. Selecting a
