@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 import html
 from pathlib import Path
@@ -37,10 +38,23 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._active_index_path: Optional[Path] = None
         self._selected_entries: List[LookupResultEntry] = []
         self._plot_legend: Optional[pg.LegendItem] = None
-        self._reference_spectra_cache: Dict[str, tuple[List[float], List[float]]] = {}
+        self._reference_spectra_cache: "OrderedDict[str, tuple[List[float], List[float]]]" = OrderedDict()
+        self._reference_spectra_cache_limit = 48
+        self._reference_peaks_cache: "OrderedDict[str, List[tuple[float, float]]]" = OrderedDict()
+        self._reference_peaks_cache_limit = 120
         self._reference_spectra_errors: Dict[str, str] = {}
         self._search_in_progress = False
         self._preview_entry: Optional[LookupResultEntry] = None
+        self._pending_search_text: Optional[str] = None
+        self._last_search_text: Optional[str] = None
+        self._search_debounce_timer = QtCore.QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(350)
+        self._search_debounce_timer.timeout.connect(self._run_debounced_search)
+        self._plot_refresh_timer = QtCore.QTimer(self)
+        self._plot_refresh_timer.setSingleShot(True)
+        self._plot_refresh_timer.setInterval(90)
+        self._plot_refresh_timer.timeout.connect(self._refresh_plot)
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -60,6 +74,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._search_edit = QtWidgets.QLineEdit()
         self._search_edit.setPlaceholderText("e.g. 1720±5 1600±8 title:acetone")
         self._search_edit.setToolTip("Enter peak positions and metadata filters.")
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
         self._search_button = QtWidgets.QPushButton("Search")
         self._search_button.clicked.connect(self._on_manual_search)
 
@@ -227,6 +242,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._page_size = 150
         self._current_page = 0
         self._last_selected_row: Optional[int] = None
+        self._max_results = 1000
+        self._result_limit_hit = False
 
         self._restore_index_path()
 
@@ -297,7 +314,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._status_label.setText(f"Index path set to {path}.")
 
     def _on_manual_search(self) -> None:
+        self._search_debounce_timer.stop()
         text = self._search_edit.text().strip()
+        self._last_search_text = text or None
         criteria = parse_lookup_text(text)
         self._run_lookup(criteria, source_label="Manual search")
 
@@ -363,6 +382,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         if self._active_index_path != path:
             self._reference_spectra_cache.clear()
+            self._reference_peaks_cache.clear()
             self._reference_spectra_errors.clear()
         self._active_index_path = path
         errors = validate_ftir_index_schema(path)
@@ -379,6 +399,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         queries = build_lookup_queries(criteria)
         entries: List[Dict[str, Any]] = []
+        limit = max(1, int(self._max_results))
         self._search_in_progress = True
         try:
             try:
@@ -389,11 +410,16 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 )
                 return
             try:
-                result = con.execute(queries.spectra_sql, queries.spectra_params)
+                limited_sql = f"{queries.spectra_sql} LIMIT {limit + 1}"
+                result = con.execute(limited_sql, queries.spectra_params)
                 columns = [col[0] for col in result.description]
                 for row in result.fetchall():
                     entries.append(dict(zip(columns, row)))
-                peak_counts = self._fetch_peak_counts(con, queries)
+                self._result_limit_hit = len(entries) > limit
+                if self._result_limit_hit:
+                    entries = entries[:limit]
+                file_ids = [str(entry.get("file_id") or "").strip() for entry in entries]
+                peak_counts = self._fetch_peak_counts(con, queries, file_ids=file_ids)
             finally:
                 con.close()
         except Exception as exc:
@@ -408,18 +434,31 @@ class FtirLookupWindow(QtWidgets.QDialog):
             status = f"{source_label}: no matches found."
         else:
             status = f"{source_label}: {match_count} matches"
+            if self._result_limit_hit:
+                status = f"{source_label}: showing first {match_count} matches (cap {limit})."
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
 
-    def _fetch_peak_counts(self, con: duckdb.DuckDBPyConnection, queries: Any) -> Dict[str, int]:
+    def _fetch_peak_counts(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        queries: Any,
+        *,
+        file_ids: List[str],
+    ) -> Dict[str, int]:
         peak_counts: Dict[str, int] = {}
         grouped_sql = (
             "SELECT file_id, COUNT(*) AS matched_peaks "
             f"FROM ({queries.peaks_sql}) AS matches "
             "GROUP BY file_id"
         )
-        result = con.execute(grouped_sql, queries.peaks_params)
+        params = list(queries.peaks_params)
+        if file_ids:
+            placeholders = ", ".join(["?"] * len(file_ids))
+            grouped_sql = f"{grouped_sql} HAVING file_id IN ({placeholders})"
+            params.extend(file_ids)
+        result = con.execute(grouped_sql, params)
         for file_id, count in result.fetchall():
             if file_id is None:
                 continue
@@ -472,7 +511,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
             self._results_list.addItem(item)
 
-        self._results_summary.setText(f"Matches: {total}")
+        summary = f"Matches: {total}"
+        if self._result_limit_hit:
+            summary = f"Matches: {total} (capped)"
+        self._results_summary.setText(summary)
         self._results_page_label.setText(f"Showing {start + 1}-{end} of {total}")
         self._prev_page_button.setEnabled(self._current_page > 0)
         self._next_page_button.setEnabled(end < total)
@@ -627,7 +669,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
     def _request_plot_refresh(self, *, confirmed: bool = False) -> None:
         if self._search_in_progress and not confirmed:
             return
-        self._refresh_plot()
+        if confirmed:
+            self._plot_refresh_timer.start(0)
+            return
+        self._plot_refresh_timer.start()
 
     def _refresh_plot(self) -> None:
         self._plot_widget.clear()
@@ -669,37 +714,43 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         peaks_by_file: Dict[str, List[tuple[float, float]]] = {}
         malformed_rows = 0
-        placeholders = ", ".join(["?"] * len(file_ids))
-        sql = (
-            "SELECT file_id, center, amplitude FROM peaks "
-            f"WHERE file_id IN ({placeholders})"
-        )
-        try:
-            con = duckdb.connect(str(self._active_index_path), read_only=True)
-            try:
-                rows = con.execute(sql, file_ids).fetchall()
-            finally:
-                con.close()
-        except Exception as exc:
-            self._status_label.setText(f"Plot refresh failed: {exc}")
-            return
-
-        for file_id, center, amplitude in rows:
-            if file_id is None or center is None or amplitude is None:
-                malformed_rows += 1
-                continue
-            try:
-                center_value = float(center)
-                amplitude_value = float(amplitude)
-            except (TypeError, ValueError):
-                malformed_rows += 1
-                continue
-            if not (math.isfinite(center_value) and math.isfinite(amplitude_value)):
-                malformed_rows += 1
-                continue
-            peaks_by_file.setdefault(str(file_id), []).append(
-                (center_value, amplitude_value)
+        missing_ids = [file_id for file_id in file_ids if file_id not in self._reference_peaks_cache]
+        if missing_ids:
+            placeholders = ", ".join(["?"] * len(missing_ids))
+            sql = (
+                "SELECT file_id, center, amplitude FROM peaks "
+                f"WHERE file_id IN ({placeholders})"
             )
+            try:
+                con = duckdb.connect(str(self._active_index_path), read_only=True)
+                try:
+                    rows = con.execute(sql, missing_ids).fetchall()
+                finally:
+                    con.close()
+            except Exception as exc:
+                self._status_label.setText(f"Plot refresh failed: {exc}")
+                return
+
+            peaks_by_file = {file_id: [] for file_id in missing_ids}
+            for file_id, center, amplitude in rows:
+                if file_id is None or center is None or amplitude is None:
+                    malformed_rows += 1
+                    continue
+                try:
+                    center_value = float(center)
+                    amplitude_value = float(amplitude)
+                except (TypeError, ValueError):
+                    malformed_rows += 1
+                    continue
+                if not (math.isfinite(center_value) and math.isfinite(amplitude_value)):
+                    malformed_rows += 1
+                    continue
+                peaks_by_file.setdefault(str(file_id), []).append(
+                    (center_value, amplitude_value)
+                )
+            for missing_id in missing_ids:
+                self._cache_peak_data(missing_id, peaks_by_file.get(missing_id, []))
+
         if malformed_rows:
             self._append_status_warning(
                 f"Skipped {malformed_rows} malformed peak rows while plotting."
@@ -717,7 +768,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
                     pen=pen,
                     name=entry.spectrum_name,
                 )
-            peaks = peaks_by_file.get(entry.file_id, [])
+            peaks = self._get_cached_peaks(entry.file_id)
             if not peaks:
                 continue
             normalized_heights = self._normalize_peak_heights(peaks)
@@ -767,6 +818,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return None
         cached = self._reference_spectra_cache.get(entry.file_id)
         if cached is not None:
+            self._reference_spectra_cache.move_to_end(entry.file_id)
             return cached
         if entry.file_id in self._reference_spectra_errors:
             return None
@@ -793,7 +845,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         x_list = [float(value) for value in x_values.tolist()]
         y_list = [float(value) for value in y_values.tolist()]
         cached = (x_list, y_list)
-        self._reference_spectra_cache[entry.file_id] = cached
+        self._cache_reference_spectrum(entry.file_id, cached)
         return cached
 
     def _set_preview_entry(
@@ -895,6 +947,69 @@ class FtirLookupWindow(QtWidgets.QDialog):
             f"{entry.spectrum_name}\n"
             f"Formula: {formula} • Matched {entry.matched_peaks} {peak_text}"
         )
+
+    def _on_search_text_changed(self, text: str) -> None:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            self._search_debounce_timer.stop()
+            self._pending_search_text = None
+            self._clear_results()
+            return
+        self._pending_search_text = cleaned
+        self._search_debounce_timer.start()
+
+    def _run_debounced_search(self) -> None:
+        text = (self._pending_search_text or "").strip()
+        if not text:
+            return
+        if text == self._last_search_text:
+            return
+        self._last_search_text = text
+        criteria = parse_lookup_text(text)
+        self._run_lookup(criteria, source_label="Manual search")
+
+    def _clear_results(self) -> None:
+        self._result_entries = []
+        self._result_limit_hit = False
+        self._current_page = 0
+        self._last_selected_row = None
+        self._last_search_text = None
+        self._results_list.clear()
+        self._results_summary.setText("Matches: 0")
+        self._results_page_label.setText("No results")
+        self._prev_page_button.setEnabled(False)
+        self._next_page_button.setEnabled(False)
+        self._status_label.setText("Enter a search query or apply preview peaks to run a lookup.")
+        self._update_add_button_state()
+
+    def _cache_reference_spectrum(
+        self,
+        file_id: str,
+        payload: tuple[List[float], List[float]],
+    ) -> None:
+        if not file_id:
+            return
+        self._reference_spectra_cache[file_id] = payload
+        self._reference_spectra_cache.move_to_end(file_id)
+        while len(self._reference_spectra_cache) > self._reference_spectra_cache_limit:
+            self._reference_spectra_cache.popitem(last=False)
+
+    def _cache_peak_data(self, file_id: str, peaks: List[tuple[float, float]]) -> None:
+        if not file_id:
+            return
+        self._reference_peaks_cache[file_id] = peaks
+        self._reference_peaks_cache.move_to_end(file_id)
+        while len(self._reference_peaks_cache) > self._reference_peaks_cache_limit:
+            self._reference_peaks_cache.popitem(last=False)
+
+    def _get_cached_peaks(self, file_id: str) -> List[tuple[float, float]]:
+        if not file_id:
+            return []
+        cached = self._reference_peaks_cache.get(file_id)
+        if cached is None:
+            return []
+        self._reference_peaks_cache.move_to_end(file_id)
+        return cached
 
 
 @dataclass(frozen=True)
