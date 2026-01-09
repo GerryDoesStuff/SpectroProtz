@@ -347,6 +347,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if not path.exists() or not path.is_file():
             self._status_label.setText(f"Index database not found: {path}")
             return None
+        try:
+            with path.open("rb"):
+                pass
+        except OSError as exc:
+            self._status_label.setText(
+                f"Index database cannot be read: {path}\n{exc}"
+            )
+            return None
         return path
 
     def _run_lookup(self, criteria: LookupCriteria, *, source_label: str) -> None:
@@ -373,7 +381,13 @@ class FtirLookupWindow(QtWidgets.QDialog):
         entries: List[Dict[str, Any]] = []
         self._search_in_progress = True
         try:
-            con = duckdb.connect(str(path), read_only=True)
+            try:
+                con = duckdb.connect(str(path), read_only=True)
+            except Exception as exc:
+                self._status_label.setText(
+                    f"Lookup failed to open index database: {path}\n{exc}"
+                )
+                return
             try:
                 result = con.execute(queries.spectra_sql, queries.spectra_params)
                 columns = [col[0] for col in result.description]
@@ -389,7 +403,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._search_in_progress = False
 
         self._populate_results(entries, peak_counts)
-        status = f"{source_label}: {len(entries)} matches"
+        match_count = len(entries)
+        if match_count == 0:
+            status = f"{source_label}: no matches found."
+        else:
+            status = f"{source_label}: {match_count} matches"
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
@@ -438,6 +456,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._results_page_label.setText("No results")
             self._prev_page_button.setEnabled(False)
             self._next_page_button.setEnabled(False)
+            empty_item = QtWidgets.QListWidgetItem(
+                "No matches found. Try adjusting the query or selecting a different index."
+            )
+            empty_item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
+            self._results_list.addItem(empty_item)
             self._update_add_button_state()
             return
 
@@ -645,6 +668,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
 
         peaks_by_file: Dict[str, List[tuple[float, float]]] = {}
+        malformed_rows = 0
         placeholders = ", ".join(["?"] * len(file_ids))
         sql = (
             "SELECT file_id, center, amplitude FROM peaks "
@@ -661,15 +685,24 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
 
         for file_id, center, amplitude in rows:
-            if file_id is None or center is None:
+            if file_id is None or center is None or amplitude is None:
+                malformed_rows += 1
                 continue
             try:
                 center_value = float(center)
-                amplitude_value = float(amplitude) if amplitude is not None else 1.0
+                amplitude_value = float(amplitude)
             except (TypeError, ValueError):
+                malformed_rows += 1
+                continue
+            if not (math.isfinite(center_value) and math.isfinite(amplitude_value)):
+                malformed_rows += 1
                 continue
             peaks_by_file.setdefault(str(file_id), []).append(
                 (center_value, amplitude_value)
+            )
+        if malformed_rows:
+            self._append_status_warning(
+                f"Skipped {malformed_rows} malformed peak rows while plotting."
             )
 
         for idx, entry in enumerate(plot_entries):
@@ -815,6 +848,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
             f"<b>Path:</b> {fmt(path)}"
         )
         self._metadata_label.setText(summary)
+
+    def _append_status_warning(self, warning: str) -> None:
+        if not warning:
+            return
+        current = self._status_label.text().strip()
+        warning_text = f"Warning: {warning}"
+        if warning_text in current:
+            return
+        if current:
+            self._status_label.setText(f"{current}\n{warning_text}")
+        else:
+            self._status_label.setText(warning_text)
 
     def _normalize_spectrum_intensities(self, values: List[float]) -> List[float]:
         if not values:
