@@ -226,6 +226,71 @@ Lookup results are not explicitly re-ranked by a weighted score; the sidebar
 shows a **Matched peaks** count per result so you can prioritize candidates
 with higher peak coverage when multiple peaks are requested.
 
+### Exporting lookup matches and sharing data
+FTIR lookup results live in the `peaks.duckdb` database produced by the
+indexer (stored in the chosen `index_dir`). Both matched peaks and reference
+metadata can be exported directly from DuckDB as CSV or JSON. If you provide a
+relative output path in a `COPY` statement, the export file is written under
+your current working directory; absolute paths land wherever you specify.
+
+**Matched peaks exports (CSV/JSON)** use the `peaks` table with the schema
+fields `file_id`, `spectrum_id`, `peak_id`, `polarity`, `center`, `fwhm`,
+`amplitude`, `area`, and `r2`. To export only peaks that satisfy your lookup
+filters, join `peaks` to `spectra` and constrain both metadata and peak
+positions. For example, to capture matches near 1720 cm⁻¹ for acetone-like
+titles:
+
+```bash
+duckdb /path/to/index/peaks.duckdb -c "COPY (
+  SELECT s.file_id,
+         s.title,
+         s.molform,
+         s.cas,
+         p.spectrum_id,
+         p.peak_id,
+         p.polarity,
+         p.center,
+         p.fwhm,
+         p.amplitude,
+         p.area,
+         p.r2
+  FROM peaks p
+  JOIN spectra s ON s.file_id = p.file_id
+  WHERE s.title ILIKE '%acetone%'
+    AND p.center BETWEEN 1715 AND 1725
+) TO 'matched_peaks.csv' (HEADER, DELIMITER ',');"
+```
+
+Swap the `COPY` format to JSON when needed:
+
+```bash
+duckdb /path/to/index/peaks.duckdb -c "COPY (
+  SELECT s.file_id, s.title, s.molform, s.cas, p.center, p.fwhm, p.amplitude
+  FROM peaks p
+  JOIN spectra s ON s.file_id = p.file_id
+  WHERE p.center BETWEEN 1715 AND 1725
+) TO 'matched_peaks.json' (FORMAT JSON);"
+```
+
+**Reference metadata exports (CSV/JSON)** come from the `spectra` table, which
+includes core columns (`file_id`, `path`, `n_points`, `n_spectra`, `meta_json`)
+and promoted JCAMP headers (for example `title`, `origin`, `owner`, `cas`,
+`names`, `molform`, `state`, `data_type`, and `nist_source`). Use the same
+`COPY` pattern to export just the fields you need:
+
+```bash
+duckdb /path/to/index/peaks.duckdb -c "COPY (
+  SELECT file_id, title, molform, cas, origin, owner, path
+  FROM spectra
+) TO 'reference_metadata.csv' (HEADER, DELIMITER ',');"
+```
+
+For quick sharing from the UI, right-click the preview plot and choose
+**Copy data at cursor** to send the currently highlighted point to the
+clipboard. The copied text is a tab-separated row containing the X value,
+Y value, spectrum label, and processing stage label, so you can paste it
+directly into chat messages, spreadsheets, or issue reports.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:
