@@ -298,11 +298,21 @@ shows a **Matched peaks** count per result so you can prioritize candidates
 with higher peak coverage when multiple peaks are requested.
 
 ### Exporting lookup matches and sharing data
-FTIR lookup results live in the `peaks.duckdb` database produced by the
-indexer (stored in the chosen `index_dir`). Both matched peaks and reference
-metadata can be exported directly from DuckDB as CSV or JSON. If you provide a
-relative output path in a `COPY` statement, the export file is written under
-your current working directory; absolute paths land wherever you specify.
+FTIR lookup results can be exported directly from the **FTIR Reference Lookup**
+window by clicking **Export CSV** and choosing whether to export **All matches**
+or **Selected references** (the highlighted items in the right sidebar). The
+CSV includes peak match rows with `file_id`, `spectrum_id`, `peak_id`, `center`,
+`amplitude`, `area`, `fwhm`, `r2`, plus the key reference metadata fields
+`title`, `molform`, and `cas` so you can pivot the output in spreadsheet tools
+or share with collaborators. If your lookup result list is capped, the export
+includes only the matches currently loaded in the sidebar.
+
+Lookup data is still persisted in the `peaks.duckdb` database produced by the
+indexer (stored in the chosen `index_dir`), so you can also export matched
+peaks and reference metadata directly from DuckDB as CSV or JSON. If you
+provide a relative output path in a `COPY` statement, the export file is
+written under your current working directory; absolute paths land wherever you
+specify.
 
 **Matched peaks exports (CSV/JSON)** use the `peaks` table with the schema
 fields `file_id`, `spectrum_id`, `peak_id`, `polarity`, `center`, `fwhm`,

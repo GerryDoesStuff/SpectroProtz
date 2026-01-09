@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -62,6 +63,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._plot_refresh_timer.timeout.connect(self._refresh_plot)
         self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
         self._last_search_source: Optional[str] = None
+        self._last_lookup_criteria: Optional[LookupCriteria] = None
 
         self._index_path_edit = QtWidgets.QLineEdit()
         self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
@@ -121,6 +123,24 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_summary = QtWidgets.QLabel("Matches: 0")
         self._results_summary.setStyleSheet("font-weight: 600;")
 
+        self._export_button = QtWidgets.QToolButton()
+        self._export_button.setText("Export CSV")
+        self._export_button.setToolTip("Export lookup matches to CSV.")
+        self._export_button.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        export_menu = QtWidgets.QMenu(self._export_button)
+        self._export_all_action = export_menu.addAction("All matches")
+        self._export_selected_action = export_menu.addAction("Selected references")
+        self._export_all_action.triggered.connect(
+            lambda: self._export_lookup_csv(scope="all")
+        )
+        self._export_selected_action.triggered.connect(
+            lambda: self._export_lookup_csv(scope="selected")
+        )
+        self._export_button.setMenu(export_menu)
+        self._export_button.setEnabled(False)
+
         self._results_list = QtWidgets.QListWidget()
         self._results_list.setWordWrap(True)
         self._results_list.setSelectionMode(
@@ -155,7 +175,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         pager_row.addWidget(self._next_page_button)
 
         left_layout = QtWidgets.QVBoxLayout()
-        left_layout.addWidget(self._results_summary)
+        summary_row = QtWidgets.QHBoxLayout()
+        summary_row.addWidget(self._results_summary)
+        summary_row.addStretch(1)
+        summary_row.addWidget(self._export_button)
+        left_layout.addLayout(summary_row)
         left_layout.addWidget(self._results_list, 1)
         left_layout.addLayout(pager_row)
         left_container = QtWidgets.QWidget()
@@ -379,7 +403,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         if criteria.is_empty:
             self._status_label.setText("Enter a search query or apply preview peaks to run a lookup.")
+            self._last_lookup_criteria = None
             return
+        self._last_lookup_criteria = criteria
 
         error_note = "; ".join(criteria.errors) if criteria.errors else ""
 
@@ -416,6 +442,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         self._populate_results(entries, peak_counts)
         self._last_search_source = source_label
+        self._update_export_button_state()
         match_count = len(entries)
         if match_count == 0:
             status = f"{source_label}: no matches found."
@@ -506,6 +533,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._prev_page_button.setEnabled(self._current_page > 0)
         self._next_page_button.setEnabled(end < total)
         self._update_add_button_state()
+        self._update_export_button_state()
 
     def _on_prev_page(self) -> None:
         if self._current_page <= 0:
@@ -649,6 +677,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 entries.append(entry)
         self._selected_entries = entries
         self._update_send_button_state()
+        self._update_export_button_state()
 
     def _on_send_to_main_plot(self) -> None:
         overlays = self._collect_plot_overlays()
@@ -664,6 +693,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         has_plot_entries = self._preview_entry is not None or bool(self._selected_entries)
         self._send_to_main_plot_button.setEnabled(has_plot_entries)
+        self._update_export_button_state()
 
     def _collect_plot_overlays(self) -> List[Dict[str, object]]:
         preview_entry = self._preview_entry
@@ -1057,6 +1087,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._last_selected_row = None
         self._last_search_text = None
         self._last_search_source = None
+        self._last_lookup_criteria = None
         self._results_list.clear()
         self._results_summary.setText("Matches: 0")
         self._results_page_label.setText("No results")
@@ -1064,6 +1095,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._next_page_button.setEnabled(False)
         self._status_label.setText("Enter a search query or apply preview peaks to run a lookup.")
         self._update_add_button_state()
+        self._update_export_button_state()
         self._auto_search_from_preview()
 
     def _cache_reference_spectrum(
@@ -1129,6 +1161,130 @@ class FtirLookupWindow(QtWidgets.QDialog):
         )
         self._run_lookup(criteria, source_label="Preview peak auto-search")
         self._last_auto_signature = signature
+
+    def _update_export_button_state(self) -> None:
+        if not hasattr(self, "_export_button"):
+            return
+        has_results = bool(self._result_entries)
+        has_criteria = self._last_lookup_criteria is not None
+        self._export_button.setEnabled(has_results and has_criteria)
+        if hasattr(self, "_export_all_action"):
+            self._export_all_action.setEnabled(has_results and has_criteria)
+        has_selected = bool(self._selected_list.selectedItems())
+        if hasattr(self, "_export_selected_action"):
+            self._export_selected_action.setEnabled(has_selected and has_criteria)
+
+    def _selected_entries_for_export(self) -> List["LookupResultEntry"]:
+        items = self._selected_list.selectedItems()
+        if not items:
+            return []
+        entries: List[LookupResultEntry] = []
+        for item in items:
+            entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(entry, LookupResultEntry):
+                entries.append(entry)
+        return entries
+
+    def _export_lookup_csv(self, *, scope: str) -> None:
+        criteria = self._last_lookup_criteria
+        if criteria is None:
+            self._status_label.setText("Run a lookup before exporting results.")
+            return
+        path = self._resolve_index_path()
+        if path is None:
+            return
+        if not self._result_entries:
+            self._status_label.setText("No lookup results are available to export.")
+            return
+
+        file_ids: List[str] = []
+        if scope == "selected":
+            selected_entries = self._selected_entries_for_export()
+            if not selected_entries:
+                self._status_label.setText(
+                    "Select references in the right sidebar to export them."
+                )
+                return
+            file_ids = [entry.file_id for entry in selected_entries if entry.file_id]
+        else:
+            file_ids = [entry.file_id for entry in self._result_entries if entry.file_id]
+
+        if not file_ids:
+            self._status_label.setText("No lookup results are available to export.")
+            return
+
+        default_name = "ftir_lookup_matches.csv" if scope == "all" else "ftir_lookup_selected.csv"
+        target_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export lookup matches",
+            str(Path.home() / default_name),
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not target_path:
+            return
+
+        queries = build_lookup_queries(criteria)
+        params = list(queries.peaks_params)
+        placeholders = ", ".join(["?"] * len(file_ids))
+        sql = (
+            "SELECT matches.file_id, matches.spectrum_id, matches.peak_id, "
+            "matches.center, matches.amplitude, matches.area, matches.fwhm, matches.r2, "
+            "s.title, s.molform, s.cas "
+            f"FROM ({queries.peaks_sql}) AS matches "
+            "JOIN spectra s ON s.file_id = matches.file_id "
+            f"WHERE matches.file_id IN ({placeholders}) "
+            "ORDER BY matches.file_id, matches.peak_id"
+        )
+        params.extend(file_ids)
+
+        rows: List[Dict[str, object]] = []
+        try:
+            con = duckdb.connect(str(path), read_only=True)
+            try:
+                result = con.execute(sql, params)
+                columns = [col[0] for col in result.description]
+                for row in result.fetchall():
+                    rows.append(dict(zip(columns, row)))
+            finally:
+                con.close()
+        except Exception as exc:
+            self._status_label.setText(f"Export failed: {exc}")
+            return
+
+        fieldnames = [
+            "file_id",
+            "spectrum_id",
+            "peak_id",
+            "center",
+            "amplitude",
+            "area",
+            "fwhm",
+            "r2",
+            "title",
+            "molform",
+            "cas",
+        ]
+        try:
+            with open(target_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({key: row.get(key) for key in fieldnames})
+        except OSError as exc:
+            self._status_label.setText(f"Export failed: {exc}")
+            return
+
+        result_note = f"{len(rows)} peak rows"
+        if scope == "selected":
+            scope_note = f"{len(file_ids)} selected references"
+        else:
+            scope_note = f"{len(file_ids)} matches"
+        status = f"Exported {result_note} for {scope_note} to {target_path}."
+        if scope == "all" and self._result_limit_hit:
+            status = (
+                f"{status} Matches list is capped; run a narrower search to export all hits."
+            )
+        self._status_label.setText(status)
 
 
 @dataclass(frozen=True)
