@@ -221,10 +221,14 @@ Preview peak identification can also feed the lookup workflow without
 overwriting manual search state. From the preview plot context menu, choose
 **Use selected peaks for reference lookup** to capture the currently selected
 spectrum’s FTIR peaks. The lookup window stores those peaks as a pending
-auto-search request, shows how many were captured, and waits for you to press
-**Apply preview peaks** (with a configurable tolerance) before it refreshes the
-left sidebar with auto-search matches. Manual search inputs remain unchanged
-until you explicitly trigger the preview-driven search.
+auto-search request, shows how many were captured, and converts them into a
+lookup query using the configured tolerance (cm⁻¹). When the manual search box
+is empty, the lookup window automatically runs that preview-driven query to
+populate the left sidebar with matching references. If you are already running
+a manual search, the preview matches wait in the background until you either
+clear the manual query or explicitly click **Apply preview peaks** to override
+the current results. Manual search inputs remain unchanged unless you trigger
+the preview-driven search yourself.
 
 ### Right-click actions, selection shortcuts, and keyboard accelerators
 SpectroProtz surfaces several context menus and keyboard accelerators to keep
