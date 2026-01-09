@@ -226,6 +226,53 @@ auto-search request, shows how many were captured, and waits for you to press
 left sidebar with auto-search matches. Manual search inputs remain unchanged
 until you explicitly trigger the preview-driven search.
 
+### Right-click actions, selection shortcuts, and keyboard accelerators
+SpectroProtz surfaces several context menus and keyboard accelerators to keep
+navigation quick. The behaviors below reflect the current UI actions and
+tooltips.
+
+**Right-click behaviors**
+- **File queue entries**: right-click a queued file to inspect data, preview the
+  spectrum, set the role (auto-detect, sample, blank, standard), edit the blank
+  ID (only when a blank is selected), save an FTIR solvent reference, remove
+  selected items from the queue, or reveal the file in the system file manager.
+- **FTIR lookup results (left sidebar)**: right-click a match to preview its
+  reference spectrum and add it to the plotting sidebar.
+- **FTIR lookup selected references (right sidebar)**: right-click a selected
+  reference to preview it and remove it from the plot list.
+- **Preview plot**: right-click to copy the data at the cursor, export the
+  current figure, reset the view, send selected FTIR peaks to the lookup
+  window, hide the selected spectrum, show hidden spectra, or zoom in/out on
+  the cursor position.
+
+**Selection shortcuts**
+- The FTIR lookup results and selected-reference lists both use extended
+  selection, so you can use **Ctrl/Cmd-click** to add/remove items and
+  **Shift-click** to select a contiguous range before adding to plot or
+  removing.
+- The preview plot selection follows the currently selected spectrum label;
+  hiding and lookup actions apply to the active selection.
+
+**Keyboard accelerators**
+- **File menu**: Open (**Ctrl+O**), Save Recipe (**Ctrl+S**), Exit (**Ctrl+Q**).
+- **Edit menu**: Undo (**Ctrl+Z**), Redo (**Ctrl+Y**), Cut (**Ctrl+X**), Copy
+  (**Ctrl+C**), Paste (**Ctrl+V**), Delete (**Del**), Select All (**Ctrl+A**).
+- **Process menu**: Run (**F5**), Cancel (**Esc**).
+- There are currently no dedicated keyboard accelerators for moving lookup
+  results to the right sidebar, removing selected lookup references, or
+  toggling the **Identified** overlay; use the buttons, context menus, or
+  checkbox instead.
+
+**Tooltips**
+- FTIR lookup controls surface tooltips for the index picker, search input,
+  tolerance spinner, paging buttons, add/remove actions, and **Send plot to
+  main preview**.
+- The **Identified** checkbox in the preview dock shows a tooltip describing
+  the overlay behavior.
+- Context menu items supply tooltips when an action is unavailable (for example
+  export disabled if PyQtGraph exporters are missing, or lookup disabled when
+  the selection lacks FTIR peaks).
+
 ### FTIR lookup search syntax
 Manual searches accept peak tokens, optional tolerances, and metadata filters in
 a single query. Peak tokens are interpreted as wavenumbers (cm⁻¹). You can
