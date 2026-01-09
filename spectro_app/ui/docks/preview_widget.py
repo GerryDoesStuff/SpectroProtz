@@ -38,10 +38,18 @@ class _StageDataset:
     y: np.ndarray
 
 
+@dataclass
+class _IdentifiedOverlay:
+    label: str
+    x: np.ndarray
+    y: np.ndarray
+
+
 class SpectraPlotWidget(QtWidgets.QWidget):
     """Interactive preview plot with stage toggles and crosshair readouts."""
 
     lookup_peaks_requested = QtCore.pyqtSignal(object)
+    identified_overlay_toggled = QtCore.pyqtSignal(bool)
 
     STAGE_LABELS: Dict[str, str] = {
         "raw": "Raw",
@@ -97,6 +105,10 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._last_cursor_result: Optional[tuple[_StageDataset, int, float, float]] = None
         self._last_cursor_pos: Optional[tuple[float, float]] = None
 
+        self._identified_overlays: List[_IdentifiedOverlay] = []
+        self._identified_curve_items: List[pg.PlotDataItem] = []
+        self._identified_overlay_enabled: bool = True
+
         self._sample_labels: List[str] = []
         self._hidden_labels: Set[str] = set()
         self._single_mode: bool = False
@@ -149,6 +161,12 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self.peaks_button.blockSignals(False)
         self.peaks_button.setEnabled(False)
         stages_row.addWidget(self.peaks_button)
+
+        self.identified_button = QtWidgets.QCheckBox("Identified")
+        self.identified_button.setToolTip("Show identified reference overlays in the main plot.")
+        self.identified_button.toggled.connect(self._on_identified_toggled)
+        self.identified_button.setEnabled(False)
+        stages_row.addWidget(self.identified_button)
 
         stages_row.addStretch(1)
 
@@ -308,6 +326,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._label_axis_key = {}
         self._visible_stages.clear()
         self._color_map.clear()
+        self._clear_identified_overlay_items()
         if self._legend is not None:
             try:
                 self.plot.removeItem(self._legend)
@@ -648,9 +667,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         self._peak_styles = {}
         self._curve_metadata.clear()
         self._legend_entries.clear()
+        self._clear_identified_overlay_items()
 
         self._update_stage_controls(initial=initial)
         self._render_curves()
+        self._render_identified_overlays()
         self._refresh_peaks_button()
         self._sync_visible_stages()
         self._apply_hidden_visibility()
@@ -834,6 +855,79 @@ class SpectraPlotWidget(QtWidgets.QWidget):
 
     def _on_zoom_out_clicked(self) -> None:
         self._apply_zoom(1.25, self._last_cursor_pos)
+
+    def set_identified_overlays(self, overlays: Sequence[Dict[str, object]]) -> None:
+        parsed: List[_IdentifiedOverlay] = []
+        for overlay in overlays:
+            label = str(overlay.get("label") or "Identified")
+            x_raw = overlay.get("x")
+            y_raw = overlay.get("y")
+            if not isinstance(x_raw, Sequence) or isinstance(x_raw, (str, bytes)):
+                continue
+            if not isinstance(y_raw, Sequence) or isinstance(y_raw, (str, bytes)):
+                continue
+            x_vals = np.asarray(x_raw, dtype=float)
+            y_vals = np.asarray(y_raw, dtype=float)
+            if x_vals.size == 0 or y_vals.size == 0 or x_vals.size != y_vals.size:
+                continue
+            finite_mask = np.isfinite(x_vals) & np.isfinite(y_vals)
+            if not finite_mask.any():
+                continue
+            parsed.append(
+                _IdentifiedOverlay(label=label, x=x_vals[finite_mask], y=y_vals[finite_mask])
+            )
+        self._identified_overlays = parsed
+        self._sync_identified_overlay_controls()
+        self._render_identified_overlays()
+
+    def set_identified_overlay_enabled(self, enabled: bool) -> None:
+        self._identified_overlay_enabled = bool(enabled)
+        self.identified_button.blockSignals(True)
+        self.identified_button.setChecked(self._identified_overlay_enabled)
+        self.identified_button.blockSignals(False)
+        self._render_identified_overlays()
+
+    def _sync_identified_overlay_controls(self) -> None:
+        has_overlays = bool(self._identified_overlays)
+        self.identified_button.setEnabled(has_overlays)
+        if not has_overlays:
+            self.identified_button.blockSignals(True)
+            self.identified_button.setChecked(False)
+            self.identified_button.blockSignals(False)
+        else:
+            self.identified_button.blockSignals(True)
+            self.identified_button.setChecked(self._identified_overlay_enabled)
+            self.identified_button.blockSignals(False)
+
+    def _clear_identified_overlay_items(self) -> None:
+        for curve in self._identified_curve_items:
+            if self._legend is not None:
+                try:
+                    self._legend.removeItem(curve)
+                except Exception:
+                    pass
+            try:
+                self.plot.removeItem(curve)
+            except Exception:
+                pass
+        self._identified_curve_items = []
+
+    def _render_identified_overlays(self) -> None:
+        self._clear_identified_overlay_items()
+        if not self._identified_overlays or not self._identified_overlay_enabled:
+            return
+        for idx, overlay in enumerate(self._identified_overlays):
+            pen = pg.mkPen(color=pg.intColor(idx), width=2, style=QtCore.Qt.PenStyle.DashLine)
+            curve = self.plot.plot(overlay.x, overlay.y, pen=pen)
+            curve.setZValue(5)
+            if self._legend is not None:
+                self._legend.addItem(curve, f"Identified · {overlay.label}")
+            self._identified_curve_items.append(curve)
+
+    def _on_identified_toggled(self, checked: bool) -> None:
+        self._identified_overlay_enabled = bool(checked)
+        self._render_identified_overlays()
+        self.identified_overlay_toggled.emit(self._identified_overlay_enabled)
 
     def _apply_zoom(self, factor: float, center: Optional[tuple[float, float]] = None) -> None:
         view_box = self.plot.plotItem.getViewBox()
@@ -1315,6 +1409,8 @@ class PreviewDock(QDockWidget):
         self.tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.setWidget(self.tabs)
         self._spectra_widget: Optional[SpectraPlotWidget] = None
+        self._identified_overlays: List[Dict[str, object]] = []
+        self._identified_overlay_enabled: bool = True
         self.clear()
 
     # ------------------------------------------------------------------
@@ -1372,6 +1468,13 @@ class PreviewDock(QDockWidget):
             except TypeError:
                 pass
             spectra_widget.lookup_peaks_requested.connect(self.lookup_peaks_requested)
+            try:
+                spectra_widget.identified_overlay_toggled.disconnect(self._on_identified_overlay_toggled)
+            except TypeError:
+                pass
+            spectra_widget.identified_overlay_toggled.connect(self._on_identified_overlay_toggled)
+            spectra_widget.set_identified_overlay_enabled(self._identified_overlay_enabled)
+            spectra_widget.set_identified_overlays(self._identified_overlays)
             self.tabs.addTab(spectra_widget, "Spectra")
         else:
             message = "Interactive plotting is unavailable for these results."
@@ -1447,3 +1550,16 @@ class PreviewDock(QDockWidget):
         painter.end()
 
         return QtGui.QPixmap.fromImage(image)
+
+    def set_identified_overlays(self, overlays: List[Dict[str, object]]) -> None:
+        self._identified_overlays = list(overlays)
+        if self._spectra_widget is not None:
+            self._spectra_widget.set_identified_overlays(self._identified_overlays)
+
+    def set_identified_overlay_enabled(self, enabled: bool) -> None:
+        self._identified_overlay_enabled = bool(enabled)
+        if self._spectra_widget is not None:
+            self._spectra_widget.set_identified_overlay_enabled(self._identified_overlay_enabled)
+
+    def _on_identified_overlay_toggled(self, checked: bool) -> None:
+        self._identified_overlay_enabled = bool(checked)

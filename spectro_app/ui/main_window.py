@@ -1111,6 +1111,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             dialog = FtirLookupWindow(self.appctx, self)
             dialog.destroyed.connect(self._on_ftir_lookup_destroyed)
+            dialog.identified_overlay_requested.connect(self._on_lookup_overlay_requested)
             self._ftir_lookup_dialog = dialog
 
         self._ftir_lookup_dialog.show()
@@ -1128,6 +1129,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_open_ftir_lookup()
         if self._ftir_lookup_dialog is not None and isinstance(payload, dict):
             self._ftir_lookup_dialog.set_auto_search_peaks(payload)
+
+    def _on_lookup_overlay_requested(self, overlays: list) -> None:
+        self.previewDock.set_identified_overlays(overlays)
 
     def _on_ftir_lookup_destroyed(self, *_args) -> None:
         self._ftir_lookup_dialog = None

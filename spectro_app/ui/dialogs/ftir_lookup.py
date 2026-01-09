@@ -19,6 +19,8 @@ from spectro_app.engine.ftir_lookup import LookupCriteria, PeakCriterion, build_
 class FtirLookupWindow(QtWidgets.QDialog):
     """Reference lookup window for FTIR peak matching."""
 
+    identified_overlay_requested = QtCore.pyqtSignal(list)
+
     def __init__(self, appctx: AppContext, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle("FTIR Reference Lookup")
@@ -206,6 +208,19 @@ class FtirLookupWindow(QtWidgets.QDialog):
         plot_layout.addWidget(self._plot_widget, 3)
         plot_layout.addWidget(metadata_box, 1)
         layout.addWidget(plot_container, 1)
+
+        self._send_to_main_plot_button = QtWidgets.QToolButton()
+        self._send_to_main_plot_button.setText("Send plot to main preview")
+        self._send_to_main_plot_button.setToolTip(
+            "Overlay the current reference plot in the main preview window."
+        )
+        self._send_to_main_plot_button.clicked.connect(self._on_send_to_main_plot)
+
+        send_row = QtWidgets.QHBoxLayout()
+        send_row.addStretch(1)
+        send_row.addWidget(self._send_to_main_plot_button)
+        layout.addLayout(send_row)
+
         layout.addWidget(splitter, 1)
 
         self._result_entries: List[LookupResultEntry] = []
@@ -556,6 +571,35 @@ class FtirLookupWindow(QtWidgets.QDialog):
             if isinstance(entry, LookupResultEntry):
                 entries.append(entry)
         self._selected_entries = entries
+
+    def _on_send_to_main_plot(self) -> None:
+        overlays = self._collect_plot_overlays()
+        if not overlays:
+            self._status_label.setText("No reference spectra are available to send.")
+            return
+        self.identified_overlay_requested.emit(overlays)
+        self._status_label.setText("Sent reference overlays to the main preview plot.")
+
+    def _collect_plot_overlays(self) -> List[Dict[str, object]]:
+        preview_entry = self._preview_entry
+        plot_entries = [preview_entry] if preview_entry is not None else self._selected_entries_for_plot()
+        overlays: List[Dict[str, object]] = []
+        for entry in plot_entries:
+            reference_trace = self._load_reference_spectrum(entry)
+            if reference_trace is None:
+                continue
+            x_vals, y_vals = reference_trace
+            normalized_trace = self._normalize_spectrum_intensities(y_vals)
+            if not normalized_trace or not x_vals:
+                continue
+            overlays.append(
+                {
+                    "label": entry.spectrum_name or entry.file_id or "Reference",
+                    "x": x_vals,
+                    "y": normalized_trace,
+                }
+            )
+        return overlays
 
     def _request_plot_refresh(self, *, confirmed: bool = False) -> None:
         if self._search_in_progress and not confirmed:
