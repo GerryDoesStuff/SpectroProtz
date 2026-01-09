@@ -210,6 +210,22 @@ auto-search request, shows how many were captured, and waits for you to press
 left sidebar with auto-search matches. Manual search inputs remain unchanged
 until you explicitly trigger the preview-driven search.
 
+### FTIR lookup search syntax
+Manual searches accept peak tokens, optional tolerances, and metadata filters in
+a single query. Peak tokens are interpreted as wavenumbers (cm⁻¹). You can
+combine multiple peaks and filters to narrow results.
+
+- **Single peak:** `1720` uses the default ±5 cm⁻¹ tolerance.
+- **Multiple peaks:** `1720±2 1600±3` requires both peak ranges to match.
+- **Tolerance syntax:** `±`, `+/-`, or `+-` are accepted (for example
+  `1720 +/- 5`). Optional unit suffixes include `cm-1`, `cm^-1`, or `cm⁻¹`.
+- **Metadata filters:** `key:value` or `key=value`, e.g.
+  `name:acetone origin:"NIST" 1720±5`. Use quotes for values with spaces.
+
+Lookup results are not explicitly re-ranked by a weighted score; the sidebar
+shows a **Matched peaks** count per result so you can prioritize candidates
+with higher peak coverage when multiple peaks are requested.
+
 ## Verifying processed spectra
 SpectroProtz keeps a complete audit trail for every spectrum so you can confirm
 that processed traces remain representative of their raw counterparts:
