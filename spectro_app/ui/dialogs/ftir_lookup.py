@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -84,12 +85,31 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_summary.setStyleSheet("font-weight: 600;")
 
         self._results_list = QtWidgets.QListWidget()
+        self._results_list.setWordWrap(True)
         self._results_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self._results_list.setToolTip("Reference spectra matching the active search criteria.")
+        self._results_list.itemClicked.connect(self._on_result_item_clicked)
+
+        self._results_page_label = QtWidgets.QLabel()
+        self._results_page_label.setStyleSheet("color: #666;")
+        self._prev_page_button = QtWidgets.QToolButton()
+        self._prev_page_button.setText("◀")
+        self._prev_page_button.setToolTip("Previous page")
+        self._prev_page_button.clicked.connect(self._on_prev_page)
+        self._next_page_button = QtWidgets.QToolButton()
+        self._next_page_button.setText("▶")
+        self._next_page_button.setToolTip("Next page")
+        self._next_page_button.clicked.connect(self._on_next_page)
+
+        pager_row = QtWidgets.QHBoxLayout()
+        pager_row.addWidget(self._results_page_label, 1)
+        pager_row.addWidget(self._prev_page_button)
+        pager_row.addWidget(self._next_page_button)
 
         left_layout = QtWidgets.QVBoxLayout()
         left_layout.addWidget(self._results_summary)
         left_layout.addWidget(self._results_list, 1)
+        left_layout.addLayout(pager_row)
         left_container = QtWidgets.QWidget()
         left_container.setLayout(left_layout)
 
@@ -120,6 +140,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         layout.addWidget(auto_box)
         layout.addWidget(self._status_label)
         layout.addWidget(splitter, 1)
+
+        self._result_entries: List[LookupResultEntry] = []
+        self._page_size = 150
+        self._current_page = 0
+        self._last_selected_row: Optional[int] = None
 
         self._restore_index_path()
 
@@ -243,39 +268,123 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 columns = [col[0] for col in result.description]
                 for row in result.fetchall():
                     entries.append(dict(zip(columns, row)))
+                peak_counts = self._fetch_peak_counts(con, queries)
             finally:
                 con.close()
         except Exception as exc:
             self._status_label.setText(f"Lookup failed: {exc}")
             return
 
-        self._populate_results(entries)
+        self._populate_results(entries, peak_counts)
         status = f"{source_label}: {len(entries)} matches"
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
 
-    def _populate_results(self, entries: List[Dict[str, Any]]) -> None:
-        self._results_list.clear()
+    def _fetch_peak_counts(self, con: duckdb.DuckDBPyConnection, queries: Any) -> Dict[str, int]:
+        peak_counts: Dict[str, int] = {}
+        grouped_sql = (
+            "SELECT file_id, COUNT(*) AS matched_peaks "
+            f"FROM ({queries.peaks_sql}) AS matches "
+            "GROUP BY file_id"
+        )
+        result = con.execute(grouped_sql, queries.peaks_params)
+        for file_id, count in result.fetchall():
+            if file_id is None:
+                continue
+            peak_counts[str(file_id)] = int(count)
+        return peak_counts
+
+    def _populate_results(
+        self,
+        entries: List[Dict[str, Any]],
+        peak_counts: Dict[str, int],
+    ) -> None:
+        self._result_entries = []
         for entry in entries:
+            file_id = str(entry.get("file_id") or "").strip()
+            self._result_entries.append(
+                LookupResultEntry(
+                    file_id=file_id,
+                    spectrum_name=self._format_entry_name(entry),
+                    formula=(entry.get("molform") or "").strip(),
+                    matched_peaks=peak_counts.get(file_id, 0),
+                    metadata=entry,
+                )
+            )
+        self._current_page = 0
+        self._last_selected_row = None
+        self._render_results_page()
+
+    def _render_results_page(self) -> None:
+        self._results_list.clear()
+        total = len(self._result_entries)
+        if total == 0:
+            self._results_summary.setText("Matches: 0")
+            self._results_page_label.setText("No results")
+            self._prev_page_button.setEnabled(False)
+            self._next_page_button.setEnabled(False)
+            return
+
+        start = self._current_page * self._page_size
+        end = min(start + self._page_size, total)
+        for entry in self._result_entries[start:end]:
             label = self._format_entry_label(entry)
             item = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
             self._results_list.addItem(item)
-        self._results_summary.setText(f"Matches: {len(entries)}")
 
-    def _format_entry_label(self, entry: Dict[str, Any]) -> str:
+        self._results_summary.setText(f"Matches: {total}")
+        self._results_page_label.setText(f"Showing {start + 1}-{end} of {total}")
+        self._prev_page_button.setEnabled(self._current_page > 0)
+        self._next_page_button.setEnabled(end < total)
+
+    def _on_prev_page(self) -> None:
+        if self._current_page <= 0:
+            return
+        self._current_page -= 1
+        self._last_selected_row = None
+        self._render_results_page()
+
+    def _on_next_page(self) -> None:
+        total = len(self._result_entries)
+        if (self._current_page + 1) * self._page_size >= total:
+            return
+        self._current_page += 1
+        self._last_selected_row = None
+        self._render_results_page()
+
+    def _on_result_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+        row = self._results_list.row(item)
+        if self._last_selected_row == row:
+            self._results_list.clearSelection()
+            self._results_list.setCurrentRow(-1)
+            self._last_selected_row = None
+            return
+        self._last_selected_row = row
+
+    def _format_entry_name(self, entry: Dict[str, Any]) -> str:
         title = (entry.get("title") or "").strip()
         names = (entry.get("names") or "").strip()
         path = (entry.get("path") or "").strip()
-        cas = (entry.get("cas") or "").strip()
-        molform = (entry.get("molform") or "").strip()
 
         file_id = str(entry.get("file_id") or "").strip()
         fallback = f"File {file_id}".strip() if file_id else "File"
-        main_label = title or names or path or fallback
-        details = ""
-        parts = [part for part in [cas or None, molform or None] if part]
-        if parts:
-            details = f" ({', '.join(parts)})"
-        return f"{main_label}{details}"
+        return title or names or path or fallback
+
+    def _format_entry_label(self, entry: "LookupResultEntry") -> str:
+        formula = entry.formula or "—"
+        peak_text = "peak" if entry.matched_peaks == 1 else "peaks"
+        return (
+            f"{entry.spectrum_name}\n"
+            f"Formula: {formula} • Matched {entry.matched_peaks} {peak_text}"
+        )
+
+
+@dataclass(frozen=True)
+class LookupResultEntry:
+    file_id: str
+    spectrum_name: str
+    formula: str
+    matched_peaks: int
+    metadata: Dict[str, Any]
