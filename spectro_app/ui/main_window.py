@@ -172,6 +172,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._panels_menu: Optional[QtWidgets.QMenu] = None
         self._default_layout_state: Optional[QtCore.QByteArray] = None
         self._ftir_indexer_dialog: Optional["FtirIndexerDialog"] = None
+        self._ftir_lookup_dialog: Optional["FtirLookupWindow"] = None
         self._index_status_label: Optional[QtWidgets.QLabel] = None
         build_menus(self)
         self._refresh_recent_menu()
@@ -307,6 +308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.recipeDock)
         self.previewDock = PreviewDock(self)
         self.setCentralWidget(self.previewDock)
+        self.previewDock.lookup_peaks_requested.connect(self._on_lookup_peaks_requested)
         self.qcDock = QCDock(self)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.qcDock)
         self.loggerDock = LoggerDock(self)
@@ -1103,12 +1105,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ftir_indexer_dialog.raise_()
         self._ftir_indexer_dialog.activateWindow()
 
+    def on_open_ftir_lookup(self):
+        if self._ftir_lookup_dialog is None:
+            from spectro_app.ui.dialogs.ftir_lookup import FtirLookupWindow
+
+            dialog = FtirLookupWindow(self.appctx, self)
+            dialog.destroyed.connect(self._on_ftir_lookup_destroyed)
+            self._ftir_lookup_dialog = dialog
+
+        self._ftir_lookup_dialog.show()
+        self._ftir_lookup_dialog.raise_()
+        self._ftir_lookup_dialog.activateWindow()
+
     def on_check_updates(self):
         QtWidgets.QMessageBox.information(
             self,
             "Check for Updates",
             "You are running the latest available version of SpectroApp.",
         )
+
+    def _on_lookup_peaks_requested(self, payload: object) -> None:
+        self.on_open_ftir_lookup()
+        if self._ftir_lookup_dialog is not None and isinstance(payload, dict):
+            self._ftir_lookup_dialog.set_auto_search_peaks(payload)
+
+    def _on_ftir_lookup_destroyed(self, *_args) -> None:
+        self._ftir_lookup_dialog = None
 
     def on_open_log_folder(self):
         log_dir, log_error = self._ensure_log_dir()
