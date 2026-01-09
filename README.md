@@ -183,10 +183,10 @@ buttons between the sidebars or the left sidebar context menu to move reference
 spectra into the right-hand plotting sidebar, which preserves the order shown in
 the results list for predictable comparisons.
 The lookup dialog validates the selected DuckDB file before it queries, and it
-reports clear errors when the database is missing, unreadable, or cannot be
-opened. Searches that return no matches show an empty-state message in the
-results list so you know the query executed successfully but yielded no
-references.
+reports clear errors when the database is missing, unreadable, cannot be
+opened, or lacks required tables/columns. The results list switches to a
+guidance empty state when the index is invalid or when searches return no
+matches, so you can tell the query ran successfully but yielded no references.
 
 The right sidebar keeps a stable list of selected references with remove controls
 via the transfer buttons or right-click menu. Every add, remove, or selection
@@ -209,9 +209,9 @@ leaving the lookup dialog.
 Reference spectrum traces and peak sticks are cached within the lookup window
 session so repeated plot updates avoid redundant database or file reads when
 revisiting the same references.
-If the lookup database contains malformed peak rows (for example missing or
-non-numeric peak data), the plot skips those rows and reports a warning in the
-dialog status area instead of halting the preview.
+If the lookup database contains malformed spectra or peak rows (for example
+missing file IDs or non-numeric peak data), the lookup skips those rows and
+reports a warning in the dialog status area instead of halting the preview.
 When you are ready to compare candidates against live preview data, use
 **Send overlay to main preview** to push the currently plotted reference
 spectra into the main preview plot as an overlay. The preview dock includes an

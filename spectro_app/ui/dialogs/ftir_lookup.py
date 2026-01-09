@@ -389,6 +389,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
     def _run_lookup(self, criteria: LookupCriteria, *, source_label: str) -> None:
         path = self._resolve_index_path()
         if path is None:
+            self._show_results_message(
+                "Select a valid FTIR index database to run a lookup."
+            )
             return
         if self._active_index_path != path:
             self._reference_spectra_cache.clear()
@@ -399,6 +402,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if errors:
             joined = "\n".join(errors)
             self._status_label.setText(f"Index schema errors:\n{joined}")
+            self._show_results_message(
+                "The selected index is missing required tables or columns."
+            )
             return
 
         if criteria.is_empty:
@@ -413,6 +419,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         entries: List[Dict[str, Any]] = []
         limit = max(1, int(self._max_results))
         self._search_in_progress = True
+        malformed_rows = 0
         try:
             try:
                 con = duckdb.connect(str(path), read_only=True)
@@ -426,7 +433,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 result = con.execute(limited_sql, queries.spectra_params)
                 columns = [col[0] for col in result.description]
                 for row in result.fetchall():
-                    entries.append(dict(zip(columns, row)))
+                    entry = dict(zip(columns, row))
+                    file_id = entry.get("file_id")
+                    if file_id is None or not str(file_id).strip():
+                        malformed_rows += 1
+                        continue
+                    entries.append(entry)
                 self._result_limit_hit = len(entries) > limit
                 if self._result_limit_hit:
                     entries = entries[:limit]
@@ -453,6 +465,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if error_note:
             status = f"{status} (warnings: {error_note})"
         self._status_label.setText(status)
+        if malformed_rows:
+            self._append_status_warning(
+                f"Skipped {malformed_rows} malformed spectra rows missing file IDs."
+            )
 
     def _fetch_peak_counts(
         self,
@@ -505,16 +521,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_list.clear()
         total = len(self._result_entries)
         if total == 0:
-            self._results_summary.setText("Matches: 0")
-            self._results_page_label.setText("No results")
-            self._prev_page_button.setEnabled(False)
-            self._next_page_button.setEnabled(False)
-            empty_item = QtWidgets.QListWidgetItem(
+            self._show_results_message(
                 "No matches found. Try adjusting the query or selecting a different index."
             )
-            empty_item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
-            self._results_list.addItem(empty_item)
-            self._update_add_button_state()
             return
 
         start = self._current_page * self._page_size
@@ -1097,6 +1106,22 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._update_add_button_state()
         self._update_export_button_state()
         self._auto_search_from_preview()
+
+    def _show_results_message(self, message: str) -> None:
+        self._result_entries = []
+        self._result_limit_hit = False
+        self._current_page = 0
+        self._last_selected_row = None
+        self._results_list.clear()
+        self._results_summary.setText("Matches: 0")
+        self._results_page_label.setText("No results")
+        self._prev_page_button.setEnabled(False)
+        self._next_page_button.setEnabled(False)
+        empty_item = QtWidgets.QListWidgetItem(message)
+        empty_item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
+        self._results_list.addItem(empty_item)
+        self._update_add_button_state()
+        self._update_export_button_state()
 
     def _cache_reference_spectrum(
         self,

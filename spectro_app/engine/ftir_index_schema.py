@@ -95,9 +95,15 @@ def validate_ftir_index_schema(db_path: str | Path) -> List[str]:
     if not path.is_file():
         return [f"Index database path is not a file: {path}"]
 
-    con = duckdb.connect(str(path), read_only=True)
     try:
-        tables = _fetch_tables(con)
+        con = duckdb.connect(str(path), read_only=True)
+    except Exception as exc:
+        return [f"Unable to open index database: {exc}"]
+    try:
+        try:
+            tables = _fetch_tables(con)
+        except Exception as exc:
+            return [f"Unable to inspect index schema: {exc}"]
         errors: List[str] = []
         for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
             if table not in tables:
@@ -126,4 +132,3 @@ def _missing_columns(
     rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
     existing = {str(row[1]) for row in rows}
     return {col for col in required_columns if col not in existing}
-
