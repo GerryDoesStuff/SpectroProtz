@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 
 from spectro_app.engine.ftir_index_schema import SPECTRA_COLUMNS
 
-DEFAULT_TOLERANCE_CM = 5.0
+DEFAULT_TOLERANCE_CM = 2.0
 
 _PEAK_RE = re.compile(
     r"^\s*(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
