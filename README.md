@@ -185,9 +185,9 @@ manual and preview-driven searches rank references consistently. The list
 supports multi-selection, selection-driven previewing of the bottom plot and its
 metadata panel, and paginates through large result sets with a results cap so
 the sidebar remains responsive when a search returns many references. Use the transfer
-buttons between the sidebars or the left sidebar context menu to move reference
-spectra into the right-hand plotting sidebar, which preserves the order shown in
-the results list for predictable comparisons.
+buttons between the sidebars, the left sidebar context menu, or a double-click
+on a match to move reference spectra into the right-hand plotting sidebar, which
+preserves the order shown in the results list for predictable comparisons.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual
@@ -200,9 +200,9 @@ guidance empty state when the index is invalid or when searches return no
 matches, so you can tell the query ran successfully but yielded no references.
 
 The right sidebar keeps a stable list of selected references with remove controls
-via the transfer buttons or right-click menu. Every add, remove, or selection
-change batches re-plotting of the top comparison chart in the lookup window,
-which draws normalized reference spectrum traces and overlays vertical peak
+via the transfer buttons, double-click removal, or the right-click menu. Every
+add, remove, or selection change batches re-plotting of the top comparison chart
+in the lookup window, which draws normalized reference spectrum traces and overlays vertical peak
 sticks for each selected reference. The chart also overlays any currently
 selected preview spectra as normalized traces, scaling each selected spectrum
 independently into a 0–1 range while rendering each reference’s peak sticks
