@@ -305,7 +305,7 @@ Manual searches accept peak tokens, optional tolerances, and metadata filters in
 a single query. Peak tokens are interpreted as wavenumbers (cm⁻¹). You can
 combine multiple peaks and filters to narrow results.
 
-- **Single peak:** `1720` uses the default ±5 cm⁻¹ tolerance.
+- **Single peak:** `1720` uses the default ±2 cm⁻¹ tolerance.
 - **Multiple peaks:** `1720±2 1600±3` requires both peak ranges to match.
 - **Tolerance syntax:** `±`, `+/-`, or `+-` are accepted (for example
   `1720 +/- 5`). Optional unit suffixes include `cm-1`, `cm^-1`, or `cm⁻¹`.
@@ -316,6 +316,19 @@ Lookup results are re-ranked by the weighted match score (sum of
 `abs(amplitude) + abs(area)` across matched peaks), and each sidebar row shows
 both **Matched peaks** and **Score** values so you can compare candidates that
 share the same peak coverage but differ in peak intensity or area.
+
+### Manual peak search by position
+Manual peak search accepts one or more peak positions as plain numbers or
+tokens with explicit tolerances. Each peak entry is interpreted as a wavenumber
+and matched against the index using a default ±2 cm⁻¹ tolerance when no
+explicit tolerance is supplied. Enter multiple peak positions in a single query
+to require matches for every listed peak before results are returned.
+
+Example inputs:
+- `1720` (single peak, default ±2 cm⁻¹)
+- `1720 1600 1510` (multiple peaks with default tolerance)
+- `1720±5 1600±3` (multiple peaks with explicit tolerances)
+- `name:acetone 1720 1365` (metadata filter plus peaks)
 
 ### Exporting lookup matches and sharing data
 FTIR lookup results can be exported directly from the **FTIR Reference Lookup**
