@@ -29,6 +29,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
     """Reference lookup window for FTIR peak matching."""
 
     identified_overlay_requested = QtCore.pyqtSignal(list)
+    _AUTO_SEARCH_TOLERANCE_CM = 2.0
 
     def __init__(self, appctx: AppContext, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent, QtCore.Qt.WindowType.Window)
@@ -98,8 +99,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._tolerance_spin.setDecimals(2)
         self._tolerance_spin.setRange(0.01, 200.0)
         self._tolerance_spin.setSingleStep(0.5)
-        self._tolerance_spin.setValue(5.0)
-        self._tolerance_spin.setToolTip("Tolerance applied to preview peak centers (cm⁻¹).")
+        self._tolerance_spin.setValue(self._AUTO_SEARCH_TOLERANCE_CM)
+        self._tolerance_spin.setReadOnly(True)
+        self._tolerance_spin.setToolTip(
+            "Auto-search tolerance applied to preview peak centers (cm⁻¹)."
+        )
 
         self._apply_auto_button = QtWidgets.QPushButton("Apply preview peaks")
         self._apply_auto_button.setEnabled(False)
@@ -1188,7 +1192,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         if not force and self._search_edit.text().strip():
             return
-        tolerance = float(self._tolerance_spin.value())
+        if not force and self._last_search_source == "Manual search":
+            return
+        tolerance = self._AUTO_SEARCH_TOLERANCE_CM
         signature = (
             tuple(round(center, 6) for center in self._auto_peak_centers),
             round(tolerance, 6),
