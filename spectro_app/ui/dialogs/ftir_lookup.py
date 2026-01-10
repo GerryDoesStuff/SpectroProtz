@@ -30,6 +30,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     identified_overlay_requested = QtCore.pyqtSignal(list)
     _AUTO_SEARCH_TOLERANCE_CM = 2.0
+    _BROWSE_ITEM_TEXT = "Browse…"
+    _RECENT_INDEX_LIMIT = 8
 
     def __init__(self, appctx: AppContext, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent, QtCore.Qt.WindowType.Window)
@@ -65,19 +67,22 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
         self._last_search_source: Optional[str] = None
         self._last_lookup_criteria: Optional[LookupCriteria] = None
+        self._recent_index_paths: List[str] = []
 
-        self._index_path_edit = QtWidgets.QLineEdit()
-        self._index_path_edit.setPlaceholderText("Select peaks.duckdb")
-        self._index_path_edit.setToolTip("Path to the FTIR index DuckDB file.")
-
-        index_button = QtWidgets.QToolButton()
-        index_button.setText("...")
-        index_button.setToolTip("Browse for a DuckDB index file")
-        index_button.clicked.connect(self._on_pick_index_path)
+        self._index_path_combo = QtWidgets.QComboBox()
+        self._index_path_combo.setEditable(True)
+        self._index_path_combo.setInsertPolicy(
+            QtWidgets.QComboBox.InsertPolicy.NoInsert
+        )
+        self._index_path_combo.setToolTip("Path to the FTIR index DuckDB file.")
+        index_line_edit = self._index_path_combo.lineEdit()
+        if index_line_edit is not None:
+            index_line_edit.setPlaceholderText("Select peaks.duckdb")
+            index_line_edit.editingFinished.connect(self._on_index_editing_finished)
+        self._index_path_combo.activated.connect(self._on_index_combo_activated)
 
         index_row = QtWidgets.QHBoxLayout()
-        index_row.addWidget(self._index_path_edit, 1)
-        index_row.addWidget(index_button)
+        index_row.addWidget(self._index_path_combo, 1)
         index_container = QtWidgets.QWidget()
         index_container.setLayout(index_row)
 
@@ -327,12 +332,79 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
+        recent = self._load_recent_index_paths()
         stored = self._appctx.settings.value("indexer/lastIndexPath", "", type=str)
         if stored:
-            self._index_path_edit.setText(stored)
+            recent = self._dedupe_recent_paths([stored, *recent])
+        self._recent_index_paths = recent
+        selected = stored or (recent[0] if recent else "")
+        self._refresh_index_combo(selected=selected)
+        if selected:
+            self._validate_selected_index_path(selected)
+
+    def _load_recent_index_paths(self) -> List[str]:
+        raw = self._appctx.settings.value("indexer/recentIndexPaths", [], type=list)
+        if isinstance(raw, list):
+            candidates = raw
+        elif raw:
+            candidates = [raw]
+        else:
+            candidates = []
+        return self._dedupe_recent_paths(str(item).strip() for item in candidates)
+
+    def _dedupe_recent_paths(self, paths: Iterable[str]) -> List[str]:
+        seen: set[str] = set()
+        deduped: List[str] = []
+        for path in paths:
+            if not path:
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            deduped.append(path)
+        return deduped
+
+    def _refresh_index_combo(self, *, selected: Optional[str] = None) -> None:
+        self._index_path_combo.blockSignals(True)
+        self._index_path_combo.clear()
+        for path in self._recent_index_paths:
+            self._index_path_combo.addItem(path)
+        self._index_path_combo.addItem(self._BROWSE_ITEM_TEXT)
+        if selected:
+            self._index_path_combo.setCurrentText(selected)
+        elif self._recent_index_paths:
+            self._index_path_combo.setCurrentText(self._recent_index_paths[0])
+        else:
+            self._index_path_combo.setCurrentText("")
+        self._index_path_combo.blockSignals(False)
+
+    def _remember_index_path(self, path: Path) -> None:
+        path_text = str(path)
+        recent = self._dedupe_recent_paths(
+            [path_text, *self._recent_index_paths]
+        )[: self._RECENT_INDEX_LIMIT]
+        self._recent_index_paths = recent
+        self._appctx.settings.setValue("indexer/lastIndexPath", path_text)
+        self._appctx.settings.setValue("indexer/recentIndexPaths", recent)
+        self._refresh_index_combo(selected=path_text)
+
+    def _validate_selected_index_path(self, raw: str) -> None:
+        if raw == self._BROWSE_ITEM_TEXT:
+            return
+        path = self._resolve_index_path(raw)
+        if path is None:
+            return
+        errors = validate_ftir_index_schema(path)
+        if errors:
+            joined = "\n".join(errors)
+            self._status_label.setText(f"Index schema errors:\n{joined}")
+            return
+        self._remember_index_path(path)
+        self._status_label.setText(f"Index ready: {path}")
 
     def _on_pick_index_path(self) -> None:
-        start = self._index_path_edit.text().strip() or str(Path.home())
+        current_text = self._index_path_combo.currentText().strip()
+        start = current_text or str(Path.home())
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Select FTIR index database",
@@ -340,9 +412,27 @@ class FtirLookupWindow(QtWidgets.QDialog):
             "DuckDB (*.duckdb);;All Files (*)",
         )
         if path:
-            self._index_path_edit.setText(path)
-            self._appctx.settings.setValue("indexer/lastIndexPath", path)
-            self._status_label.setText(f"Index path set to {path}.")
+            self._index_path_combo.setCurrentText(path)
+            self._validate_selected_index_path(path)
+            return
+        fallback = self._appctx.settings.value("indexer/lastIndexPath", "", type=str)
+        if not fallback and self._recent_index_paths:
+            fallback = self._recent_index_paths[0]
+        self._refresh_index_combo(selected=fallback or "")
+
+    def _on_index_combo_activated(self, index: int) -> None:
+        text = self._index_path_combo.itemText(index)
+        if text == self._BROWSE_ITEM_TEXT:
+            self._on_pick_index_path()
+            return
+        if text:
+            self._validate_selected_index_path(text)
+
+    def _on_index_editing_finished(self) -> None:
+        text = self._index_path_combo.currentText().strip()
+        if not text or text == self._BROWSE_ITEM_TEXT:
+            return
+        self._validate_selected_index_path(text)
 
     def _on_manual_search(self) -> None:
         self._search_debounce_timer.stop()
@@ -373,8 +463,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
         normalized = axis_key.strip().lower()
         return normalized in {"wavenumber", "wavenumbers", "cm-1", "cm^-1", "cm⁻¹"}
 
-    def _resolve_index_path(self) -> Optional[Path]:
-        raw = self._index_path_edit.text().strip()
+    def _resolve_index_path(self, raw: Optional[str] = None) -> Optional[Path]:
+        raw = raw if raw is not None else self._index_path_combo.currentText().strip()
+        if raw == self._BROWSE_ITEM_TEXT:
+            raw = ""
         if not raw:
             self._status_label.setText("Select an FTIR index database before searching.")
             return None

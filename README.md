@@ -170,25 +170,29 @@ ensuring the lookup flow never issues an unbounded query by default.
 ## FTIR reference lookup window
 SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
 accessible under **Tools → FTIR Reference Lookup...**. The dialog lets you
-point at a `peaks.duckdb` index, run manual searches from a query bar, and view
-matching reference spectra in the left-hand results sidebar. Manual search text
-is debounced, so the lookup only runs after you pause typing instead of on
-every keystroke, keeping the UI responsive on large indexes. The results list
-surfaces the spectrum name, molecular formula, optional CAS number, and summary
-match statistics (including matched peak counts and a weighted match score)
-so you can spot likely candidates quickly while keeping the original manual
-query text intact. Reference spectra are ranked by the total matched peaks
-weighted by peak intensity/area, using the sum of `abs(amplitude) + abs(area)`
-across all matched peak rows from the `peaks` table (i.e. `score = Σ(|A| + |area|)`
-for matched peaks). Higher scores indicate both more matches and stronger peak
+pick from recent `peaks.duckdb` indexes (or browse for a new one), run manual
+searches from a query bar, and view matching reference spectra in the left-hand
+results sidebar. Recent FTIR index paths are remembered between sessions, and
+selecting one immediately validates the DuckDB schema so the status line
+confirms when the index is ready to query. Manual search text is debounced, so
+the lookup only runs after you pause typing instead of on every keystroke,
+keeping the UI responsive on large indexes. The results list surfaces the
+spectrum name, molecular formula, optional CAS number, and summary match
+statistics (including matched peak counts and a weighted match score) so you
+can spot likely candidates quickly while keeping the original manual query text
+intact. Reference spectra are ranked by the total matched peaks weighted by
+peak intensity/area, using the sum of `abs(amplitude) + abs(area)` across all
+matched peak rows from the `peaks` table (i.e. `score = Σ(|A| + |area|)` for
+matched peaks). Higher scores indicate both more matches and stronger peak
 intensity/area. Results are sorted by this score (descending), then by matched
-peak count, so manual and preview-driven searches rank references consistently. The list
-supports multi-selection, selection-driven previewing of the bottom plot and its
-metadata panel, and paginates through large result sets with a results cap so
-the sidebar remains responsive when a search returns many references. Use the transfer
-buttons between the sidebars, the left sidebar context menu, or a double-click
-on a match to move reference spectra into the right-hand plotting sidebar, which
-preserves the order shown in the results list for predictable comparisons.
+peak count, so manual and preview-driven searches rank references consistently.
+The list supports multi-selection, selection-driven previewing of the bottom
+plot and its metadata panel, and paginates through large result sets with a
+results cap so the sidebar remains responsive when a search returns many
+references. Use the transfer buttons between the sidebars, the left sidebar
+context menu, or a double-click on a match to move reference spectra into the
+right-hand plotting sidebar, which preserves the order shown in the results
+list for predictable comparisons.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual
