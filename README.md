@@ -233,6 +233,9 @@ fields. Selection changes in either sidebar update the same preview, and the
 metadata panel beside the chart summarizes the selected reference’s title,
 molform (formula), CAS, origin, owner, date, data type, state, class, and related
 header fields for quick inspection without leaving the lookup dialog.
+The preview refresh stays scoped to the bottom plot when you right-click a
+reference, so browsing entries does not force the top comparison overlay to
+redraw.
 Reference spectrum traces and peak sticks are cached within the lookup window
 session so repeated plot updates avoid redundant database or file reads when
 revisiting the same references.

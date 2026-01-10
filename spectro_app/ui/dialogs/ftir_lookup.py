@@ -65,6 +65,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._plot_refresh_timer.setSingleShot(True)
         self._plot_refresh_timer.setInterval(90)
         self._plot_refresh_timer.timeout.connect(self._refresh_plot)
+        self._pending_comparison_refresh = False
+        self._pending_preview_refresh = False
         self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
         self._last_search_source: Optional[str] = None
         self._last_lookup_criteria: Optional[LookupCriteria] = None
@@ -704,7 +706,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if not isinstance(entry, LookupResultEntry):
             return
-        self._set_preview_entry(entry)
+        self._set_preview_entry(entry, refresh_scope="preview")
         menu = QtWidgets.QMenu(self)
         add_action = menu.addAction("Add to plot")
         action = menu.exec(self._results_list.mapToGlobal(pos))
@@ -722,7 +724,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if isinstance(entry, LookupResultEntry):
-            self._set_preview_entry(entry)
+            self._set_preview_entry(entry, refresh_scope="preview")
         menu = QtWidgets.QMenu(self)
         remove_action = menu.addAction("Remove from plot")
         action = menu.exec(self._selected_list.mapToGlobal(pos))
@@ -873,17 +875,38 @@ class FtirLookupWindow(QtWidgets.QDialog):
             )
         return overlays
 
-    def _request_plot_refresh(self, *, confirmed: bool = False) -> None:
+    def _request_plot_refresh(
+        self,
+        *,
+        confirmed: bool = False,
+        scope: str = "all",
+    ) -> None:
         if self._search_in_progress and not confirmed:
             return
+        if scope == "comparison":
+            self._pending_comparison_refresh = True
+        elif scope == "preview":
+            self._pending_preview_refresh = True
+        else:
+            self._pending_comparison_refresh = True
+            self._pending_preview_refresh = True
         if confirmed:
             self._plot_refresh_timer.start(0)
             return
         self._plot_refresh_timer.start()
 
     def _refresh_plot(self) -> None:
-        self._refresh_comparison_plot()
-        self._refresh_preview_plot()
+        refresh_comparison = self._pending_comparison_refresh
+        refresh_preview = self._pending_preview_refresh
+        if not refresh_comparison and not refresh_preview:
+            refresh_comparison = True
+            refresh_preview = True
+        if refresh_comparison:
+            self._refresh_comparison_plot()
+        if refresh_preview:
+            self._refresh_preview_plot()
+        self._pending_comparison_refresh = False
+        self._pending_preview_refresh = False
 
     def _refresh_comparison_plot(self) -> None:
         self._comparison_plot_widget.clear()
@@ -1106,11 +1129,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         entry: Optional["LookupResultEntry"],
         *,
         refresh: bool = True,
+        refresh_scope: str = "preview",
     ) -> None:
         self._preview_entry = entry
         self._update_send_button_state()
         if refresh:
-            self._request_plot_refresh(confirmed=True)
+            self._request_plot_refresh(confirmed=True, scope=refresh_scope)
 
     def _update_metadata_panel(
         self,
