@@ -443,7 +443,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 if self._result_limit_hit:
                     entries = entries[:limit]
                 file_ids = [str(entry.get("file_id") or "").strip() for entry in entries]
-                peak_counts = self._fetch_peak_counts(con, queries, file_ids=file_ids)
+                peak_stats = self._fetch_peak_stats(con, queries, file_ids=file_ids)
             finally:
                 con.close()
         except Exception as exc:
@@ -452,7 +452,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         finally:
             self._search_in_progress = False
 
-        self._populate_results(entries, peak_counts)
+        self._populate_results(entries, peak_stats)
         self._last_search_source = source_label
         self._update_export_button_state()
         match_count = len(entries)
@@ -470,16 +470,17 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 f"Skipped {malformed_rows} malformed spectra rows missing file IDs."
             )
 
-    def _fetch_peak_counts(
+    def _fetch_peak_stats(
         self,
         con: duckdb.DuckDBPyConnection,
         queries: Any,
         *,
         file_ids: List[str],
-    ) -> Dict[str, int]:
-        peak_counts: Dict[str, int] = {}
+    ) -> Dict[str, "PeakMatchStats"]:
+        peak_stats: Dict[str, PeakMatchStats] = {}
         grouped_sql = (
-            "SELECT file_id, COUNT(*) AS matched_peaks "
+            "SELECT file_id, COUNT(*) AS matched_peaks, "
+            "SUM(COALESCE(ABS(amplitude), 0) + COALESCE(ABS(area), 0)) AS match_score "
             f"FROM ({queries.peaks_sql}) AS matches "
             "GROUP BY file_id"
         )
@@ -489,30 +490,42 @@ class FtirLookupWindow(QtWidgets.QDialog):
             grouped_sql = f"{grouped_sql} HAVING file_id IN ({placeholders})"
             params.extend(file_ids)
         result = con.execute(grouped_sql, params)
-        for file_id, count in result.fetchall():
+        for file_id, count, match_score in result.fetchall():
             if file_id is None:
                 continue
-            peak_counts[str(file_id)] = int(count)
-        return peak_counts
+            peak_stats[str(file_id)] = PeakMatchStats(
+                matched_peaks=int(count),
+                match_score=float(match_score or 0.0),
+            )
+        return peak_stats
 
     def _populate_results(
         self,
         entries: List[Dict[str, Any]],
-        peak_counts: Dict[str, int],
+        peak_stats: Dict[str, "PeakMatchStats"],
     ) -> None:
         self._result_entries = []
         self._set_preview_entry(None, refresh=False)
         for entry in entries:
             file_id = str(entry.get("file_id") or "").strip()
+            stats = peak_stats.get(file_id)
             self._result_entries.append(
                 LookupResultEntry(
                     file_id=file_id,
                     spectrum_name=self._format_entry_name(entry),
                     formula=(entry.get("molform") or "").strip(),
-                    matched_peaks=peak_counts.get(file_id, 0),
+                    matched_peaks=stats.matched_peaks if stats else 0,
+                    match_score=stats.match_score if stats else 0.0,
                     metadata=entry,
                 )
             )
+        self._result_entries.sort(
+            key=lambda entry: (
+                -entry.match_score,
+                -entry.matched_peaks,
+                (entry.spectrum_name or "").lower(),
+            )
+        )
         self._current_page = 0
         self._last_selected_row = None
         self._render_results_page()
@@ -938,12 +951,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
         name = entry.spectrum_name or "—"
         formula = entry.formula or meta.get("molform") or "—"
         matched_peaks = entry.matched_peaks
+        match_score = entry.match_score
         title = meta.get("title") or "—"
         names = meta.get("names") or "—"
         origin = meta.get("origin") or "—"
         cas = meta.get("cas") or "—"
         path = meta.get("path") or "—"
         file_id = entry.file_id or "—"
+        match_score_text = self._format_match_score(match_score)
 
         def fmt(value: object) -> str:
             text = str(value).strip()
@@ -953,6 +968,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             f"<b>Name:</b> {fmt(name)}<br>"
             f"<b>Formula:</b> {fmt(formula)}<br>"
             f"<b>Matched peaks:</b> {fmt(matched_peaks)}<br>"
+            f"<b>Match score:</b> {fmt(match_score_text)}<br>"
             f"<b>File ID:</b> {fmt(file_id)}<br>"
             f"<b>Title:</b> {fmt(title)}<br>"
             f"<b>Names:</b> {fmt(names)}<br>"
@@ -1060,14 +1076,21 @@ class FtirLookupWindow(QtWidgets.QDialog):
         formula = entry.formula or "—"
         cas = (entry.metadata.get("cas") or "").strip()
         peak_text = "peak" if entry.matched_peaks == 1 else "peaks"
+        score_text = self._format_match_score(entry.match_score)
         summary_parts = [f"Formula: {formula}"]
         if cas:
             summary_parts.append(f"CAS: {cas}")
         summary_parts.append(f"Matches: {entry.matched_peaks} {peak_text}")
+        summary_parts.append(f"Score: {score_text}")
         return (
             f"{entry.spectrum_name}\n"
             f"{' • '.join(summary_parts)}"
         )
+
+    def _format_match_score(self, score: float) -> str:
+        if not math.isfinite(score):
+            return "—"
+        return f"{score:.2f}"
 
     def _on_search_text_changed(self, text: str) -> None:
         cleaned = (text or "").strip()
@@ -1318,4 +1341,11 @@ class LookupResultEntry:
     spectrum_name: str
     formula: str
     matched_peaks: int
+    match_score: float
     metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PeakMatchStats:
+    matched_peaks: int
+    match_score: float
