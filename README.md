@@ -335,11 +335,20 @@ Example inputs:
 FTIR lookup results can be exported directly from the **FTIR Reference Lookup**
 window by clicking **Export CSV** and choosing whether to export **All matches**
 or **Selected references** (the highlighted items in the right sidebar). The
-CSV includes peak match rows with `file_id`, `spectrum_id`, `peak_id`, `center`,
-`amplitude`, `area`, `fwhm`, `r2`, plus the key reference metadata fields
-`title`, `molform`, and `cas` so you can pivot the output in spreadsheet tools
-or share with collaborators. If your lookup result list is capped, the export
-includes only the matches currently loaded in the sidebar.
+scope controls whether the CSV includes every match currently listed in the
+left sidebar or only the references you have moved into the right-hand selected
+list. If your lookup result list is capped, the export includes only the
+matches currently loaded in the sidebar.
+
+**CSV export fields** include every column from the `peaks` table plus every
+promoted metadata column from the `spectra` table (along with core bookkeeping
+fields like `path`, `n_points`, `n_spectra`, and `meta_json`). This means peak
+rows always carry the full peak metrics (`file_id`, `spectrum_id`, `peak_id`,
+`polarity`, `center`, `fwhm`, `amplitude`, `area`, `r2`, etc.) alongside all
+available reference metadata (`title`, `origin`, `owner`, `cas`, `names`,
+`molform`, `state`, `data_type`, `nist_source`, and any other promoted JCAMP
+headers). Use the CSV output to pivot peak matches in spreadsheets or share the
+complete reference metadata with collaborators.
 
 Lookup data is still persisted in the `peaks.duckdb` database produced by the
 indexer (stored in the chosen `index_dir`), so you can also export matched
