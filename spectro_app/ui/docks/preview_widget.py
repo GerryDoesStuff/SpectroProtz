@@ -1321,7 +1321,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
                     if finite_mask.any():
                         spectrum_x = dataset.x[finite_mask].tolist()
                         spectrum_y = dataset.y[finite_mask].tolist()
-        labels_for_payload = self._current_single_labels() if self._single_mode else [label]
+        labels_for_payload = self._lookup_labels_for_payload(label)
         selected_spectra: List[Dict[str, object]] = []
         for spectrum_label in labels_for_payload:
             dataset = None
@@ -1359,6 +1359,23 @@ class SpectraPlotWidget(QtWidgets.QWidget):
             "selected_spectra": selected_spectra,
         }
         self.lookup_peaks_requested.emit(payload)
+
+    def _lookup_labels_for_payload(self, label: str) -> List[str]:
+        if self._single_mode:
+            labels = self._current_single_labels()
+        else:
+            labels = [label]
+        if label and label not in labels:
+            labels.insert(0, label)
+        filtered = [item for item in labels if item and item not in self._hidden_labels]
+        seen: set[str] = set()
+        deduped: List[str] = []
+        for item in filtered:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
 
     def _hide_selected_spectrum(self) -> None:
         label = self._selected_label

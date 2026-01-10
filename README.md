@@ -201,7 +201,10 @@ which draws normalized reference spectrum traces and overlays vertical peak
 sticks for each selected reference. The chart also overlays any currently
 selected preview spectra as normalized traces, scaling each selected spectrum
 independently into a 0–1 range while rendering each reference’s peak sticks
-with their own 0–1 normalization based on reference amplitudes. Selecting a
+with their own 0–1 normalization based on reference amplitudes. If the preview
+is in single-spectrum view with multiple spectra added to the window, every
+visible selection is included in the lookup plot so you can compare several
+live traces at once. Selecting a
 subset of references in the right sidebar filters the plot to just those
 entries, while leaving the list unselected shows the full selected-reference
 set. Search actions do not change the plot until you explicitly add or remove
