@@ -175,8 +175,13 @@ matching reference spectra in the left-hand results sidebar. Manual search text
 is debounced, so the lookup only runs after you pause typing instead of on
 every keystroke, keeping the UI responsive on large indexes. The results list
 surfaces the spectrum name, molecular formula, optional CAS number, and summary
-match statistics (including matched peak counts) so you can spot likely
-candidates quickly while keeping the original manual query text intact. The list
+match statistics (including matched peak counts and a weighted match score)
+so you can spot likely candidates quickly while keeping the original manual
+query text intact. Each match score is computed as the sum of
+`abs(amplitude) + abs(area)` for every matched peak row from the `peaks` table,
+so higher scores indicate both more matches and stronger peak intensity/area.
+Results are sorted by this score (descending), then by matched peak count, so
+manual and preview-driven searches rank references consistently. The list
 supports multi-selection, selection-driven previewing of the bottom plot and its
 metadata panel, and paginates through large result sets with a results cap so
 the sidebar remains responsive when a search returns many references. Use the transfer
@@ -294,9 +299,10 @@ combine multiple peaks and filters to narrow results.
 - **Metadata filters:** `key:value` or `key=value`, e.g.
   `name:acetone origin:"NIST" 1720±5`. Use quotes for values with spaces.
 
-Lookup results are not explicitly re-ranked by a weighted score; the sidebar
-shows a **Matched peaks** count per result so you can prioritize candidates
-with higher peak coverage when multiple peaks are requested.
+Lookup results are re-ranked by the weighted match score (sum of
+`abs(amplitude) + abs(area)` across matched peaks), and each sidebar row shows
+both **Matched peaks** and **Score** values so you can compare candidates that
+share the same peak coverage but differ in peak intensity or area.
 
 ### Exporting lookup matches and sharing data
 FTIR lookup results can be exported directly from the **FTIR Reference Lookup**
