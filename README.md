@@ -177,11 +177,12 @@ every keystroke, keeping the UI responsive on large indexes. The results list
 surfaces the spectrum name, molecular formula, optional CAS number, and summary
 match statistics (including matched peak counts and a weighted match score)
 so you can spot likely candidates quickly while keeping the original manual
-query text intact. Each match score is computed as the sum of
-`abs(amplitude) + abs(area)` for every matched peak row from the `peaks` table,
-so higher scores indicate both more matches and stronger peak intensity/area.
-Results are sorted by this score (descending), then by matched peak count, so
-manual and preview-driven searches rank references consistently. The list
+query text intact. Reference spectra are ranked by the total matched peaks
+weighted by peak intensity/area, using the sum of `abs(amplitude) + abs(area)`
+across all matched peak rows from the `peaks` table (i.e. `score = Σ(|A| + |area|)`
+for matched peaks). Higher scores indicate both more matches and stronger peak
+intensity/area. Results are sorted by this score (descending), then by matched
+peak count, so manual and preview-driven searches rank references consistently. The list
 supports multi-selection, selection-driven previewing of the bottom plot and its
 metadata panel, and paginates through large result sets with a results cap so
 the sidebar remains responsive when a search returns many references. Use the transfer
