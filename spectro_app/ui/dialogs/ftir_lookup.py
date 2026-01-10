@@ -1268,6 +1268,19 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 entries.append(entry)
         return entries
 
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        escaped = identifier.replace('"', '""')
+        return f'"{escaped}"'
+
+    def _fetch_table_columns(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        table: str,
+    ) -> List[str]:
+        rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return [str(row[1]) for row in rows]
+
     def _export_lookup_csv(self, *, scope: str) -> None:
         criteria = self._last_lookup_criteria
         if criteria is None:
@@ -1308,22 +1321,38 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         queries = build_lookup_queries(criteria)
         params = list(queries.peaks_params)
-        placeholders = ", ".join(["?"] * len(file_ids))
-        sql = (
-            "SELECT matches.file_id, matches.spectrum_id, matches.peak_id, "
-            "matches.center, matches.amplitude, matches.area, matches.fwhm, matches.r2, "
-            "s.title, s.molform, s.cas "
-            f"FROM ({queries.peaks_sql}) AS matches "
-            "JOIN spectra s ON s.file_id = matches.file_id "
-            f"WHERE matches.file_id IN ({placeholders}) "
-            "ORDER BY matches.file_id, matches.peak_id"
-        )
-        params.extend(file_ids)
-
         rows: List[Dict[str, object]] = []
         try:
             con = duckdb.connect(str(path), read_only=True)
             try:
+                peaks_columns = self._fetch_table_columns(con, "peaks")
+                spectra_columns = self._fetch_table_columns(con, "spectra")
+                if not peaks_columns or not spectra_columns:
+                    self._status_label.setText(
+                        "Export failed: unable to read peaks or spectra columns."
+                    )
+                    return
+
+                spectra_export_columns = [
+                    column for column in spectra_columns if column != "file_id"
+                ]
+                select_columns = []
+                for column in peaks_columns:
+                    quoted = self._quote_identifier(column)
+                    select_columns.append(f"matches.{quoted} AS {quoted}")
+                for column in spectra_export_columns:
+                    quoted = self._quote_identifier(column)
+                    select_columns.append(f"s.{quoted} AS {quoted}")
+
+                placeholders = ", ".join(["?"] * len(file_ids))
+                sql = (
+                    f"SELECT {', '.join(select_columns)} "
+                    f"FROM ({queries.peaks_sql}) AS matches "
+                    "JOIN spectra s ON s.file_id = matches.file_id "
+                    f"WHERE matches.file_id IN ({placeholders}) "
+                    "ORDER BY matches.file_id, matches.peak_id"
+                )
+                params.extend(file_ids)
                 result = con.execute(sql, params)
                 columns = [col[0] for col in result.description]
                 for row in result.fetchall():
@@ -1334,19 +1363,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._status_label.setText(f"Export failed: {exc}")
             return
 
-        fieldnames = [
-            "file_id",
-            "spectrum_id",
-            "peak_id",
-            "center",
-            "amplitude",
-            "area",
-            "fwhm",
-            "r2",
-            "title",
-            "molform",
-            "cas",
-        ]
+        fieldnames = [key for key in rows[0].keys()] if rows else []
+        if not fieldnames:
+            self._status_label.setText("No lookup results are available to export.")
+            return
         try:
             with open(target_path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=fieldnames)
