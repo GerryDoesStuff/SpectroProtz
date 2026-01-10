@@ -216,10 +216,11 @@ set. Search actions do not change the plot until you explicitly add or remove
 references, keeping comparisons stable while you browse new matches.
 Right-clicking any reference in the left or right sidebar previews that
 reference’s normalized spectrum and peak sticks in the bottom plot immediately,
-and selection changes in either sidebar update the same preview. The metadata
-panel beside the chart summarizes the selected reference’s title, molform
-(formula), CAS, origin, and related header fields for quick inspection without
-leaving the lookup dialog.
+showing a single reference trace with its normalized peak markers and metadata
+fields. Selection changes in either sidebar update the same preview, and the
+metadata panel beside the chart summarizes the selected reference’s title,
+molform (formula), CAS, origin, owner, date, data type, state, class, and related
+header fields for quick inspection without leaving the lookup dialog.
 Reference spectrum traces and peak sticks are cached within the lookup window
 session so repeated plot updates avoid redundant database or file reads when
 revisiting the same references.

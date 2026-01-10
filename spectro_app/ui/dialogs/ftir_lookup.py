@@ -775,7 +775,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._plot_widget.removeItem(self._plot_legend)
         self._plot_legend = self._plot_widget.addLegend(offset=(10, 10))
 
-        has_selected_spectra = bool(self._selected_spectra)
+        has_selected_spectra = bool(self._selected_spectra) and self._preview_entry is None
         if has_selected_spectra:
             for idx, spectrum in enumerate(self._selected_spectra):
                 normalized_y = self._normalize_spectrum_intensities(spectrum.y)
@@ -978,6 +978,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         title = meta.get("title") or "—"
         names = meta.get("names") or "—"
         origin = meta.get("origin") or "—"
+        owner = meta.get("owner") or "—"
+        date = meta.get("date") or "—"
+        data_type = meta.get("data_type") or "—"
+        state = meta.get("state") or "—"
+        record_class = meta.get("class") or "—"
         cas = meta.get("cas") or "—"
         path = meta.get("path") or "—"
         file_id = entry.file_id or "—"
@@ -996,6 +1001,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
             f"<b>Title:</b> {fmt(title)}<br>"
             f"<b>Names:</b> {fmt(names)}<br>"
             f"<b>Origin:</b> {fmt(origin)}<br>"
+            f"<b>Owner:</b> {fmt(owner)}<br>"
+            f"<b>Date:</b> {fmt(date)}<br>"
+            f"<b>Data type:</b> {fmt(data_type)}<br>"
+            f"<b>State:</b> {fmt(state)}<br>"
+            f"<b>Class:</b> {fmt(record_class)}<br>"
             f"<b>CAS:</b> {fmt(cas)}<br>"
             f"<b>Path:</b> {fmt(path)}"
         )
