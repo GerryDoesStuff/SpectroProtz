@@ -155,9 +155,9 @@ original axis metadata so downstream stages still report the original units.
 The FTIR indexer’s DuckDB outputs can be queried with search-bar style input
 using the helper in `spectro_app/engine/ftir_lookup.py`. The parser accepts
 numeric peak positions with optional tolerances (for example `1720±5` or
-`1720 +/- 5`), defaulting to ±2 cm⁻¹ when no explicit tolerance is supplied, and
-metadata filters written as `key:value` or `key=value` tokens. Filters map to
-promoted FTIR metadata columns such as `title`, `origin`, `cas`, `names`,
+`1720 +/- 5`), defaulting to ±2 cm⁻¹ when no explicit tolerance is supplied.
+Metadata filters are written as `key:value` or `key=value` tokens. Filters map
+to promoted FTIR metadata columns such as `title`, `origin`, `cas`, `names`,
 `molform`, `state`, and `nist_source`, with aliases like `name` or `formula`
 automatically normalized. Manual search input can list multiple peaks in one
 query, and the parser returns structured criteria with error messages for
@@ -178,17 +178,13 @@ confirms when the index is ready to query. The index selector combines a
 history list with a **Browse** action: picking a recent entry sets it as the
 active index immediately, and browsing for a new file adds it to the history
 list while making it the active source for subsequent searches and plotting.
-Manual search text is debounced, so the lookup only runs after you pause typing
-instead of on every keystroke, keeping the UI responsive on large indexes. The
-results list surfaces the spectrum name, molecular formula, optional CAS
-number, and summary match statistics (including matched peak counts and a
-weighted match score) so you can spot likely candidates quickly while keeping
-the original manual query text intact. Reference spectra are ranked by the
-total matched peaks weighted by peak intensity/area, using the sum of
-`abs(amplitude) + abs(area)` across all matched peak rows from the `peaks`
-table (i.e. `score = Σ(|A| + |area|)` for matched peaks). Higher scores
-indicate both more matches and stronger peak intensity/area. Results are sorted
-by this score (descending), then by matched peak count, so manual and
+Manual searches can be run with the **Search** button or by pausing after
+typing (debounced), which keeps the UI responsive on large indexes. Reference
+spectra are ranked by the total matched peaks weighted by peak intensity/area,
+using the sum of `abs(amplitude) + abs(area)` across all matched peak rows from
+the `peaks` table (i.e. `score = Σ(|A| + |area|)` for matched peaks). Higher
+scores indicate both more matches and stronger peak intensity/area. Results are
+sorted by this score (descending), then by matched peak count, so manual and
 preview-driven searches rank references consistently.
 The list supports multi-selection, selection-driven previewing of the bottom
 reference plot (with its metadata panel aligned beside the preview), and
@@ -209,8 +205,9 @@ results remain in the sidebar unless you explicitly click **Apply preview peaks*
 to re-run the lookup from the captured peaks.
 Lookup results can be exported to CSV from the **Export CSV** menu, either for
 all matches or only the right-hand selected references, and the export includes
-every available column from the `peaks` and `spectra` tables (core IDs, peak
-metrics, polarity, file paths, and all promoted metadata fields).
+every available column from the `peaks` table plus all non-`file_id` columns
+from the `spectra` table (core IDs, peak metrics, polarity, file paths, and all
+promoted metadata fields).
 The lookup dialog validates the selected DuckDB file before it queries, and it
 reports clear errors when the database is missing, unreadable, cannot be
 opened, or lacks required tables/columns. The results list switches to a
@@ -357,7 +354,7 @@ list. If your lookup result list is capped, the export includes only the
 matches currently loaded in the sidebar.
 
 **CSV export fields** include every column from the `peaks` table plus every
-promoted metadata column from the `spectra` table (along with core bookkeeping
+column from the `spectra` table except `file_id` (along with core bookkeeping
 fields like `path`, `n_points`, `n_spectra`, and `meta_json`). This means peak
 rows always carry the full peak metrics (`file_id`, `spectrum_id`, `peak_id`,
 `polarity`, `center`, `fwhm`, `amplitude`, `area`, `r2`, etc.) alongside all
