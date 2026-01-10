@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 import html
@@ -154,6 +156,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._preview_plot_legend: Optional[pg.LegendItem] = None
         self._reference_spectra_cache: "OrderedDict[str, tuple[List[float], List[float]]]" = OrderedDict()
         self._reference_spectra_cache_limit = 48
+        self._reference_meta_cache: Dict[str, Dict[str, Any]] = {}
+        self._reference_meta_errors: Dict[str, str] = {}
+        self._reference_meta_spectra_cache: "OrderedDict[str, tuple[List[float], List[float]]]" = OrderedDict()
+        self._reference_meta_spectra_cache_limit = 48
         self._reference_peaks_cache: "OrderedDict[str, List[tuple[float, float]]]" = OrderedDict()
         self._reference_peaks_cache_limit = 120
         self._reference_spectra_errors: Dict[str, str] = {}
@@ -234,6 +240,19 @@ class FtirLookupWindow(QtWidgets.QDialog):
         )
         auto_layout.addWidget(self._auto_plot_from_queue_checkbox)
         auto_layout.addLayout(auto_row)
+        self._preview_spectrum_overlay_enabled = True
+        self._preview_spectrum_overlay_checkbox = QtWidgets.QCheckBox(
+            "Show reference spectrum overlay"
+        )
+        self._preview_spectrum_overlay_checkbox.setToolTip(
+            "Toggle the full reference spectrum overlay in the preview plot."
+        )
+        self._preview_spectrum_overlay_checkbox.setChecked(
+            self._preview_spectrum_overlay_enabled
+        )
+        self._preview_spectrum_overlay_checkbox.toggled.connect(
+            self._on_preview_spectrum_overlay_toggled
+        )
 
         self._status_label = QtWidgets.QLabel()
         self._status_label.setWordWrap(True)
@@ -383,7 +402,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         preview_container = QtWidgets.QWidget()
         preview_layout = QtWidgets.QHBoxLayout(preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.addWidget(self._preview_plot_widget, 3)
+        preview_plot_container = QtWidgets.QWidget()
+        preview_plot_layout = QtWidgets.QVBoxLayout(preview_plot_container)
+        preview_plot_layout.setContentsMargins(0, 0, 0, 0)
+        preview_plot_layout.addWidget(self._preview_spectrum_overlay_checkbox)
+        preview_plot_layout.addWidget(self._preview_plot_widget, 1)
+        preview_layout.addWidget(preview_plot_container, 3)
         preview_layout.addWidget(metadata_box, 1)
 
         plot_container = QtWidgets.QWidget()
@@ -509,6 +533,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
     def _on_auto_plot_from_queue_toggled(self, checked: bool) -> None:
         self._auto_plot_from_queue_enabled = checked
 
+    def _on_preview_spectrum_overlay_toggled(self, checked: bool) -> None:
+        self._preview_spectrum_overlay_enabled = checked
+        self._request_plot_refresh(confirmed=True, scope="preview")
+
     def _refresh_auto_status(self) -> None:
         if not self._auto_peak_centers:
             self._auto_status_label.setText("No preview peaks received yet.")
@@ -556,6 +584,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
             return
         if self._active_index_path != path:
             self._reference_spectra_cache.clear()
+            self._reference_meta_cache.clear()
+            self._reference_meta_errors.clear()
+            self._reference_meta_spectra_cache.clear()
             self._reference_peaks_cache.clear()
             self._reference_spectra_errors.clear()
         self._active_index_path = path
@@ -1033,11 +1064,23 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 f"Skipped {malformed_rows} malformed peak rows while plotting."
             )
 
-        self._plot_reference_entry(
+        self._plot_reference_peaks(
             self._preview_plot_widget,
             preview_entry,
             0,
         )
+        if self._preview_spectrum_overlay_enabled:
+            reference_trace = self._load_meta_json_spectrum(preview_entry)
+            if reference_trace is not None:
+                x_vals, y_vals = reference_trace
+                normalized_trace = self._normalize_spectrum_intensities(y_vals)
+                pen = pg.mkPen(color=pg.intColor(0), width=2)
+                self._preview_plot_widget.plot(
+                    x_vals,
+                    normalized_trace,
+                    pen=pen,
+                    name=preview_entry.spectrum_name,
+                )
         self._preview_plot_widget.setTitle("Reference preview")
         self._update_metadata_panel(preview_entry, count=1)
 
@@ -1100,6 +1143,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
                 pen=pen,
                 name=entry.spectrum_name,
             )
+        self._plot_reference_peaks(plot_widget, entry, color_index)
+
+    def _plot_reference_peaks(
+        self,
+        plot_widget: pg.PlotWidget,
+        entry: LookupResultEntry,
+        color_index: int,
+    ) -> None:
         peaks = self._get_cached_peaks(entry.file_id)
         if not peaks:
             return
@@ -1109,7 +1160,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         for (center, _amplitude), height in zip(peaks, normalized_heights):
             x_values.extend([center, center, float("nan")])
             y_values.extend([0.0, height, float("nan")])
-        pen = pg.mkPen(color=pg.intColor(color_index), width=1, style=QtCore.Qt.PenStyle.DashLine)
+        pen = pg.mkPen(
+            color=pg.intColor(color_index),
+            width=1,
+            style=QtCore.Qt.PenStyle.DashLine,
+        )
         plot_widget.plot(
             x_values,
             y_values,
@@ -1166,6 +1221,122 @@ class FtirLookupWindow(QtWidgets.QDialog):
         cached = (x_list, y_list)
         self._cache_reference_spectrum(entry.file_id, cached)
         return cached
+
+    def _load_meta_json_spectrum(
+        self,
+        entry: LookupResultEntry,
+    ) -> Optional[tuple[List[float], List[float]]]:
+        if not entry.file_id:
+            return None
+        cached = self._reference_meta_spectra_cache.get(entry.file_id)
+        if cached is not None:
+            self._reference_meta_spectra_cache.move_to_end(entry.file_id)
+            return cached
+        if entry.file_id in self._reference_meta_errors:
+            return None
+        meta_payload = self._parse_meta_json(entry)
+        if not meta_payload:
+            self._reference_meta_errors[entry.file_id] = "Missing or invalid meta_json."
+            return None
+        parsed = self._parse_xydata_spectrum(meta_payload)
+        if parsed is None:
+            self._reference_meta_errors[entry.file_id] = "Missing or invalid XYDATA metadata."
+            return None
+        self._cache_reference_meta_spectrum(entry.file_id, parsed)
+        return parsed
+
+    def _parse_meta_json(self, entry: LookupResultEntry) -> Optional[Dict[str, Any]]:
+        if not entry.file_id:
+            return None
+        cached = self._reference_meta_cache.get(entry.file_id)
+        if cached is not None:
+            return cached
+        if entry.file_id in self._reference_meta_errors:
+            return None
+        raw_meta = entry.metadata.get("meta_json")
+        if not raw_meta:
+            self._reference_meta_errors[entry.file_id] = "Missing meta_json metadata."
+            return None
+        try:
+            payload = json.loads(raw_meta)
+        except (TypeError, json.JSONDecodeError) as exc:
+            self._reference_meta_errors[entry.file_id] = f"Invalid meta_json: {exc}"
+            return None
+        if not isinstance(payload, dict):
+            self._reference_meta_errors[entry.file_id] = "meta_json payload is not an object."
+            return None
+        self._reference_meta_cache[entry.file_id] = payload
+        return payload
+
+    def _parse_xydata_spectrum(
+        self,
+        meta_payload: Dict[str, Any],
+    ) -> Optional[tuple[List[float], List[float]]]:
+        normalized = {str(key).upper(): value for key, value in meta_payload.items()}
+        xydata_raw = normalized.get("XYDATA")
+        if xydata_raw is None:
+            return None
+        if not isinstance(xydata_raw, str):
+            xydata_raw = str(xydata_raw)
+        deltax = self._safe_float(normalized.get("DELTAX"))
+        line_entries: List[tuple[float, List[float]]] = []
+        for line in xydata_raw.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            numbers = [
+                self._safe_float(token)
+                for token in re.findall(
+                    r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
+                    cleaned.replace(",", " "),
+                )
+            ]
+            values = [value for value in numbers if value is not None]
+            if len(values) < 2:
+                continue
+            start_x = values[0]
+            y_values = values[1:]
+            line_entries.append((start_x, y_values))
+        if not line_entries:
+            return None
+        if deltax is None:
+            deltax = self._derive_delta_from_lines(line_entries)
+        if deltax is None or deltax == 0:
+            return None
+        x_vals: List[float] = []
+        y_vals: List[float] = []
+        for start_x, y_line in line_entries:
+            for idx, y_value in enumerate(y_line):
+                if not math.isfinite(y_value):
+                    continue
+                x_vals.append(start_x + idx * deltax)
+                y_vals.append(y_value)
+        if not x_vals or not y_vals:
+            return None
+        return x_vals, y_vals
+
+    def _derive_delta_from_lines(
+        self,
+        line_entries: List[tuple[float, List[float]]],
+    ) -> Optional[float]:
+        for idx in range(1, len(line_entries)):
+            previous_start, previous_y = line_entries[idx - 1]
+            current_start, _current_y = line_entries[idx]
+            if not previous_y:
+                continue
+            delta = (current_start - previous_start) / len(previous_y)
+            if math.isfinite(delta) and delta != 0:
+                return delta
+        return None
+
+    def _safe_float(self, value: object) -> Optional[float]:
+        try:
+            float_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(float_value):
+            return None
+        return float_value
 
     def _set_preview_entry(
         self,
@@ -1414,6 +1585,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._reference_spectra_cache.move_to_end(file_id)
         while len(self._reference_spectra_cache) > self._reference_spectra_cache_limit:
             self._reference_spectra_cache.popitem(last=False)
+
+    def _cache_reference_meta_spectrum(
+        self,
+        file_id: str,
+        payload: tuple[List[float], List[float]],
+    ) -> None:
+        if not file_id:
+            return
+        self._reference_meta_spectra_cache[file_id] = payload
+        self._reference_meta_spectra_cache.move_to_end(file_id)
+        while len(self._reference_meta_spectra_cache) > self._reference_meta_spectra_cache_limit:
+            self._reference_meta_spectra_cache.popitem(last=False)
 
     def _cache_peak_data(self, file_id: str, peaks: List[tuple[float, float]]) -> None:
         if not file_id:
