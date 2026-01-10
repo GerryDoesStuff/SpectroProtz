@@ -153,6 +153,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._results_list.setToolTip("Reference spectra matching the active search criteria.")
         self._results_list.itemClicked.connect(self._on_result_item_clicked)
         self._results_list.itemSelectionChanged.connect(self._on_results_selection_changed)
+        self._results_list.itemDoubleClicked.connect(self._on_result_item_double_clicked)
         self._results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self._results_list.customContextMenuRequested.connect(self._show_results_context_menu)
 
@@ -216,6 +217,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         )
         self._selected_list.setToolTip("References included in the comparison plot.")
         self._selected_list.itemSelectionChanged.connect(self._on_selected_list_selection_changed)
+        self._selected_list.itemDoubleClicked.connect(self._on_selected_item_double_clicked)
         self._selected_list.setContextMenuPolicy(
             QtCore.Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -599,6 +601,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if action == add_action:
             self._add_entries_to_plot([entry])
 
+    def _on_result_item_double_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+        entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(entry, LookupResultEntry):
+            self._add_entries_to_plot([entry])
+
     def _show_selected_context_menu(self, pos: QtCore.QPoint) -> None:
         item = self._selected_list.itemAt(pos)
         if item is None:
@@ -611,6 +618,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
         action = menu.exec(self._selected_list.mapToGlobal(pos))
         if action == remove_action:
             self._remove_selected_references([item])
+
+    def _on_selected_item_double_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+        self._remove_selected_references([item])
+
+    def _ordered_selected_items(
+        self,
+        list_widget: QtWidgets.QListWidget,
+    ) -> List[QtWidgets.QListWidgetItem]:
+        items = list_widget.selectedItems()
+        if not items:
+            return []
+        return sorted(items, key=list_widget.row)
 
     def _update_add_button_state(self) -> None:
         if not hasattr(self, "_add_to_plot_button"):
@@ -651,12 +670,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._add_entries_to_plot(entries)
 
     def _selected_results_in_row_order(self) -> List[LookupResultEntry]:
-        items = self._results_list.selectedItems()
+        items = self._ordered_selected_items(self._results_list)
         if not items:
             return []
-        ordered_items = sorted(items, key=self._results_list.row)
         entries: List[LookupResultEntry] = []
-        for item in ordered_items:
+        for item in items:
             entry = item.data(QtCore.Qt.ItemDataRole.UserRole)
             if isinstance(entry, LookupResultEntry):
                 entries.append(entry)
@@ -686,7 +704,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self,
         items: List[QtWidgets.QListWidgetItem],
     ) -> None:
-        for item in items:
+        ordered_items = sorted(items, key=self._selected_list.row, reverse=True)
+        for item in ordered_items:
             row = self._selected_list.row(item)
             if row >= 0:
                 self._selected_list.takeItem(row)
@@ -877,7 +896,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
     def _selected_entries_for_plot(self) -> List[LookupResultEntry]:
         if not self._selected_entries:
             return []
-        selected_items = self._selected_list.selectedItems()
+        selected_items = self._ordered_selected_items(self._selected_list)
         if not selected_items:
             return list(self._selected_entries)
         entries: List[LookupResultEntry] = []
@@ -1229,7 +1248,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._export_selected_action.setEnabled(has_selected and has_criteria)
 
     def _selected_entries_for_export(self) -> List["LookupResultEntry"]:
-        items = self._selected_list.selectedItems()
+        items = self._ordered_selected_items(self._selected_list)
         if not items:
             return []
         entries: List[LookupResultEntry] = []
