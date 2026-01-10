@@ -105,11 +105,13 @@ def parse_lookup_text(
             filters.setdefault(key, []).append(value)
             continue
 
-        peak = _parse_peak_token(token, default_tolerance, errors)
-        if peak is not None:
-            peaks.append(peak)
-        else:
-            errors.append(f"Unrecognized token '{token}'.")
+        if _PEAK_RE.match(token):
+            peak = _parse_peak_token(token, default_tolerance, errors)
+            if peak is not None:
+                peaks.append(peak)
+            continue
+
+        filters.setdefault("title", []).append(token)
 
     return LookupCriteria(peaks=peaks, filters=filters, errors=errors)
 
