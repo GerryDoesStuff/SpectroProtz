@@ -194,12 +194,13 @@ paginates through large result sets with a results cap so the sidebar remains
 responsive when a search returns many references. The top comparison plot
 stays focused on the selected spectra plus any references that you move into
 the right-hand plotting sidebar, so you can compare overlays without losing
-the single-reference preview context below. The layout is explicitly dual-plot:
-the top chart is for multi-reference comparisons and the bottom chart is a
-single-reference preview with its metadata panel. Use the transfer buttons
-between the sidebars, the left sidebar context menu, or a double-click on a
-match to move reference spectra into the right-hand plotting sidebar, which
-preserves the order shown in the results list for predictable comparisons.
+the single-reference preview context below. The layout is a three-column split
+with the left results sidebar, the dual-plot center column (comparison on top,
+single-reference preview + metadata below), and the right selected-references
+sidebar flanking the plots. Use the transfer buttons embedded alongside the
+left sidebar list, the left sidebar context menu, or a double-click on a match
+to move reference spectra into the right-hand plotting sidebar, which preserves
+the order shown in the results list for predictable comparisons.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual

@@ -280,16 +280,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
         pager_row.addWidget(self._prev_page_button)
         pager_row.addWidget(self._next_page_button)
 
-        left_layout = QtWidgets.QVBoxLayout()
+        left_results_layout = QtWidgets.QVBoxLayout()
         summary_row = QtWidgets.QHBoxLayout()
         summary_row.addWidget(self._results_summary)
         summary_row.addStretch(1)
         summary_row.addWidget(self._export_button)
-        left_layout.addLayout(summary_row)
-        left_layout.addWidget(self._results_list, 1)
-        left_layout.addLayout(pager_row)
-        left_container = QtWidgets.QWidget()
-        left_container.setLayout(left_layout)
+        left_results_layout.addLayout(summary_row)
+        left_results_layout.addWidget(self._results_list, 1)
+        left_results_layout.addLayout(pager_row)
 
         self._remove_from_plot_button = QtWidgets.QToolButton()
         self._remove_from_plot_button.setText("← Remove")
@@ -306,6 +304,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         transfer_layout.addStretch(1)
         transfer_container = QtWidgets.QWidget()
         transfer_container.setLayout(transfer_layout)
+
+        left_layout = QtWidgets.QHBoxLayout()
+        left_layout.addLayout(left_results_layout, 1)
+        left_layout.addWidget(transfer_container)
+        left_container = QtWidgets.QWidget()
+        left_container.setLayout(left_layout)
 
         right_layout = QtWidgets.QVBoxLayout()
         right_header = QtWidgets.QLabel("Selected references")
@@ -328,12 +332,6 @@ class FtirLookupWindow(QtWidgets.QDialog):
         right_layout.addWidget(self._selected_list, 1)
         right_container = QtWidgets.QWidget()
         right_container.setLayout(right_layout)
-
-        splitter = QtWidgets.QSplitter()
-        splitter.addWidget(left_container)
-        splitter.addWidget(transfer_container)
-        splitter.addWidget(right_container)
-        splitter.setSizes([280, 80, 600])
 
         form = QtWidgets.QFormLayout()
         form.addRow("Index DB", self._index_selector)
@@ -382,7 +380,15 @@ class FtirLookupWindow(QtWidgets.QDialog):
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.addWidget(comparison_container, 2)
         plot_layout.addWidget(preview_container, 1)
-        layout.addWidget(plot_container, 1)
+
+        content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        content_splitter.addWidget(left_container)
+        content_splitter.addWidget(plot_container)
+        content_splitter.addWidget(right_container)
+        content_splitter.setStretchFactor(0, 0)
+        content_splitter.setStretchFactor(1, 1)
+        content_splitter.setStretchFactor(2, 0)
+        content_splitter.setSizes([320, 620, 320])
 
         self._send_to_main_plot_button = QtWidgets.QPushButton()
         self._send_to_main_plot_button.setText("Send overlay to main preview")
@@ -395,9 +401,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         send_row = QtWidgets.QHBoxLayout()
         send_row.addStretch(1)
         send_row.addWidget(self._send_to_main_plot_button)
+        layout.addWidget(content_splitter, 1)
         layout.addLayout(send_row)
-
-        layout.addWidget(splitter, 1)
 
         self._result_entries: List[LookupResultEntry] = []
         self._page_size = 150
