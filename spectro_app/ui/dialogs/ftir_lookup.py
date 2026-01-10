@@ -445,6 +445,15 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._request_plot_refresh()
         self._auto_search_from_preview()
 
+    def set_selected_spectra_from_queue(self, spectra: List[Dict[str, object]]) -> None:
+        self._selected_spectra = self._parse_selected_spectra(
+            spectra,
+            fallback_label="Selected spectrum",
+            spectrum_x_raw=None,
+            spectrum_y_raw=None,
+        )
+        self._request_plot_refresh(scope="comparison")
+
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
         stored = self._appctx.indexer_last_index_path()

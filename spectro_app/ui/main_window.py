@@ -296,6 +296,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _init_docks(self):
         self.fileDock = FileQueueDock(self)
         self.fileDock.paths_dropped.connect(self._on_queue_paths_dropped)
+        self.fileDock.selection_changed.connect(self._on_queue_selection_changed)
         self.fileDock.inspect_requested.connect(self._on_queue_inspect_requested)
         self.fileDock.preview_requested.connect(self._on_queue_preview_requested)
         self.fileDock.locate_requested.connect(self._on_queue_locate_requested)
@@ -1608,6 +1609,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not self._loading_session:
             self.appctx.set_dirty(True)
+
+    def _on_queue_selection_changed(self, paths: List[str]) -> None:
+        if self._ftir_lookup_dialog is None:
+            return
+        if not paths:
+            self._ftir_lookup_dialog.set_selected_spectra_from_queue([])
+            return
+
+        plugin = self._resolve_plugin(paths, self._recipe_data.get("module"))
+        plugin_id = getattr(plugin, "id", None) if plugin else None
+        if plugin_id != "ftir":
+            self._ftir_lookup_dialog.set_selected_spectra_from_queue([])
+            return
+
+        existing_paths = [path for path in paths if Path(path).exists()]
+        if not existing_paths:
+            self._ftir_lookup_dialog.set_selected_spectra_from_queue([])
+            return
+
+        try:
+            spectra = plugin.load(existing_paths)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load selected FTIR spectra for lookup: %s", exc
+            )
+            if hasattr(self, "loggerDock"):
+                self.loggerDock.append_line(
+                    f"FTIR lookup selection load failed: {exc}"
+                )
+            self._ftir_lookup_dialog.set_selected_spectra_from_queue([])
+            return
+
+        technique_label = getattr(plugin, "label", None) if plugin else None
+        spectra_payload: List[Dict[str, object]] = []
+        count = len(spectra)
+        for index, spectrum in enumerate(spectra):
+            meta = spectrum.meta or {}
+            source_path = meta.get("source_path") or meta.get("path")
+            label = None
+            if isinstance(source_path, str) and source_path:
+                label = Path(source_path).name
+            elif len(existing_paths) == 1:
+                label = Path(existing_paths[0]).name
+            if label and count > 1:
+                label = f"{label} ({index + 1})"
+            if technique_label:
+                label = f"{technique_label} · {label}" if label else str(technique_label)
+            spectra_payload.append(
+                {
+                    "label": label,
+                    "x": np.asarray(spectrum.wavelength, dtype=float).tolist(),
+                    "y": np.asarray(spectrum.intensity, dtype=float).tolist(),
+                }
+            )
+
+        self._ftir_lookup_dialog.set_selected_spectra_from_queue(spectra_payload)
 
     def _on_queue_inspect_requested(self, path: str):
         self._open_file_data_dialog(Path(path))

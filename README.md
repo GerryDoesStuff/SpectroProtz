@@ -201,6 +201,13 @@ sidebar flanking the plots. Use the add/remove buttons anchored below each
 sidebar list, the left sidebar context menu, or a double-click on a match to
 move reference spectra into the right-hand plotting sidebar, which preserves
 the order shown in the results list for predictable comparisons.
+While the lookup window is open, selecting FTIR files in the main file queue
+automatically loads the chosen spectra and overlays them in the lookup
+comparison plot as “selected spectra.” Multi-selecting queue entries plots
+each loaded spectrum at once, and switching the queue selection to non-FTIR
+data clears the live overlay so the reference traces remain uncluttered. There
+are no extra buttons required for this behavior—simply highlight queue entries
+to refresh the lookup plot.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual
