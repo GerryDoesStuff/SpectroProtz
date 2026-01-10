@@ -207,7 +207,10 @@ comparison plot as “selected spectra.” Multi-selecting queue entries plots
 each loaded spectrum at once, and switching the queue selection to non-FTIR
 data clears the live overlay so the reference traces remain uncluttered. There
 are no extra buttons required for this behavior—simply highlight queue entries
-to refresh the lookup plot.
+to refresh the lookup plot. Use the **Auto-plot selected queue spectrum**
+checkbox in the lookup window’s control area to disable or re-enable this live
+queue overlay; the toggle is enabled by default so the lookup plot stays in
+sync with queue selections until you opt out.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual
