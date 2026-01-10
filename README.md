@@ -188,6 +188,11 @@ the sidebar remains responsive when a search returns many references. Use the tr
 buttons between the sidebars or the left sidebar context menu to move reference
 spectra into the right-hand plotting sidebar, which preserves the order shown in
 the results list for predictable comparisons.
+When preview peak detection is active, the lookup window captures the identified
+peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
+tolerance. Auto-search only runs when there is no active manual query, so manual
+results remain in the sidebar unless you explicitly click **Apply preview peaks**
+to re-run the lookup from the captured peaks.
 The lookup dialog validates the selected DuckDB file before it queries, and it
 reports clear errors when the database is missing, unreadable, cannot be
 opened, or lacks required tables/columns. The results list switches to a
@@ -235,8 +240,8 @@ overwriting manual search state. From the preview plot context menu, choose
 **Use selected peaks for reference lookup** to capture the currently selected
 spectrum’s FTIR peaks. The lookup window stores those peaks as a pending
 auto-search request, shows how many were captured, and converts them into a
-lookup query using the configured tolerance (cm⁻¹). When the manual search box
-is empty, the lookup window automatically runs that preview-driven query to
+lookup query using a fixed ±2 cm⁻¹ tolerance. When the manual search box is
+empty, the lookup window automatically runs that preview-driven query to
 populate the left sidebar with matching references. If you are already running
 a manual search, the preview matches wait in the background until you either
 clear the manual query or explicitly click **Apply preview peaks** to override
