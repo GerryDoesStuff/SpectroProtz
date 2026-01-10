@@ -117,11 +117,7 @@ def parse_lookup_text(
 def build_lookup_queries(criteria: LookupCriteria) -> LookupQueries:
     spectra_columns = ", ".join(_quote_ident(col) for col in SPECTRA_COLUMNS)
     spectra_sql = f"SELECT {spectra_columns} FROM spectra"
-    peaks_sql = (
-        "SELECT p.file_id, p.spectrum_id, p.peak_id, p.polarity, p.center, "
-        "p.fwhm, p.amplitude, p.area, p.r2 "
-        "FROM peaks p JOIN spectra s ON s.file_id = p.file_id"
-    )
+    peaks_sql = "SELECT p.* FROM peaks p JOIN spectra s ON s.file_id = p.file_id"
 
     if criteria.is_empty:
         empty_clause = " WHERE 1 = 0"

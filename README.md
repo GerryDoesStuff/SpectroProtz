@@ -193,6 +193,10 @@ peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻
 tolerance. Auto-search only runs when there is no active manual query, so manual
 results remain in the sidebar unless you explicitly click **Apply preview peaks**
 to re-run the lookup from the captured peaks.
+Lookup results can be exported to CSV from the **Export CSV** menu, either for
+all matches or only the right-hand selected references, and the export includes
+every available column from the `peaks` and `spectra` tables (core IDs, peak
+metrics, polarity, file paths, and all promoted metadata fields).
 The lookup dialog validates the selected DuckDB file before it queries, and it
 reports clear errors when the database is missing, unreadable, cannot be
 opened, or lacks required tables/columns. The results list switches to a
