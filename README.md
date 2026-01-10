@@ -172,12 +172,14 @@ SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
 accessible under **Tools → FTIR Reference Lookup...**. The dialog lets you
 pick from recent `peaks.duckdb` indexes (or browse for a new one), run manual
 searches from a query bar, and view matching reference spectra in the left-hand
-results sidebar. Recent FTIR index paths are remembered between sessions, and
-selecting one immediately validates the DuckDB schema so the status line
-confirms when the index is ready to query. The index selector combines a
-history list with a **Browse** action: picking a recent entry sets it as the
-active index immediately, and browsing for a new file adds it to the history
-list while making it the active source for subsequent searches and plotting.
+results sidebar. The index selector is backed by app-level settings, so recent
+index paths and the last-used index are shared across sessions and other FTIR
+tools (such as the indexer) that update the same settings store. Selecting an
+index immediately validates the DuckDB schema so the status line confirms when
+the index is ready to query. The index selector combines a history list with a
+dedicated **Browse** button: picking a recent entry sets it as the active index
+immediately, and browsing for a new file adds it to the history list while
+making it the active source for subsequent searches and plotting.
 Manual searches can be run with the **Search** button or by pausing after
 typing (debounced), which keeps the UI responsive on large indexes. Reference
 spectra are ranked by the total matched peaks weighted by peak intensity/area,

@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import html
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import duckdb
 import pyqtgraph as pg
@@ -25,14 +25,118 @@ class _SelectedSpectrum:
     y: List[float]
 
 
+class IndexPathSelector(QtWidgets.QWidget):
+    path_selected = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        appctx: AppContext,
+        *,
+        placeholder: str,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._appctx = appctx
+        self._validator: Optional[Callable[[str], bool]] = None
+
+        self.combo = QtWidgets.QComboBox()
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self.combo.setToolTip("Path to the FTIR index DuckDB file.")
+        line_edit = self.combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText(placeholder)
+            line_edit.editingFinished.connect(self._on_editing_finished)
+        self.combo.activated.connect(self._on_combo_activated)
+
+        self.browse_button = QtWidgets.QToolButton()
+        self.browse_button.setText("Browse")
+        self.browse_button.setToolTip("Browse for an FTIR index database.")
+        self.browse_button.clicked.connect(self._on_browse_clicked)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.combo, 1)
+        layout.addWidget(self.browse_button)
+
+        self._refresh_combo(selected=self._appctx.indexer_last_index_path())
+        self._appctx.indexer_path_changed.connect(self._on_external_path_change)
+
+    def set_validator(self, validator: Callable[[str], bool]) -> None:
+        self._validator = validator
+
+    def current_text(self) -> str:
+        return self.combo.currentText().strip()
+
+    def set_current_text(self, text: str) -> None:
+        self.combo.setCurrentText(text)
+
+    def refresh_from_settings(self) -> None:
+        self._refresh_combo(selected=self._appctx.indexer_last_index_path())
+
+    def _refresh_combo(self, *, selected: Optional[str] = None) -> None:
+        recent = self._appctx.indexer_recent_index_paths()
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        for path in recent:
+            self.combo.addItem(path)
+        if selected:
+            self.combo.setCurrentText(selected)
+        elif recent:
+            self.combo.setCurrentText(recent[0])
+        else:
+            self.combo.setCurrentText("")
+        self.combo.blockSignals(False)
+
+    def _attempt_select_path(self, text: str) -> None:
+        path_text = text.strip()
+        if not path_text:
+            return
+        if self._validator is not None and not self._validator(path_text):
+            return
+        self._appctx.remember_indexer_index_path(path_text)
+        self._refresh_combo(selected=path_text)
+        self.path_selected.emit(path_text)
+
+    def _on_combo_activated(self, index: int) -> None:
+        text = self.combo.itemText(index)
+        if text:
+            self._attempt_select_path(text)
+
+    def _on_editing_finished(self) -> None:
+        text = self.current_text()
+        if text:
+            self._attempt_select_path(text)
+
+    def _on_browse_clicked(self) -> None:
+        current_text = self.current_text()
+        start = current_text or str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select FTIR index database",
+            start,
+            "DuckDB (*.duckdb);;All Files (*)",
+        )
+        if path:
+            self.combo.setCurrentText(path)
+            self._attempt_select_path(path)
+            return
+        fallback = self._appctx.indexer_last_index_path()
+        if not fallback:
+            recent = self._appctx.indexer_recent_index_paths()
+            fallback = recent[0] if recent else ""
+        self._refresh_combo(selected=fallback)
+
+    def _on_external_path_change(self, path: str) -> None:
+        if path and path != self.current_text():
+            self._refresh_combo(selected=path)
+
+
 class FtirLookupWindow(QtWidgets.QDialog):
     """Reference lookup window for FTIR peak matching."""
 
     identified_overlay_requested = QtCore.pyqtSignal(list)
     _AUTO_SEARCH_TOLERANCE_CM = 2.0
-    _BROWSE_ITEM_TEXT = "Browse…"
-    _RECENT_INDEX_LIMIT = 8
-
     def __init__(self, appctx: AppContext, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle("FTIR Reference Lookup")
@@ -70,24 +174,13 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
         self._last_search_source: Optional[str] = None
         self._last_lookup_criteria: Optional[LookupCriteria] = None
-        self._recent_index_paths: List[str] = []
-
-        self._index_path_combo = QtWidgets.QComboBox()
-        self._index_path_combo.setEditable(True)
-        self._index_path_combo.setInsertPolicy(
-            QtWidgets.QComboBox.InsertPolicy.NoInsert
+        self._index_selector = IndexPathSelector(
+            self._appctx,
+            placeholder="Select peaks.duckdb",
+            parent=self,
         )
-        self._index_path_combo.setToolTip("Path to the FTIR index DuckDB file.")
-        index_line_edit = self._index_path_combo.lineEdit()
-        if index_line_edit is not None:
-            index_line_edit.setPlaceholderText("Select peaks.duckdb")
-            index_line_edit.editingFinished.connect(self._on_index_editing_finished)
-        self._index_path_combo.activated.connect(self._on_index_combo_activated)
-
-        index_row = QtWidgets.QHBoxLayout()
-        index_row.addWidget(self._index_path_combo, 1)
-        index_container = QtWidgets.QWidget()
-        index_container.setLayout(index_row)
+        self._index_selector.set_validator(self._validate_selected_index_path)
+        self._index_selector.path_selected.connect(self._on_index_selected)
 
         self._search_edit = QtWidgets.QLineEdit()
         self._search_edit.setPlaceholderText("e.g. 1720±5 1600±8 title:acetone")
@@ -243,7 +336,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         splitter.setSizes([280, 80, 600])
 
         form = QtWidgets.QFormLayout()
-        form.addRow("Index DB", index_container)
+        form.addRow("Index DB", self._index_selector)
         form.addRow("Manual search", search_row)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -352,107 +445,28 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     # ------------------------------------------------------------------
     def _restore_index_path(self) -> None:
-        recent = self._load_recent_index_paths()
-        stored = self._appctx.settings.value("indexer/lastIndexPath", "", type=str)
+        stored = self._appctx.indexer_last_index_path()
         if stored:
-            recent = self._dedupe_recent_paths([stored, *recent])
-        self._recent_index_paths = recent
-        selected = stored or (recent[0] if recent else "")
-        self._refresh_index_combo(selected=selected)
-        if selected:
-            self._validate_selected_index_path(selected)
+            self._index_selector.set_current_text(stored)
+            self._validate_selected_index_path(stored)
 
-    def _load_recent_index_paths(self) -> List[str]:
-        raw = self._appctx.settings.value("indexer/recentIndexPaths", [], type=list)
-        if isinstance(raw, list):
-            candidates = raw
-        elif raw:
-            candidates = [raw]
-        else:
-            candidates = []
-        return self._dedupe_recent_paths(str(item).strip() for item in candidates)
-
-    def _dedupe_recent_paths(self, paths: Iterable[str]) -> List[str]:
-        seen: set[str] = set()
-        deduped: List[str] = []
-        for path in paths:
-            if not path:
-                continue
-            if path in seen:
-                continue
-            seen.add(path)
-            deduped.append(path)
-        return deduped
-
-    def _refresh_index_combo(self, *, selected: Optional[str] = None) -> None:
-        self._index_path_combo.blockSignals(True)
-        self._index_path_combo.clear()
-        for path in self._recent_index_paths:
-            self._index_path_combo.addItem(path)
-        self._index_path_combo.addItem(self._BROWSE_ITEM_TEXT)
-        if selected:
-            self._index_path_combo.setCurrentText(selected)
-        elif self._recent_index_paths:
-            self._index_path_combo.setCurrentText(self._recent_index_paths[0])
-        else:
-            self._index_path_combo.setCurrentText("")
-        self._index_path_combo.blockSignals(False)
-
-    def _remember_index_path(self, path: Path) -> None:
-        path_text = str(path)
-        recent = self._dedupe_recent_paths(
-            [path_text, *self._recent_index_paths]
-        )[: self._RECENT_INDEX_LIMIT]
-        self._recent_index_paths = recent
-        self._appctx.settings.setValue("indexer/lastIndexPath", path_text)
-        self._appctx.settings.setValue("indexer/recentIndexPaths", recent)
-        self._refresh_index_combo(selected=path_text)
-
-    def _validate_selected_index_path(self, raw: str) -> None:
-        if raw == self._BROWSE_ITEM_TEXT:
-            return
+    def _validate_selected_index_path(self, raw: str) -> bool:
         path = self._resolve_index_path(raw)
         if path is None:
-            return
+            return False
         errors = validate_ftir_index_schema(path)
         if errors:
             joined = "\n".join(errors)
             self._status_label.setText(f"Index schema errors:\n{joined}")
-            return
-        self._remember_index_path(path)
+            return False
         self._status_label.setText(f"Index ready: {path}")
+        return True
 
-    def _on_pick_index_path(self) -> None:
-        current_text = self._index_path_combo.currentText().strip()
-        start = current_text or str(Path.home())
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Select FTIR index database",
-            start,
-            "DuckDB (*.duckdb);;All Files (*)",
-        )
-        if path:
-            self._index_path_combo.setCurrentText(path)
-            self._validate_selected_index_path(path)
+    def _on_index_selected(self, raw: str) -> None:
+        path = self._resolve_index_path(raw)
+        if path is None:
             return
-        fallback = self._appctx.settings.value("indexer/lastIndexPath", "", type=str)
-        if not fallback and self._recent_index_paths:
-            fallback = self._recent_index_paths[0]
-        self._refresh_index_combo(selected=fallback or "")
-
-    def _on_index_combo_activated(self, index: int) -> None:
-        text = self._index_path_combo.itemText(index)
-        if text == self._BROWSE_ITEM_TEXT:
-            self._on_pick_index_path()
-            return
-        if text:
-            self._validate_selected_index_path(text)
-
-    def _on_index_editing_finished(self) -> None:
-        text = self._index_path_combo.currentText().strip()
-        if not text or text == self._BROWSE_ITEM_TEXT:
-            return
-        self._validate_selected_index_path(text)
+        self._status_label.setText(f"Index ready: {path}")
 
     def _on_manual_search(self) -> None:
         self._search_debounce_timer.stop()
@@ -484,9 +498,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         return normalized in {"wavenumber", "wavenumbers", "cm-1", "cm^-1", "cm⁻¹"}
 
     def _resolve_index_path(self, raw: Optional[str] = None) -> Optional[Path]:
-        raw = raw if raw is not None else self._index_path_combo.currentText().strip()
-        if raw == self._BROWSE_ITEM_TEXT:
-            raw = ""
+        raw = raw if raw is not None else self._index_selector.current_text()
         if not raw:
             self._status_label.setText("Select an FTIR index database before searching.")
             return None

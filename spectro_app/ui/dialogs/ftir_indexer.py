@@ -1239,7 +1239,7 @@ class FtirIndexerDialog(QDialog):
 
         if success and db_path:
             resolved = str(Path(db_path).resolve())
-            settings.setValue("indexer/lastIndexPath", resolved)
+            self._appctx.remember_indexer_index_path(resolved)
             self._update_last_index_display(resolved)
             self.last_index_path_changed.emit(resolved)
 
