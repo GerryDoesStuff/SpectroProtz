@@ -197,6 +197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._init_view_menu()
         self._init_status()
+        if hasattr(self.appctx, "indexer_path_changed"):
+            self.appctx.indexer_path_changed.connect(self._update_index_status_label)
         self.restore_state()
 
         self.runctl = RunController(self)
