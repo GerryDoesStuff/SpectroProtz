@@ -204,6 +204,10 @@ sidebar flanking the plots. Use the add/remove buttons anchored below each
 sidebar list, the left sidebar context menu, or a double-click on a match to
 move reference spectra into the right-hand plotting sidebar, which preserves
 the order shown in the results list for predictable comparisons.
+The single-reference preview plot uses fixed scaling: it always clamps
+normalized intensity to 0–1, sets the X range to the current spectrum (or
+peak bounds when no spectrum trace is plotted), and disables zooming/panning so
+the preview stays consistent as you browse entries.
 While the lookup window is open, selecting FTIR files in the main file queue
 automatically loads the chosen spectra and overlays them in the lookup
 comparison plot as “selected spectra.” Multi-selecting queue entries plots
