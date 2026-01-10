@@ -46,7 +46,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._selected_spectra: List[_SelectedSpectrum] = []
         self._active_index_path: Optional[Path] = None
         self._selected_entries: List[LookupResultEntry] = []
-        self._plot_legend: Optional[pg.LegendItem] = None
+        self._comparison_plot_legend: Optional[pg.LegendItem] = None
+        self._preview_plot_legend: Optional[pg.LegendItem] = None
         self._reference_spectra_cache: "OrderedDict[str, tuple[List[float], List[float]]]" = OrderedDict()
         self._reference_spectra_cache_limit = 48
         self._reference_peaks_cache: "OrderedDict[str, List[tuple[float, float]]]" = OrderedDict()
@@ -247,12 +248,18 @@ class FtirLookupWindow(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(auto_box)
         layout.addWidget(self._status_label)
-        self._plot_widget = pg.PlotWidget(background="w")
-        self._plot_widget.setMinimumHeight(220)
-        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self._plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
-        self._plot_widget.setLabel("left", "Normalized intensity")
-        self._plot_widget.setTitle("Selected reference peaks")
+        self._comparison_plot_widget = pg.PlotWidget(background="w")
+        self._comparison_plot_widget.setMinimumHeight(220)
+        self._comparison_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self._comparison_plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
+        self._comparison_plot_widget.setLabel("left", "Normalized intensity")
+        self._comparison_plot_widget.setTitle("Selected reference peaks")
+        self._preview_plot_widget = pg.PlotWidget(background="w")
+        self._preview_plot_widget.setMinimumHeight(200)
+        self._preview_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self._preview_plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
+        self._preview_plot_widget.setLabel("left", "Normalized intensity")
+        self._preview_plot_widget.setTitle("Reference preview")
         self._metadata_label = QtWidgets.QLabel("No reference selected.")
         self._metadata_label.setWordWrap(True)
         self._metadata_label.setTextInteractionFlags(
@@ -264,11 +271,22 @@ class FtirLookupWindow(QtWidgets.QDialog):
         metadata_layout = QtWidgets.QVBoxLayout(metadata_box)
         metadata_layout.addWidget(self._metadata_label)
 
+        comparison_container = QtWidgets.QWidget()
+        comparison_layout = QtWidgets.QVBoxLayout(comparison_container)
+        comparison_layout.setContentsMargins(0, 0, 0, 0)
+        comparison_layout.addWidget(self._comparison_plot_widget, 1)
+
+        preview_container = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QHBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self._preview_plot_widget, 3)
+        preview_layout.addWidget(metadata_box, 1)
+
         plot_container = QtWidgets.QWidget()
-        plot_layout = QtWidgets.QHBoxLayout(plot_container)
+        plot_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_layout.setContentsMargins(0, 0, 0, 0)
-        plot_layout.addWidget(self._plot_widget, 3)
-        plot_layout.addWidget(metadata_box, 1)
+        plot_layout.addWidget(comparison_container, 2)
+        plot_layout.addWidget(preview_container, 1)
         layout.addWidget(plot_container, 1)
 
         self._send_to_main_plot_button = QtWidgets.QPushButton()
@@ -833,8 +851,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._update_export_button_state()
 
     def _collect_plot_overlays(self) -> List[Dict[str, object]]:
+        plot_entries = list(self._selected_entries_for_plot())
         preview_entry = self._preview_entry
-        plot_entries = [preview_entry] if preview_entry is not None else self._selected_entries_for_plot()
+        if preview_entry is not None and preview_entry not in plot_entries:
+            plot_entries.append(preview_entry)
         overlays: List[Dict[str, object]] = []
         for entry in plot_entries:
             reference_trace = self._load_reference_spectrum(entry)
@@ -862,128 +882,173 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._plot_refresh_timer.start()
 
     def _refresh_plot(self) -> None:
-        self._plot_widget.clear()
-        if self._plot_legend is not None:
-            self._plot_widget.removeItem(self._plot_legend)
-        self._plot_legend = self._plot_widget.addLegend(offset=(10, 10))
+        self._refresh_comparison_plot()
+        self._refresh_preview_plot()
 
-        has_selected_spectra = bool(self._selected_spectra) and self._preview_entry is None
+    def _refresh_comparison_plot(self) -> None:
+        self._comparison_plot_widget.clear()
+        if self._comparison_plot_legend is not None:
+            self._comparison_plot_widget.removeItem(self._comparison_plot_legend)
+        self._comparison_plot_legend = self._comparison_plot_widget.addLegend(offset=(10, 10))
+
+        has_selected_spectra = bool(self._selected_spectra)
         if has_selected_spectra:
             for idx, spectrum in enumerate(self._selected_spectra):
                 normalized_y = self._normalize_spectrum_intensities(spectrum.y)
                 label = spectrum.label or "Selected spectrum"
                 pen = pg.mkPen(color=pg.intColor(idx), width=2)
-                self._plot_widget.plot(
+                self._comparison_plot_widget.plot(
                     spectrum.x,
                     normalized_y,
                     pen=pen,
                     name=label,
                 )
 
-        preview_entry = self._preview_entry
-        plot_entries = [preview_entry] if preview_entry is not None else self._selected_entries_for_plot()
+        plot_entries = self._selected_entries_for_plot()
         if not plot_entries:
             title = "Selected reference peaks"
             if has_selected_spectra:
                 title = "Selected spectra"
-            self._plot_widget.setTitle(title)
-            self._update_metadata_panel(None, count=0)
+            self._comparison_plot_widget.setTitle(title)
             return
         if self._active_index_path is None:
-            self._plot_widget.setTitle("Select an index database to plot peaks")
-            self._update_metadata_panel(None, count=len(plot_entries))
+            self._comparison_plot_widget.setTitle("Select an index database to plot peaks")
             return
 
         file_ids = [entry.file_id for entry in plot_entries if entry.file_id]
         if not file_ids:
-            self._plot_widget.setTitle("Selected reference peaks")
-            self._update_metadata_panel(None, count=len(plot_entries))
+            self._comparison_plot_widget.setTitle("Selected reference peaks")
             return
 
-        peaks_by_file: Dict[str, List[tuple[float, float]]] = {}
-        malformed_rows = 0
-        missing_ids = [file_id for file_id in file_ids if file_id not in self._reference_peaks_cache]
-        if missing_ids:
-            placeholders = ", ".join(["?"] * len(missing_ids))
-            sql = (
-                "SELECT file_id, center, amplitude FROM peaks "
-                f"WHERE file_id IN ({placeholders})"
-            )
-            try:
-                con = duckdb.connect(str(self._active_index_path), read_only=True)
-                try:
-                    rows = con.execute(sql, missing_ids).fetchall()
-                finally:
-                    con.close()
-            except Exception as exc:
-                self._status_label.setText(f"Plot refresh failed: {exc}")
-                return
-
-            peaks_by_file = {file_id: [] for file_id in missing_ids}
-            for file_id, center, amplitude in rows:
-                if file_id is None or center is None or amplitude is None:
-                    malformed_rows += 1
-                    continue
-                try:
-                    center_value = float(center)
-                    amplitude_value = float(amplitude)
-                except (TypeError, ValueError):
-                    malformed_rows += 1
-                    continue
-                if not (math.isfinite(center_value) and math.isfinite(amplitude_value)):
-                    malformed_rows += 1
-                    continue
-                peaks_by_file.setdefault(str(file_id), []).append(
-                    (center_value, amplitude_value)
-                )
-            for missing_id in missing_ids:
-                self._cache_peak_data(missing_id, peaks_by_file.get(missing_id, []))
-
+        malformed_rows = self._populate_reference_peaks(file_ids)
         if malformed_rows:
             self._append_status_warning(
                 f"Skipped {malformed_rows} malformed peak rows while plotting."
             )
 
         for idx, entry in enumerate(plot_entries):
-            reference_trace = self._load_reference_spectrum(entry)
-            if reference_trace is not None:
-                x_vals, y_vals = reference_trace
-                normalized_trace = self._normalize_spectrum_intensities(y_vals)
-                pen = pg.mkPen(color=pg.intColor(idx), width=2)
-                self._plot_widget.plot(
-                    x_vals,
-                    normalized_trace,
-                    pen=pen,
-                    name=entry.spectrum_name,
-                )
-            peaks = self._get_cached_peaks(entry.file_id)
-            if not peaks:
-                continue
-            normalized_heights = self._normalize_peak_heights(peaks)
-            x_values: List[float] = []
-            y_values: List[float] = []
-            for (center, _amplitude), height in zip(peaks, normalized_heights):
-                x_values.extend([center, center, float("nan")])
-                y_values.extend([0.0, height, float("nan")])
-            pen = pg.mkPen(color=pg.intColor(idx), width=1, style=QtCore.Qt.PenStyle.DashLine)
-            self._plot_widget.plot(
-                x_values,
-                y_values,
-                pen=pen,
+            self._plot_reference_entry(
+                self._comparison_plot_widget,
+                entry,
+                idx,
             )
 
-        if preview_entry is not None:
-            self._plot_widget.setTitle("Reference preview")
-            self._update_metadata_panel(preview_entry, count=1)
+        if has_selected_spectra:
+            self._comparison_plot_widget.setTitle("Selected spectra + reference traces")
         else:
-            if has_selected_spectra:
-                self._plot_widget.setTitle("Selected spectra + reference traces")
-            else:
-                self._plot_widget.setTitle("Selected reference traces")
-            if len(plot_entries) == 1:
-                self._update_metadata_panel(plot_entries[0], count=1)
-            else:
-                self._update_metadata_panel(None, count=len(plot_entries))
+            self._comparison_plot_widget.setTitle("Selected reference traces")
+
+    def _refresh_preview_plot(self) -> None:
+        self._preview_plot_widget.clear()
+        if self._preview_plot_legend is not None:
+            self._preview_plot_widget.removeItem(self._preview_plot_legend)
+        self._preview_plot_legend = self._preview_plot_widget.addLegend(offset=(10, 10))
+
+        preview_entry = self._preview_entry
+        if preview_entry is None:
+            self._preview_plot_widget.setTitle("Reference preview")
+            self._update_metadata_panel(None, count=0)
+            return
+
+        if self._active_index_path is None:
+            self._preview_plot_widget.setTitle("Select an index database to plot peaks")
+            self._update_metadata_panel(preview_entry, count=1)
+            return
+
+        file_ids = [preview_entry.file_id] if preview_entry.file_id else []
+        if not file_ids:
+            self._preview_plot_widget.setTitle("Reference preview")
+            self._update_metadata_panel(preview_entry, count=1)
+            return
+
+        malformed_rows = self._populate_reference_peaks(file_ids)
+        if malformed_rows:
+            self._append_status_warning(
+                f"Skipped {malformed_rows} malformed peak rows while plotting."
+            )
+
+        self._plot_reference_entry(
+            self._preview_plot_widget,
+            preview_entry,
+            0,
+        )
+        self._preview_plot_widget.setTitle("Reference preview")
+        self._update_metadata_panel(preview_entry, count=1)
+
+    def _populate_reference_peaks(self, file_ids: List[str]) -> int:
+        missing_ids = [file_id for file_id in file_ids if file_id not in self._reference_peaks_cache]
+        if not missing_ids:
+            return 0
+
+        placeholders = ", ".join(["?"] * len(missing_ids))
+        sql = (
+            "SELECT file_id, center, amplitude FROM peaks "
+            f"WHERE file_id IN ({placeholders})"
+        )
+        try:
+            con = duckdb.connect(str(self._active_index_path), read_only=True)
+            try:
+                rows = con.execute(sql, missing_ids).fetchall()
+            finally:
+                con.close()
+        except Exception as exc:
+            self._status_label.setText(f"Plot refresh failed: {exc}")
+            return 0
+
+        peaks_by_file = {file_id: [] for file_id in missing_ids}
+        malformed_rows = 0
+        for file_id, center, amplitude in rows:
+            if file_id is None or center is None or amplitude is None:
+                malformed_rows += 1
+                continue
+            try:
+                center_value = float(center)
+                amplitude_value = float(amplitude)
+            except (TypeError, ValueError):
+                malformed_rows += 1
+                continue
+            if not (math.isfinite(center_value) and math.isfinite(amplitude_value)):
+                malformed_rows += 1
+                continue
+            peaks_by_file.setdefault(str(file_id), []).append(
+                (center_value, amplitude_value)
+            )
+        for missing_id in missing_ids:
+            self._cache_peak_data(missing_id, peaks_by_file.get(missing_id, []))
+        return malformed_rows
+
+    def _plot_reference_entry(
+        self,
+        plot_widget: pg.PlotWidget,
+        entry: LookupResultEntry,
+        color_index: int,
+    ) -> None:
+        reference_trace = self._load_reference_spectrum(entry)
+        if reference_trace is not None:
+            x_vals, y_vals = reference_trace
+            normalized_trace = self._normalize_spectrum_intensities(y_vals)
+            pen = pg.mkPen(color=pg.intColor(color_index), width=2)
+            plot_widget.plot(
+                x_vals,
+                normalized_trace,
+                pen=pen,
+                name=entry.spectrum_name,
+            )
+        peaks = self._get_cached_peaks(entry.file_id)
+        if not peaks:
+            return
+        normalized_heights = self._normalize_peak_heights(peaks)
+        x_values: List[float] = []
+        y_values: List[float] = []
+        for (center, _amplitude), height in zip(peaks, normalized_heights):
+            x_values.extend([center, center, float("nan")])
+            y_values.extend([0.0, height, float("nan")])
+        pen = pg.mkPen(color=pg.intColor(color_index), width=1, style=QtCore.Qt.PenStyle.DashLine)
+        plot_widget.plot(
+            x_values,
+            y_values,
+            pen=pen,
+        )
 
     def _selected_entries_for_plot(self) -> List[LookupResultEntry]:
         if not self._selected_entries:

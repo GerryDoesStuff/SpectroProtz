@@ -187,12 +187,15 @@ matched peaks). Higher scores indicate both more matches and stronger peak
 intensity/area. Results are sorted by this score (descending), then by matched
 peak count, so manual and preview-driven searches rank references consistently.
 The list supports multi-selection, selection-driven previewing of the bottom
-plot and its metadata panel, and paginates through large result sets with a
-results cap so the sidebar remains responsive when a search returns many
-references. Use the transfer buttons between the sidebars, the left sidebar
-context menu, or a double-click on a match to move reference spectra into the
-right-hand plotting sidebar, which preserves the order shown in the results
-list for predictable comparisons.
+reference plot (with its metadata panel aligned beside the preview), and
+paginates through large result sets with a results cap so the sidebar remains
+responsive when a search returns many references. The top comparison plot
+stays focused on the selected spectra plus any references that you move into
+the right-hand plotting sidebar, so you can compare overlays without losing
+the single-reference preview context below. Use the transfer buttons between
+the sidebars, the left sidebar context menu, or a double-click on a match to
+move reference spectra into the right-hand plotting sidebar, which preserves
+the order shown in the results list for predictable comparisons.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
 tolerance. Auto-search only runs when there is no active manual query, so manual
