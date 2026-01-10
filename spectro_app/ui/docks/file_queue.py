@@ -177,6 +177,7 @@ class _QueueItemDelegate(QtWidgets.QStyledItemDelegate):
 
 class FileQueueDock(QDockWidget):
     paths_dropped = QtCore.pyqtSignal(list)
+    selection_changed = QtCore.pyqtSignal(list)
     inspect_requested = QtCore.pyqtSignal(str)
     preview_requested = QtCore.pyqtSignal(str)
     locate_requested = QtCore.pyqtSignal(str)
@@ -202,6 +203,7 @@ class FileQueueDock(QDockWidget):
         self.list.setAlternatingRowColors(False)
         self.list.installEventFilter(self)
         self.list.itemSelectionChanged.connect(self._update_remove_button_state)
+        self.list.itemSelectionChanged.connect(self._emit_selection_changed)
 
         header_widget = QtWidgets.QWidget(self)
         header_layout = QtWidgets.QHBoxLayout(header_widget)
@@ -709,6 +711,9 @@ class FileQueueDock(QDockWidget):
     def _update_remove_button_state(self) -> None:
         if hasattr(self, "_remove_button"):
             self._remove_button.setEnabled(bool(self._selected_paths()))
+
+    def _emit_selection_changed(self) -> None:
+        self.selection_changed.emit(self._selected_paths())
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         if obj is self.list and event.type() == QtCore.QEvent.Type.KeyPress:
