@@ -288,6 +288,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
         left_results_layout.addLayout(summary_row)
         left_results_layout.addWidget(self._results_list, 1)
         left_results_layout.addLayout(pager_row)
+        left_results_layout.addWidget(
+            self._add_to_plot_button,
+            alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
+        )
 
         self._remove_from_plot_button = QtWidgets.QToolButton()
         self._remove_from_plot_button.setText("← Remove")
@@ -297,19 +301,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         )
         self._remove_from_plot_button.clicked.connect(self._on_remove_selected_references)
 
-        transfer_layout = QtWidgets.QVBoxLayout()
-        transfer_layout.addStretch(1)
-        transfer_layout.addWidget(self._add_to_plot_button)
-        transfer_layout.addWidget(self._remove_from_plot_button)
-        transfer_layout.addStretch(1)
-        transfer_container = QtWidgets.QWidget()
-        transfer_container.setLayout(transfer_layout)
-
-        left_layout = QtWidgets.QHBoxLayout()
-        left_layout.addLayout(left_results_layout, 1)
-        left_layout.addWidget(transfer_container)
         left_container = QtWidgets.QWidget()
-        left_container.setLayout(left_layout)
+        left_container.setLayout(left_results_layout)
 
         right_layout = QtWidgets.QVBoxLayout()
         right_header = QtWidgets.QLabel("Selected references")
@@ -330,6 +323,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._show_selected_context_menu
         )
         right_layout.addWidget(self._selected_list, 1)
+        right_layout.addWidget(
+            self._remove_from_plot_button,
+            alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
+        )
         right_container = QtWidgets.QWidget()
         right_container.setLayout(right_layout)
 

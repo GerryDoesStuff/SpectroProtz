@@ -197,9 +197,9 @@ the right-hand plotting sidebar, so you can compare overlays without losing
 the single-reference preview context below. The layout is a three-column split
 with the left results sidebar, the dual-plot center column (comparison on top,
 single-reference preview + metadata below), and the right selected-references
-sidebar flanking the plots. Use the transfer buttons embedded alongside the
-left sidebar list, the left sidebar context menu, or a double-click on a match
-to move reference spectra into the right-hand plotting sidebar, which preserves
+sidebar flanking the plots. Use the add/remove buttons anchored below each
+sidebar list, the left sidebar context menu, or a double-click on a match to
+move reference spectra into the right-hand plotting sidebar, which preserves
 the order shown in the results list for predictable comparisons.
 When preview peak detection is active, the lookup window captures the identified
 peak centers and converts them into auto-search criteria using a fixed ±2 cm⁻¹
