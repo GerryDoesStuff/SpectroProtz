@@ -174,6 +174,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._last_auto_signature: Optional[tuple[tuple[float, ...], float]] = None
         self._last_search_source: Optional[str] = None
         self._last_lookup_criteria: Optional[LookupCriteria] = None
+        self._auto_plot_from_queue_enabled = True
         self._index_selector = IndexPathSelector(
             self._appctx,
             placeholder="Select peaks.duckdb",
@@ -219,6 +220,19 @@ class FtirLookupWindow(QtWidgets.QDialog):
         auto_box = QtWidgets.QGroupBox("Auto-search from preview peaks")
         auto_layout = QtWidgets.QVBoxLayout(auto_box)
         auto_layout.addWidget(self._auto_status_label)
+        self._auto_plot_from_queue_checkbox = QtWidgets.QCheckBox(
+            "Auto-plot selected queue spectrum"
+        )
+        self._auto_plot_from_queue_checkbox.setToolTip(
+            "Toggle automatic plotting of selected FTIR queue spectra in the lookup chart."
+        )
+        self._auto_plot_from_queue_checkbox.setChecked(
+            self._auto_plot_from_queue_enabled
+        )
+        self._auto_plot_from_queue_checkbox.toggled.connect(
+            self._on_auto_plot_from_queue_toggled
+        )
+        auto_layout.addWidget(self._auto_plot_from_queue_checkbox)
         auto_layout.addLayout(auto_row)
 
         self._status_label = QtWidgets.QLabel()
@@ -411,6 +425,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._restore_index_path()
         self._update_send_button_state()
 
+    def auto_plot_from_queue_enabled(self) -> bool:
+        return self._auto_plot_from_queue_enabled
+
     def set_auto_search_peaks(self, payload: Dict[str, object]) -> None:
         peaks_raw = payload.get("peaks")
         label = payload.get("label")
@@ -488,6 +505,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
     def _on_apply_auto_search(self) -> None:
         self._auto_search_from_preview(force=True)
+
+    def _on_auto_plot_from_queue_toggled(self, checked: bool) -> None:
+        self._auto_plot_from_queue_enabled = checked
 
     def _refresh_auto_status(self) -> None:
         if not self._auto_peak_centers:

@@ -1613,6 +1613,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_queue_selection_changed(self, paths: List[str]) -> None:
         if self._ftir_lookup_dialog is None:
             return
+        if not self._ftir_lookup_dialog.auto_plot_from_queue_enabled():
+            return
         if not paths:
             self._ftir_lookup_dialog.set_selected_spectra_from_queue([])
             return
