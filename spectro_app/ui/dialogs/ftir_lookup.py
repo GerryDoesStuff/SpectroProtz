@@ -383,6 +383,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._preview_plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
         self._preview_plot_widget.setLabel("left", "Normalized intensity")
         self._preview_plot_widget.setTitle("Reference preview")
+        self._preview_plot_widget.setMouseEnabled(x=False, y=False)
+        self._preview_plot_widget.setMenuEnabled(False)
         self._metadata_label = QtWidgets.QLabel("No reference selected.")
         self._metadata_label.setWordWrap(True)
         self._metadata_label.setTextInteractionFlags(
@@ -1069,6 +1071,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             preview_entry,
             0,
         )
+        x_range: Optional[tuple[float, float]] = None
         if self._preview_spectrum_overlay_enabled:
             reference_trace = self._load_meta_json_spectrum(preview_entry)
             if reference_trace is not None:
@@ -1081,7 +1084,19 @@ class FtirLookupWindow(QtWidgets.QDialog):
                     pen=pen,
                     name=preview_entry.spectrum_name,
                 )
+                finite_x = [value for value in x_vals if math.isfinite(value)]
+                if finite_x:
+                    x_range = (min(finite_x), max(finite_x))
+        if x_range is None:
+            peaks = self._get_cached_peaks(preview_entry.file_id or "")
+            if peaks:
+                centers = [center for center, _amplitude in peaks if math.isfinite(center)]
+                if centers:
+                    x_range = (min(centers), max(centers))
         self._preview_plot_widget.setTitle("Reference preview")
+        self._preview_plot_widget.setYRange(0, 1, padding=0)
+        if x_range is not None:
+            self._preview_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
         self._update_metadata_panel(preview_entry, count=1)
 
     def _populate_reference_peaks(self, file_ids: List[str]) -> int:
