@@ -377,8 +377,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         form.addRow("Index DB", self._index_selector)
         form.addRow("Manual search", search_row)
 
+        top_controls = QtWidgets.QHBoxLayout()
+        top_controls.addLayout(form, 3)
+        top_controls.addWidget(metadata_box, 2)
+
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addLayout(top_controls)
         layout.addWidget(self._status_label)
         self._comparison_plot_widget = pg.PlotWidget(background="w")
         self._comparison_plot_widget.setMinimumHeight(220)
@@ -436,8 +440,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         preview_plot_layout.addWidget(self._preview_spectrum_overlay_checkbox)
         preview_plot_layout.addWidget(self._preview_plot_widget, 1)
         preview_plot_layout.addWidget(self._preview_cursor_label)
-        preview_layout.addWidget(preview_plot_container, 3)
-        preview_layout.addWidget(metadata_box, 1)
+        preview_layout.addWidget(preview_plot_container, 1)
 
         plot_container = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_container)
