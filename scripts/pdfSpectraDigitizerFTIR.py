@@ -63,6 +63,7 @@ import matplotlib.pyplot as plt
 
 EXCEL_MAX_ROWS = 1_048_576  # includes header row
 MIN_CURVE_POINTS_QC = 6
+MIN_COMPONENT_Y_RANGE_PX = 8.0
 
 # Excel / openpyxl rejects certain control characters in cell strings.
 # This regex matches ASCII control chars except TAB(\x09), LF(\x0A), CR(\x0D).
@@ -720,6 +721,12 @@ def component_is_axis_like(comp: "CurveComponent", band_shape: Tuple[int, int]) 
     if x_span < 0.12 * w and y_span < 0.12 * h:
         return True
     return False
+
+def component_y_range(comp: "CurveComponent") -> float:
+    if comp.pixels.size == 0:
+        return 0.0
+    ys = comp.pixels[:, 0]
+    return float(ys.max() - ys.min()) if ys.size else 0.0
 
 def despike_vertical_artifacts(df: pd.DataFrame) -> pd.DataFrame:
     """Remove obvious near-vertical artifact runs (often seen as 'infill' noise in plots).
@@ -2150,6 +2157,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 for c in comps_full:
                     if component_is_axis_like(c, skel.shape[:2]):
                         continue
+                    if component_y_range(c) < MIN_COMPONENT_Y_RANGE_PX:
+                        continue
                     filtered_full.append(c)
                 if not filtered_full:
                     log("WARN", f"Page {pno+1} img {img_idx}: no curve components found in unlabeled plot.")
@@ -2179,7 +2188,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     if not comps_b:
                         continue
 
-                    # Filter out axis-like components and keep top few by (x_span, area)
+                    # Filter out axis-like components and keep top few by y-span/x-span.
                     h_band, w_band = band_skel.shape[:2]
                     filtered: List[Tuple[float, CurveComponent]] = []
                     for c in comps_b:
@@ -2187,7 +2196,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             continue
                         ys = c.pixels[:, 0]; xs = c.pixels[:, 1]
                         x_span = float(xs.max() - xs.min()) if xs.size else 0.0
-                        score = x_span * 10.0 + float(c.pixels.shape[0])
+                        y_span = float(ys.max() - ys.min()) if ys.size else 0.0
+                        if y_span < MIN_COMPONENT_Y_RANGE_PX:
+                            continue
+                        score = (y_span, x_span, float(c.pixels.shape[0]))
                         filtered.append((score, c))
                     if not filtered:
                         continue
@@ -2212,6 +2224,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     for c in comps_full:
                         if component_is_axis_like(c, skel.shape[:2]):
                             continue
+                        if component_y_range(c) < MIN_COMPONENT_Y_RANGE_PX:
+                            continue
                         filtered_full.append(c)
                     if filtered_full:
                         comp_to_label: Dict[int, List[CurveComponent]] = {}
@@ -2228,8 +2242,13 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                                 ys = c.pixels[:, 0]
                                 xs = c.pixels[:, 1]
                                 x_span = float(xs.max() - xs.min()) if xs.size else 0.0
-                                score = x_span * 10.0 + float(c.pixels.shape[0])
+                                y_span = float(ys.max() - ys.min()) if ys.size else 0.0
+                                if y_span < MIN_COMPONENT_Y_RANGE_PX:
+                                    continue
+                                score = (y_span, x_span, float(c.pixels.shape[0]))
                                 scored.append((score, c))
+                            if not scored:
+                                continue
                             scored.sort(key=lambda t: t[0], reverse=True)
                             keep = [c for _, c in scored[:3]]
                             band_components.append((bi, L, keep))
@@ -2329,9 +2348,32 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 dfs: List[pd.DataFrame] = []
                 qc_notes_parts: List[str] = []
                 qc_failed = False
+                component_filter_reason = ""
                 if x_calibration_failed:
                     qc_failed = True
                     qc_notes_parts.append(x_calibration_note or "x calibration failed; using pixel x")
+                if comps_for_label:
+                    valid_components: List[CurveComponent] = []
+                    axis_candidate_count = 0
+                    for comp in comps_for_label:
+                        y_range = component_y_range(comp)
+                        if y_range < MIN_COMPONENT_Y_RANGE_PX:
+                            axis_candidate_count += 1
+                            continue
+                        valid_components.append(comp)
+                    if axis_candidate_count:
+                        qc_notes_parts.append(
+                            f"axis/border candidates filtered (y_range<{MIN_COMPONENT_Y_RANGE_PX:.0f}px): "
+                            f"{axis_candidate_count}"
+                        )
+                    if not valid_components:
+                        qc_failed = True
+                        component_filter_reason = "axis_border_filtered"
+                        qc_notes_parts.append("no components after axis/border filter")
+                        page_reasons["axis_border_filtered"] += 1
+                    comps_for_label = valid_components
+                else:
+                    component_filter_reason = "component_count=0"
                 break_info = BreakInfo(
                     False,
                     None,
@@ -2634,7 +2676,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 if comps_for_label:
                     _trace_append(debug_trace, "components_found", "ok")
                 else:
-                    _trace_append(debug_trace, "components_found", "fail", reason="component_count=0")
+                    reason = component_filter_reason or "component_count=0"
+                    _trace_append(debug_trace, "components_found", "fail", reason=reason)
                 if digitize_no_curve:
                     _trace_append(debug_trace, "digitize_success", "fail", reason="digitize_failed_no_curve")
                 else:
