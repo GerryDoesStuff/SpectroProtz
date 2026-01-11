@@ -166,9 +166,14 @@ matching reference spectra and another for the peak rows that satisfy the same
 metadata filters plus any requested peak ranges. Empty or whitespace-only
 searches are handled defensively by returning queries that produce no rows,
 ensuring the lookup flow never issues an unbounded query by default.
-Tokens that are not peaks or explicit filters are treated as free-text metadata
-filters against the `title` field, so a query like `acetone 1720±5` is
-interpreted as `title:acetone` plus the peak constraint.
+Tokens that are not peaks or explicit filters are routed either to the
+`molform` or `title` metadata filters. Unkeyed formula tokens that match
+standard chemical formulas (element symbols with optional counts, such as
+`C6H6`, `NaCl`, or `CH3COOH`) are treated as `molform` filters so a query like
+`C6H6 1720±5` is interpreted as `molform:C6H6` plus the peak constraint. Any
+remaining unkeyed tokens are treated as free-text `title` filters, so a query
+like `acetone 1720±5` is interpreted as `title:acetone` plus the peak
+constraint.
 
 ## FTIR reference lookup window
 SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
