@@ -26,14 +26,14 @@ normalises spectra for peak detection, and writes peak fits plus header metadata
 into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
 includes Savitzky-Golay smoothing, optional baseline correction, and a
 normalisation pass that scales the working spectrum by its maximum absolute
-value to stabilise fitting. The indexer records the scaling factor and rescales
-all fitted peak areas back into the original absorbance units when persisting
-`peaks` rows. Peak amplitudes stored in the index are taken directly from the
-raw absorbance series (after Y-unit conversion, before smoothing or baseline
-correction) at the fitted center so overlay visuals and lookup scores reflect
-the true absorbance baseline. The fitted-model amplitude is kept alongside each
-fit in memory (under `fit_amplitude`) for QA without mixing normalized fit
-units into the persisted peak amplitude column.
+value to stabilise fitting. Peak model fits always run on the normalised data,
+but the indexer separately computes raw absorbance metrics for storage: the
+persisted peak amplitude is sampled directly from the raw absorbance series at
+the fitted center, and the persisted peak area is integrated from the raw
+absorbance window after subtracting a local median baseline. Fit-space
+amplitude/area values are kept alongside each fit (under `fit_amplitude` and
+`fit_area`) for QA without mixing normalized units into the stored peak
+columns.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in
