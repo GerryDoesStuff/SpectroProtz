@@ -1909,7 +1909,6 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         border_filter_px,
         rolling_median_window,
         label_lookahead_pages,
-        allow_qc_failures,
     ) = args
     logs: List[Tuple[str, str]] = []  # (level, msg)
     def log(level: str, msg: str):
@@ -2561,7 +2560,6 @@ def main() -> int:
     ap.add_argument("--border-filter-px", type=int, default=3, help="Pixel distance from plot border to discard (0 disables).")
     ap.add_argument("--rolling-median-window", type=int, default=5, help="Window size for oscillation-triggered rolling median filter.")
     ap.add_argument("--label-lookahead-pages", type=int, default=1, help="Pages to scan ahead for labels when current page lacks them.")
-    ap.add_argument("--allow-qc-failures", action="store_true", help="Deprecated (no-op). QC failures are always written and flagged.")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
     ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
@@ -2651,7 +2649,6 @@ def main() -> int:
         "border_filter_px": args.border_filter_px,
         "rolling_median_window": args.rolling_median_window,
         "label_lookahead_pages": args.label_lookahead_pages,
-        "allow_qc_failures": bool(args.allow_qc_failures),
         **source_meta,
         "qualifiers": "s=strong band; w=weak band; sh=shoulder",
         "y_output": "transmittance (percent if calibrated; relative otherwise)",
@@ -2670,7 +2667,6 @@ def main() -> int:
             args.verbose, source_meta, args.max_images_per_page,
             args.bin_representative, args.axis_filter_px, args.border_filter_px, args.rolling_median_window,
             args.label_lookahead_pages,
-            bool(args.allow_qc_failures),
         ))
 
     entries_rows: List[Dict[str, Any]] = []
