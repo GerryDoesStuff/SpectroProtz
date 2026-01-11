@@ -23,6 +23,7 @@ Notes
 
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit, threading
+from pathlib import Path
 from datetime import datetime
 from typing import Callable, List, Tuple, Dict, Optional
 import numpy as np, pandas as pd, duckdb
@@ -47,6 +48,12 @@ from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from spectro_app.engine.ftir_metadata import _normalize_molform
 
 class UnsupportedSpectrumError(RuntimeError):
     """Raised when the JCAMP headers do not describe an FTIR spectrum."""
@@ -3023,11 +3030,14 @@ def init_db(outdir: str, db_path: Optional[str] = None):
     return con
 
 def store_headers(con,file_id:str,headers:Dict[str,str]):
-    meta_json=json.dumps(headers,ensure_ascii=False)
+    normalized_headers = dict(headers)
+    if "MOLFORM" in normalized_headers:
+        normalized_headers["MOLFORM"] = _normalize_molform(normalized_headers.get("MOLFORM"))
+    meta_json=json.dumps(normalized_headers,ensure_ascii=False)
     columns=['file_id','path','n_points','n_spectra','meta_json']
     values=[file_id,'',0,0,meta_json]
     for key,column in PROMOTED_KEYS.items():
-        raw=headers.get(key)
+        raw=normalized_headers.get(key)
         if raw is None:
             coerced=None
         elif key in NUMERIC_KEYS:

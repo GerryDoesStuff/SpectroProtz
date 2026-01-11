@@ -18,6 +18,7 @@ from scripts.jdxIndexBuilder import parse_jcamp_multispec
 from spectro_app.app_context import AppContext
 from spectro_app.engine.ftir_index_schema import validate_ftir_index_schema
 from spectro_app.engine.ftir_lookup import LookupCriteria, PeakCriterion, build_lookup_queries, parse_lookup_text
+from spectro_app.engine.ftir_metadata import _normalize_molform
 
 
 @dataclass
@@ -1479,7 +1480,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         meta = entry.metadata
         name = entry.spectrum_name or "—"
-        formula = entry.formula or meta.get("molform") or "—"
+        formula = _normalize_molform(entry.formula or meta.get("molform")) or "—"
         matched_peaks = entry.matched_peaks
         match_score = entry.match_score
         title = meta.get("title") or "—"

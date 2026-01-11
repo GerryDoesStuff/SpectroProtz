@@ -21,7 +21,7 @@ def test_owner_continuation_and_field_filtering():
     assert target is not None, "Expected metadata for C106309_IR_0.jdx"
     assert target["title"] == "Heptanoic acid, ethyl ester"
     assert target["cas_registry_no"] == "106-30-9"
-    assert target["molform"] == "C 9 H 18 O 2"
+    assert target["molform"] == "C9H18O2"
     assert target["owner"].endswith("All rights reserved."), target["owner"]
     assert set(target.keys()) == {"path", "title", "cas_registry_no", "molform", "owner"}
 
