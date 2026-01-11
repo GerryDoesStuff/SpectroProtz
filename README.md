@@ -611,7 +611,9 @@ Analysts can generate a searchable index of the JCAMP-DX headers bundled in
 `IR_referenceDatabase/` with the `index_ir_metadata.py` helper. The script
 walks every `.jdx` file, normalises header names to snake case, merges
 continuation lines, and emits a deterministic record set that is convenient for
-diffing or downstream processing.
+diffing or downstream processing. Molecular formula values (`MOLFORM`) are
+normalized by removing whitespace so downstream overlays and exports receive a
+compact formula string.
 
 The higher-level peak indexer, [`scripts/jdxIndexBuilder.py`](scripts/jdxIndexBuilder.py),
 parses JCAMP-DX spectra, normalises axes, and fits peaks after converting any
