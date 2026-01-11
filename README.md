@@ -707,13 +707,13 @@ records whether points were collapsed (`collapsed_points`), the bin width
 the run logs capture per-spectrum QC stats for axis/border removals and bin
 collapses.
 
-When extracting axis calibration, the digitizer detects X-axis breaks by looking
-for discontinuities between OCR’d tick values and by scanning both the x-axis
-label band and the axis-line region for visual break markers such as “//”.
-When a break marker is detected, the digitizer uses the nearest tick values on
-either side of the marker to define the missing range, even if the tick spacing
-is otherwise ambiguous, and interpolates across that gap so downstream curve
-outputs remain continuous.
+When extracting axis calibration, the digitizer detects X-axis breaks by
+digitizing the full curve in pixel space, sorting the x positions, and finding
+the largest spacing that is significantly larger than the median (typically
+10–20×). That pixel-space midpoint is then used to split the OCR’d ticks into
+left/right calibrations so the right-hand segment is mapped to the correct
+portion of the axis. The digitizer imputes the missing region across the
+discontinuity so downstream curve outputs remain continuous.
 If too few X-axis ticks are detected to build a calibration, the digitizer can
 fall back to a user-supplied range by passing `--x-range` (for example
 `4000-400`) or setting the `FTIR_PDF_X_RANGE` environment variable; the leftmost

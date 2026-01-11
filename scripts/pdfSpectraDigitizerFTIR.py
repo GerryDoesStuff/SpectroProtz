@@ -6,7 +6,7 @@ Single-file CLI tool to digitize FTIR spectra from a PDF into an Excel workbook.
 
 Core features (per requirements):
 - Digitized spectrum curves are mandatory.
-- Axis breaks are detected (tick discontinuities) and missing regions are imputed by default (C1 Hermite bridge).
+- Axis breaks are detected from gaps in the digitized curve and missing regions are imputed by default (C1 Hermite bridge).
 - Transmittance is converted to absorbance by default (still stores transmittance too).
 - Metadata per spectrum entry (plus source title/author/doi/isbn) stored in XLSX.
 - Optional: save plot crop images and overlays to disk.
@@ -367,6 +367,13 @@ class BreakInfo:
     marker_present: bool = False
     marker_x_pix: Optional[float] = None
 
+@dataclass
+class CurveGapInfo:
+    mid_pix: float
+    gap_px: float
+    median_px: float
+    deltas: List[float]
+
 def detect_axis_break(
     x_ticks: List[Tuple[float, float]],
     marker_x_pix: Optional[float] = None,
@@ -430,6 +437,59 @@ def detect_axis_break(
     if marker_gap_lo is not None and marker_gap_hi is not None:
         return BreakInfo(True, marker_split, marker_gap_lo, marker_gap_hi, deltas.tolist(), score, True, marker_x_pix)
     return BreakInfo(False, None, None, None, deltas.tolist(), score, marker_present, marker_x_pix)
+
+def detect_curve_gap_from_pixels(
+    x_pix: np.ndarray,
+    *,
+    multiplier: float = 12.0,
+    min_points: int = 6,
+) -> Optional[CurveGapInfo]:
+    x = np.asarray(x_pix, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < min_points:
+        return None
+    x = np.unique(x)
+    if x.size < min_points:
+        return None
+    x = np.sort(x)
+    dx = np.diff(x)
+    if dx.size == 0:
+        return None
+    pos = dx[dx > 0]
+    if pos.size == 0:
+        return None
+    med = float(np.median(pos))
+    if med <= 0:
+        return None
+    idx = int(np.argmax(dx))
+    gap = float(dx[idx])
+    if gap <= multiplier * med:
+        return None
+    mid = float((x[idx] + x[idx + 1]) / 2.0)
+    return CurveGapInfo(mid, gap, med, dx.tolist())
+
+def split_ticks_by_midpoint(
+    x_ticks: List[Tuple[float, float]],
+    x_split: float,
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    left = [t for t in x_ticks if t[0] < x_split]
+    right = [t for t in x_ticks if t[0] >= x_split]
+    return left, right
+
+def gap_bounds_from_segments(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+    if "segment_id" not in df.columns:
+        return None, None
+    left = df.loc[df["segment_id"] == 0, "wavenumber_cm1"]
+    right = df.loc[df["segment_id"] == 1, "wavenumber_cm1"]
+    if left.empty or right.empty:
+        return None, None
+    left_edge = float(left.max())
+    right_edge = float(right.min())
+    gap_lo = min(left_edge, right_edge)
+    gap_hi = max(left_edge, right_edge)
+    if gap_hi <= gap_lo:
+        return None, None
+    return gap_lo, gap_hi
 
 def estimate_local_slope(x: np.ndarray, y: np.ndarray, tail: bool, n: int = 25) -> float:
     if len(x) < 2:
@@ -2195,45 +2255,29 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     x_mode = "pixel"
                 log("WARN", f"Page {pno+1} img {img_idx}: {x_calibration_note}.")
 
-            # Build x models
-            x_model_left = None
-            x_model_right = None
-            break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+            # Build base x model (full plot, no split)
+            x_model_base = None
             if not x_calibration_failed:
-                break_info = detect_axis_break(x_ticks, tick_meta.get("x_break_marker_pix"))
-                if break_info.present and break_info.x_split_pix is not None:
-                    x_split_int = break_info.x_split_pix - axes.x0
-                    left = [(xp, v) for (xp, v) in x_ticks if xp < x_split_int]
-                    right = [(xp, v) for (xp, v) in x_ticks if xp >= x_split_int]
-                    if len(left) >= 2:
-                        x_model_left = fit_linear([a for a, _ in left], [b for _, b in left])
-                    if len(right) >= 2:
-                        x_model_right = fit_linear([a for a, _ in right], [b for _, b in right])
-                else:
-                    x_model_left = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
+                x_model_base = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
 
-            if x_model_left is None and x_mode == "fallback" and x_range is not None:
-                x_model_left = build_fallback_x_model(x_range, axes)
-                x_model_right = None
-                break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
-                if x_model_left is None:
+            if x_model_base is None and x_mode == "fallback" and x_range is not None:
+                x_model_base = build_fallback_x_model(x_range, axes)
+                if x_model_base is None:
                     x_calibration_note = "fallback x-range mapping failed; using pixel x"
                     x_mode = "pixel"
 
-            if x_model_left is None:
+            if x_model_base is None:
                 log("WARN", f"Page {pno+1} img {img_idx}: x calibration fit failed; using pixel x.")
                 x_calibration_failed = True
                 if not x_calibration_note:
                     x_calibration_note = "x calibration fit failed; using pixel x"
                     x_mode = "pixel"
-                x_model_left = AxisModel(1.0, 0.0)
-                x_model_right = None
-                break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+                x_model_base = AxisModel(1.0, 0.0)
 
             if x_calibration_failed and len(x_ticks) < 2 and x_mode == "pixel":
                 log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
 
-            x_orientation = "increasing" if x_model_left.m > 0 else "decreasing" if x_model_left.m < 0 else ""
+            x_orientation = "increasing" if x_model_base.m > 0 else "decreasing" if x_model_base.m < 0 else ""
 
             # y model
             y_model = None
@@ -2262,6 +2306,45 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 if x_calibration_failed:
                     qc_failed = True
                     qc_notes_parts.append(x_calibration_note or "x calibration failed; using pixel x")
+                break_info = BreakInfo(
+                    False,
+                    None,
+                    None,
+                    None,
+                    [],
+                    0.0,
+                    False,
+                    None,
+                )
+                x_model_left = x_model_base
+                x_model_right = None
+
+                x_pix_full = np.array([], dtype=float)
+                if comps_for_label:
+                    x_pix_full = np.concatenate(
+                        [curve_points_from_component(comp)[0] for comp in comps_for_label]
+                    )
+                gap_info = None
+                if not x_calibration_failed and x_pix_full.size:
+                    gap_info = detect_curve_gap_from_pixels(x_pix_full)
+                if gap_info is not None:
+                    left_ticks, right_ticks = split_ticks_by_midpoint(x_ticks, gap_info.mid_pix)
+                    if len(left_ticks) >= 2 and len(right_ticks) >= 2:
+                        left_model = fit_linear([a for a, _ in left_ticks], [b for _, b in left_ticks])
+                        right_model = fit_linear([a for a, _ in right_ticks], [b for _, b in right_ticks])
+                        if left_model is not None and right_model is not None:
+                            x_model_left = left_model
+                            x_model_right = right_model
+                            break_info = BreakInfo(
+                                True,
+                                axes.x0 + gap_info.mid_pix,
+                                None,
+                                None,
+                                gap_info.deltas,
+                                float(gap_info.gap_px / gap_info.median_px),
+                                False,
+                                None,
+                            )
                 y_norm_mode = "calibrated" if y_mode == "calibrated" else "global"
                 for ci, comp in enumerate(comps_for_label):
                     try:
@@ -2435,9 +2518,13 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             ),
                         })
 
-                    # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
-                    if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
-                        df_curve = impute_gap(df_curve, break_info.gap_lo, break_info.gap_hi)
+                    # Gap imputation: stitch digitized discontinuities, then fill any large gaps.
+                    if break_info.present:
+                        gap_lo, gap_hi = gap_bounds_from_segments(df_curve)
+                        if gap_lo is not None and gap_hi is not None:
+                            break_info.gap_lo = gap_lo
+                            break_info.gap_hi = gap_hi
+                            df_curve = impute_gap(df_curve, gap_lo, gap_hi)
 
                     # Auto-detect additional large gaps (e.g., split spectra where components were disconnected)
                     xvals = df_curve["wavenumber_cm1"].to_numpy(dtype=float)
@@ -2450,12 +2537,6 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                                 thr_gap = max(30.0, 8.0 * med)
                         else:
                             thr_gap = 120.0
-                        if break_info.marker_present:
-                            if med > 0:
-                                thr_gap = min(thr_gap, max(30.0, 6.0 * med))
-                            else:
-                                thr_gap = min(thr_gap, 80.0)
-
                         ranges = merged_component_ranges(df_curve)
                         gap_count = 0
                         for ri in range(len(ranges) - 1):
@@ -2485,11 +2566,14 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 # Save digitized curve rows
                 for _, row in df_curve.iterrows():
+                    seg_val = row.get("segment_id", 0)
+                    if pd.isna(seg_val):
+                        seg_val = -1
                     curve_rows.append({
                         "entry_id": entry_id,
                         "wavenumber_cm1": float(row["wavenumber_cm1"]),
                         "transmittance": float(row["transmittance"]),
-                        "segment_id": int(row.get("segment_id", 0)),
+                        "segment_id": int(seg_val),
                         "imputed": bool(row.get("imputed", False)),
                     })
 
