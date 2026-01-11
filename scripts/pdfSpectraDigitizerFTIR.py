@@ -32,6 +32,7 @@ import argparse
 import dataclasses
 import datetime as _dt
 import hashlib
+import json
 import logging
 import math
 import os
@@ -2015,6 +2016,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
     peaks_rows: List[Dict[str, Any]] = []
     qc_rows: List[Dict[str, Any]] = []
     curve_rows: List[Dict[str, Any]] = []
+    diagnostics_rows: List[Dict[str, Any]] = []
     written_entry_ids: set = set()
     page_labels = 0
     page_curves = 0
@@ -2288,6 +2290,29 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
             # Peak list text parse
             w_raw, peaks = parse_peak_list(entry_text)            # Digitize spectra per label band (1 spectrum per label)
+            def _trace_append(trace: List[Dict[str, Any]], stage: str, status: str, reason: str = "") -> None:
+                entry = {"stage": stage, "status": status}
+                if reason:
+                    entry["reason"] = reason
+                trace.append(entry)
+
+            def _trace_summary(trace: List[Dict[str, Any]]) -> Tuple[str, str, str]:
+                def _stage_label(name: str) -> str:
+                    for suffix in ("_found", "_success", "_status"):
+                        if name.endswith(suffix):
+                            return name[: -len(suffix)]
+                    return name
+                for item in trace:
+                    if item.get("status") == "fail":
+                        stage = _stage_label(str(item.get("stage") or "unknown"))
+                        reason = str(item.get("reason") or "unspecified")
+                        return "failed", stage, reason
+                if trace:
+                    stage = _stage_label(str(trace[-1].get("stage") or "complete"))
+                else:
+                    stage = "unknown"
+                return "ok", stage, "ok"
+
             for s_idx, (bi, L, comps_for_label) in enumerate(band_components):
                 label_text = (L.text.strip() if L is not None else "").strip()
                 if not label_text:
@@ -2591,6 +2616,50 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "y_normalization": y_norm_mode,
                         "notes": qc_notes,
                     })
+                debug_trace: List[Dict[str, Any]] = []
+                _trace_append(debug_trace, "image_detected", "ok")
+                _trace_append(debug_trace, "axes_detected", "ok")
+                if len(x_ticks) >= 2:
+                    _trace_append(debug_trace, "x_ticks_found", "ok")
+                else:
+                    _trace_append(debug_trace, "x_ticks_found", "fail", reason=f"ocr_count={len(x_ticks)}")
+                if len(y_ticks) >= 2:
+                    _trace_append(debug_trace, "y_ticks_found", "ok")
+                else:
+                    _trace_append(debug_trace, "y_ticks_found", "fail", reason=f"ocr_count={len(y_ticks)}")
+                if label_missing:
+                    _trace_append(debug_trace, "labels_found", "fail", reason="label_missing")
+                else:
+                    _trace_append(debug_trace, "labels_found", "ok")
+                if comps_for_label:
+                    _trace_append(debug_trace, "components_found", "ok")
+                else:
+                    _trace_append(debug_trace, "components_found", "fail", reason="component_count=0")
+                if digitize_no_curve:
+                    _trace_append(debug_trace, "digitize_success", "fail", reason="digitize_failed_no_curve")
+                else:
+                    _trace_append(debug_trace, "digitize_success", "ok")
+                if qc_failed or qc_notes:
+                    qc_reason = qc_notes.split(";")[0].strip() if qc_notes else "qc_flagged"
+                    _trace_append(debug_trace, "qc_status", "fail", reason=qc_reason or "qc_flagged")
+                else:
+                    _trace_append(debug_trace, "qc_status", "ok")
+                trace_status, trace_stage, trace_reason = _trace_summary(debug_trace)
+                log(
+                    "INFO",
+                    f"entry_id={entry_id} status={trace_status} stage={trace_stage} reason={trace_reason}",
+                )
+                diagnostics_rows.append({
+                    "entry_id": entry_id,
+                    "page_number_1based": pno + 1,
+                    "image_index": img_idx,
+                    "spectrum_index": s_idx,
+                    "label_ocr": label_text,
+                    "status": trace_status,
+                    "failed_stage": trace_stage if trace_status == "failed" else "",
+                    "failed_reason": trace_reason if trace_status == "failed" else "",
+                    "debug_trace": debug_trace,
+                })
                 entries_rows.append({
                     "entry_id": entry_id,
                     "page_index": pno,
@@ -2666,6 +2735,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         "peaks_rows": peaks_rows,
         "qc_rows": qc_rows,
         "curve_rows": curve_rows,
+        "diagnostics_rows": diagnostics_rows,
         "logs": logs,
         "page_stats": {
             "labels": page_labels,
@@ -2827,6 +2897,7 @@ def main() -> int:
     peaks_rows: List[Dict[str, Any]] = []
     qc_rows: List[Dict[str, Any]] = []
     curve_rows: List[Dict[str, Any]] = []
+    diagnostics_rows: List[Dict[str, Any]] = []
     written_entry_ids: set = set()
     per_spectrum_jdx_written = 0
     per_spectrum_jdx_skipped = 0
@@ -2854,6 +2925,7 @@ def main() -> int:
             page_peaks = res.get("peaks_rows", [])
             page_qc = res.get("qc_rows", [])
             page_curve = res.get("curve_rows", [])
+            page_diagnostics = res.get("diagnostics_rows", [])
             page_stats = res.get("page_stats", {})
             total_labels += int(page_stats.get("labels", 0))
             total_curves += int(page_stats.get("curves", 0))
@@ -2864,6 +2936,7 @@ def main() -> int:
             peaks_rows.extend(page_peaks)
             qc_rows.extend(page_qc)
             curve_rows.extend(page_curve)
+            diagnostics_rows.extend(page_diagnostics)
 
             if args.per_spectrum_xlsx or args.per_spectrum_jdx:
                 by_entry: Dict[str, Dict[str, Any]] = {}
@@ -2914,6 +2987,7 @@ def main() -> int:
                 page_peaks = res.get("peaks_rows", [])
                 page_qc = res.get("qc_rows", [])
                 page_curve = res.get("curve_rows", [])
+                page_diagnostics = res.get("diagnostics_rows", [])
                 page_stats = res.get("page_stats", {})
                 total_labels += int(page_stats.get("labels", 0))
                 total_curves += int(page_stats.get("curves", 0))
@@ -2924,6 +2998,7 @@ def main() -> int:
                 peaks_rows.extend(page_peaks)
                 qc_rows.extend(page_qc)
                 curve_rows.extend(page_curve)
+                diagnostics_rows.extend(page_diagnostics)
 
                 if args.per_spectrum_xlsx or args.per_spectrum_jdx:
                     by_entry: Dict[str, Dict[str, Any]] = {}
@@ -3020,6 +3095,26 @@ def main() -> int:
     qc_failures_df.to_json(qc_json_path, orient="records", indent=2)
     logger.info(f"QC report written: {qc_csv_path}")
     logger.info(f"QC report written: {qc_json_path}")
+
+    diagnostics_csv_path = out_path.with_name(out_stem + "_diagnostics.csv")
+    diagnostics_json_path = out_path.with_name(out_stem + "_diagnostics.json")
+    diagnostics_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    if diagnostics_rows:
+        diagnostics_csv_rows: List[Dict[str, Any]] = []
+        for row in diagnostics_rows:
+            csv_row = dict(row)
+            trace = csv_row.pop("debug_trace", [])
+            csv_row["debug_trace_json"] = json.dumps(trace, ensure_ascii=False)
+            diagnostics_csv_rows.append(csv_row)
+        pd.DataFrame(diagnostics_csv_rows).to_csv(diagnostics_csv_path, index=False)
+        with diagnostics_json_path.open("w", encoding="utf-8") as fh:
+            json.dump(diagnostics_rows, fh, indent=2, ensure_ascii=False)
+    else:
+        pd.DataFrame(columns=["entry_id", "debug_trace_json"]).to_csv(diagnostics_csv_path, index=False)
+        with diagnostics_json_path.open("w", encoding="utf-8") as fh:
+            fh.write("[]\n")
+    logger.info(f"Diagnostics report written: {diagnostics_csv_path}")
+    logger.info(f"Diagnostics report written: {diagnostics_json_path}")
 
     sheets = {
         "RunInfo": run_df,
