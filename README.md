@@ -662,19 +662,18 @@ center. The logs note when this fallback path is used so reviewers can trace
 why a full scan was required.
 Each processed page emits a summary log line with counts for labels found,
 curve components detected, spectra digitized, and spectra rejected so you can
-spot problematic pages quickly. After the run, the CLI prints a totals summary
-with the number of spectra written/rejected and a breakdown of rejection
-reasons (for example missing labels, missing curve components, calibration
-failures, digitization failures, or near-flat traces) so expected outcomes are
-clear without opening the workbook.
-If you want QC failures to be logged without blocking output, pass
-`--allow-qc-failures`. With this flag enabled, spectra that fail QC checks
-(such as near-flat traces or missing X-axis tick calibration) are still
-written, the Entries sheet marks them with `qc_flag = true`, and the QC sheet
-records the failed stage so reviewers can triage them without losing data. For
-uncalibrated X-axis outputs, the digitizer preserves the curve using pixel X
-positions and annotates the QC notes so downstream users can filter or
-recalibrate as needed.
+spot problematic pages quickly. After the run, the CLI prints totals for
+spectra written/rejected plus a breakdown of rejection reasons (for example
+missing labels, missing curve components, calibration failures, digitization
+failures, or near-flat traces), and it also logs a QC summary with the number
+of QC-flagged spectra and their reasons. QC failures never block output:
+spectra are still written, the Entries sheet marks them with `qc_flag = true`,
+the QC sheet records the failed stage plus summary notes, and the per-spectrum
+JDX `##NOTES` field appends `QC: ...` for rapid review. The run also writes
+`<out>_qc_failures.csv` and `<out>_qc_failures.json` with `entry_id`, page,
+label, and QC reasons so reviewers can filter failures without opening Excel.
+The legacy `--allow-qc-failures` flag is retained as a no-op for compatibility
+but no longer changes output behavior.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then
