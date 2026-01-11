@@ -383,6 +383,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._comparison_plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
         self._comparison_plot_widget.setLabel("left", "Normalized intensity")
         self._comparison_plot_widget.setTitle("Selected reference peaks")
+        # Keep the comparison plot fixed while still allowing hover readouts.
         self._comparison_plot_widget.setMouseEnabled(x=False, y=False)
         self._comparison_plot_widget.setMenuEnabled(False)
         self._comparison_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
