@@ -644,6 +644,12 @@ to recover the label text; configure this behavior with
 `--label-lookahead-pages` (default: 1). When lookahead labels are applied, the
 Entries sheet records the number of pages ahead that supplied the labels in
 `label_page_offset` (0 means the label was on the same page as the spectra).
+If labels are found but the label bands yield no curve components, the
+digitizer falls back to scanning the full plot interior for curve components,
+then assigns the closest component(s) to each label based on vertical
+proximity between the label’s y position and the component bounding-box
+center. The logs note when this fallback path is used so reviewers can trace
+why a full scan was required.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then

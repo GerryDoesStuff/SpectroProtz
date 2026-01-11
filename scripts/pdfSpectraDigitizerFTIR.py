@@ -2074,8 +2074,39 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 band_components.append((bi, L, shifted))
 
             if not band_components:
-                log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found in label bands.")
-                continue
+                log("WARN", f"Page {pno+1} img {img_idx}: label band empty \u2192 full scan fallback.")
+                min_area_full = max(80, int(0.0009 * skel.shape[0] * max(1, skel.shape[1])))
+                comps_full = extract_curve_components(skel, min_area=min_area_full)
+                if not comps_full:
+                    comps_full = extract_curve_components(plot_bin, min_area=min_area_full)
+                filtered_full: List[CurveComponent] = []
+                for c in comps_full:
+                    if component_is_axis_like(c, skel.shape[:2]):
+                        continue
+                    filtered_full.append(c)
+                if filtered_full:
+                    comp_to_label: Dict[int, List[CurveComponent]] = {}
+                    for c in filtered_full:
+                        comp_cy = axes.y0 + (c.bbox[1] + c.bbox[3]) / 2
+                        best_idx = min(range(len(label_lines)), key=lambda idx: abs(label_lines[idx].cy - comp_cy))
+                        comp_to_label.setdefault(best_idx, []).append(c)
+                    for bi, L in enumerate(label_lines):
+                        comps_for_label = comp_to_label.get(bi, [])
+                        if not comps_for_label:
+                            continue
+                        scored = []
+                        for c in comps_for_label:
+                            ys = c.pixels[:, 0]
+                            xs = c.pixels[:, 1]
+                            x_span = float(xs.max() - xs.min()) if xs.size else 0.0
+                            score = x_span * 10.0 + float(c.pixels.shape[0])
+                            scored.append((score, c))
+                        scored.sort(key=lambda t: t[0], reverse=True)
+                        keep = [c for _, c in scored[:3]]
+                        band_components.append((bi, L, keep))
+                if not band_components:
+                    log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
+                    continue
 
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
