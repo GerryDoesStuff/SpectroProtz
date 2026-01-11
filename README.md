@@ -208,6 +208,9 @@ The single-reference preview plot uses fixed scaling: it always clamps
 normalized intensity to 0–1, sets the X range to the current spectrum (or
 peak bounds when no spectrum trace is plotted), and disables zooming/panning so
 the preview stays consistent as you browse entries.
+Both lookup plots now include a live cursor readout in the top-right corner;
+moving the mouse inside a plot shows the current wavenumber and normalized
+intensity, and the readout hides as soon as the pointer leaves the plot area.
 While the lookup window is open, selecting FTIR files in the main file queue
 automatically loads the chosen spectra and overlays them in the lookup
 comparison plot as “selected spectra.” Multi-selecting queue entries plots

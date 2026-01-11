@@ -377,6 +377,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._comparison_plot_widget.setLabel("bottom", "Wavenumber", units="cm⁻¹")
         self._comparison_plot_widget.setLabel("left", "Normalized intensity")
         self._comparison_plot_widget.setTitle("Selected reference peaks")
+        self._comparison_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
+        self._comparison_cursor_label.setZValue(100)
+        self._comparison_cursor_label.hide()
         self._preview_plot_widget = pg.PlotWidget(background="w")
         self._preview_plot_widget.setMinimumHeight(200)
         self._preview_plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -385,6 +388,15 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._preview_plot_widget.setTitle("Reference preview")
         self._preview_plot_widget.setMouseEnabled(x=False, y=False)
         self._preview_plot_widget.setMenuEnabled(False)
+        self._preview_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
+        self._preview_cursor_label.setZValue(100)
+        self._preview_cursor_label.hide()
+        self._comparison_plot_widget.scene().sigMouseMoved.connect(
+            self._on_comparison_plot_mouse_moved
+        )
+        self._preview_plot_widget.scene().sigMouseMoved.connect(
+            self._on_preview_plot_mouse_moved
+        )
         self._metadata_label = QtWidgets.QLabel("No reference selected.")
         self._metadata_label.setWordWrap(True)
         self._metadata_label.setTextInteractionFlags(
@@ -989,6 +1001,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if self._comparison_plot_legend is not None:
             self._comparison_plot_widget.removeItem(self._comparison_plot_legend)
         self._comparison_plot_legend = self._comparison_plot_widget.addLegend(offset=(10, 10))
+        self._ensure_cursor_label(self._comparison_plot_widget, self._comparison_cursor_label)
 
         has_selected_spectra = bool(self._selected_spectra)
         if has_selected_spectra:
@@ -1042,6 +1055,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if self._preview_plot_legend is not None:
             self._preview_plot_widget.removeItem(self._preview_plot_legend)
         self._preview_plot_legend = self._preview_plot_widget.addLegend(offset=(10, 10))
+        self._ensure_cursor_label(self._preview_plot_widget, self._preview_cursor_label)
 
         preview_entry = self._preview_entry
         if preview_entry is None:
@@ -1184,6 +1198,53 @@ class FtirLookupWindow(QtWidgets.QDialog):
             x_values,
             y_values,
             pen=pen,
+        )
+
+    def _ensure_cursor_label(
+        self,
+        plot_widget: pg.PlotWidget,
+        label: pg.TextItem,
+    ) -> None:
+        plot_item = plot_widget.getPlotItem()
+        if hasattr(plot_item, "items") and label in plot_item.items:
+            return
+        plot_item.addItem(label, ignoreBounds=True)
+
+    def _update_cursor_label(
+        self,
+        plot_widget: pg.PlotWidget,
+        label: pg.TextItem,
+        pos: QtCore.QPointF,
+    ) -> None:
+        plot_item = plot_widget.getPlotItem()
+        self._ensure_cursor_label(plot_widget, label)
+        if not plot_item.sceneBoundingRect().contains(pos):
+            label.hide()
+            return
+        view_pos = plot_item.vb.mapSceneToView(pos)
+        x_val = float(view_pos.x())
+        y_val = float(view_pos.y())
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            label.hide()
+            return
+        label.setText(f"Wavenumber: {x_val:.4f}, Intensity: {y_val:.4f}")
+        view_rect = plot_item.vb.viewRect()
+        if view_rect is not None:
+            label.setPos(view_rect.right(), view_rect.top())
+        label.show()
+
+    def _on_comparison_plot_mouse_moved(self, pos: QtCore.QPointF) -> None:
+        self._update_cursor_label(
+            self._comparison_plot_widget,
+            self._comparison_cursor_label,
+            pos,
+        )
+
+    def _on_preview_plot_mouse_moved(self, pos: QtCore.QPointF) -> None:
+        self._update_cursor_label(
+            self._preview_plot_widget,
+            self._preview_cursor_label,
+            pos,
         )
 
     def _selected_entries_for_plot(self) -> List[LookupResultEntry]:
