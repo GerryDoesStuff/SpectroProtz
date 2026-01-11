@@ -1734,9 +1734,6 @@ def _build_jdx_headers(
         entry_row.get("entry_id"),
     )
     description = _first_nonempty(entry_row.get("description"), entry_row.get("entry_description"))
-    qc_notes = _sanitize_jdx_str(entry_row.get("qc_notes"))
-    if qc_notes:
-        description = f"{description} QC: {qc_notes}".strip() if description else f"QC: {qc_notes}"
     _append_header(lines, "TITLE", title)
     _append_header(lines, "NOTES", description)
     _append_header(lines, "ORIGIN", _first_nonempty(entry_row.get("source_title"), entry_row.get("origin")))
@@ -2149,10 +2146,58 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
             x_calibration_failed = len(x_ticks) < 2
-            x_calibration_note = ""
-            if x_calibration_failed:
-                x_calibration_note = f"insufficient x ticks ({len(x_ticks)}); using pixel x"
-                log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
+            if x_calibration_failed and not allow_qc_failures:
+                log("ERROR", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}).")
+                # record failure rows for each band (including unlabeled fallbacks)
+                for s_idx, (bi, L, _) in enumerate(band_components):
+                    label_text = (L.text.strip() if L is not None else "").strip()
+                    if not label_text:
+                        log("WARN", f"Page {pno+1} img {img_idx} spec {s_idx}: empty label; skipping.")
+                        page_rejected += 1
+                        page_reasons["missing_labels"] += 1
+                        continue
+                    entry_id = f"p{pno+1:04d}_img{img_idx:02d}_spec{s_idx:02d}"
+                    meta_md = parse_mineral_metadata(entry_text, fallback_name=label_text)
+                    entry_name = parse_spectrum_name_from_text(entry_text_above, fallback_name=label_text)
+                    entries_rows.append({
+                        "entry_id": entry_id,
+                        "page_index": pno,
+                        "page_number_1based": pno+1,
+                        "image_index": img_idx,
+                        "spectrum_index": s_idx,
+                        "label_ocr": label_text,
+                        "label_page_offset": label_page_offset,
+                        "label_missing": label_missing,
+                        "entry_name": entry_name,
+                        "entry_description": entry_description,
+                        "description": entry_description,
+                        "mineral_name": meta_md.get("mineral_name", ""),
+                        "formula": meta_md.get("formula", ""),
+                        "entry_text_raw": entry_text,
+                        "wavenumbers_raw": "",
+                        "axis_break_present": False,
+                        "gap_lo_cm1": None,
+                        "gap_hi_cm1": None,
+                        "x_orientation": "",
+                        "y_axis_type": tick_meta.get("y_mode", ""),
+                        "digitize_status": "failed",
+                        "qc_flag": True,
+                        "qc_notes": f"Insufficient x ticks for calibration (found {len(x_ticks)})",
+                        "image_path": image_path,
+                        **source_meta,
+                    })
+                    qc_rows.append({
+                        "entry_id": entry_id,
+                        "page_number_1based": pno+1,
+                        "image_index": img_idx,
+                        "spectrum_index": s_idx,
+                        "stage": "x_calibration",
+                        "status": "failed",
+                        "notes": f"x_ticks={len(x_ticks)}",
+                    })
+                    page_rejected += 1
+                    page_reasons["insufficient_x_ticks"] += 1
+                continue
 
             # Build x models
             x_model_left = None
@@ -2172,15 +2217,19 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     x_model_left = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
 
             if x_model_left is None:
-                log("WARN", f"Page {pno+1} img {img_idx}: x calibration fit failed; using pixel x.")
-                x_calibration_failed = True
-                if not x_calibration_note:
-                    x_calibration_note = "x calibration fit failed; using pixel x"
-                x_model_left = AxisModel(1.0, 0.0)
-                x_model_right = None
-                break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+                if allow_qc_failures:
+                    log("WARN", f"Page {pno+1} img {img_idx}: x calibration fit failed; using pixel x.")
+                    x_calibration_failed = True
+                    x_model_left = AxisModel(1.0, 0.0)
+                    x_model_right = None
+                    break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+                else:
+                    log("ERROR", f"Page {pno+1} img {img_idx}: x calibration fit failed.")
+                    page_rejected += len(label_lines)
+                    page_reasons["x_calibration_failed"] += len(label_lines)
+                    continue
 
-            if x_calibration_failed and len(x_ticks) < 2:
+            if x_calibration_failed and allow_qc_failures and len(x_ticks) < 2:
                 log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
 
             x_orientation = "increasing" if x_model_left.m > 0 else "decreasing" if x_model_left.m < 0 else ""
@@ -2211,7 +2260,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 qc_failed = False
                 if x_calibration_failed:
                     qc_failed = True
-                    qc_notes_parts.append(x_calibration_note or "x calibration failed; using pixel x")
+                    qc_notes_parts.append("x calibration failed; using pixel x")
                 y_norm_mode = "calibrated" if y_mode == "calibrated" else "global"
                 for ci, comp in enumerate(comps_for_label):
                     try:
@@ -2364,6 +2413,41 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
                         ),
                     })
+                    if not allow_qc_failures:
+                        entries_rows.append({
+                            "entry_id": entry_id,
+                            "page_index": pno,
+                            "page_number_1based": pno+1,
+                            "image_index": img_idx,
+                            "spectrum_index": s_idx,
+                            "label_ocr": label_text,
+                            "label_page_offset": label_page_offset,
+                            "label_missing": label_missing,
+                            "entry_name": entry_name,
+                            "entry_description": entry_description,
+                            "description": entry_description,
+                            "mineral_name": meta_md.get("mineral_name", ""),
+                            "formula": meta_md.get("formula", ""),
+                            "entry_text_raw": entry_text,
+                            "wavenumbers_raw": "",
+                            "axis_break_present": bool(break_info.present),
+                            "gap_lo_cm1": break_info.gap_lo,
+                            "gap_hi_cm1": break_info.gap_hi,
+                            "x_orientation": x_orientation,
+                            "y_axis_type": y_mode,
+                            "y_normalization": y_norm_mode,
+                            "digitize_status": "failed",
+                            "axis_filter_applied": axis_filter_applied,
+                            "rolling_median_applied": rolling_median_applied,
+                            "bin_width_cm1": collapse_info.get("collapse_bin_width"),
+                            "qc_flag": True,
+                            "qc_notes": f"Rejected near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted",
+                            "image_path": image_path,
+                            **source_meta,
+                        })
+                        page_rejected += 1
+                        page_reasons["flat_trace"] += 1
+                        continue
 
                 # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
                 if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
@@ -2442,18 +2526,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "stage": "x_calibration",
                         "status": "failed",
-                        "notes": (x_calibration_note or f"x_ticks={len(x_ticks)}; used pixel x"),
-                    })
-                if qc_notes:
-                    qc_rows.append({
-                        "entry_id": entry_id,
-                        "page_number_1based": pno+1,
-                        "image_index": img_idx,
-                        "spectrum_index": s_idx,
-                        "stage": "qc_summary",
-                        "status": "flagged",
-                        "y_normalization": y_norm_mode,
-                        "notes": qc_notes,
+                        "notes": f"x_ticks={len(x_ticks)}; used pixel x",
                     })
                 entries_rows.append({
                     "entry_id": entry_id,
@@ -2561,7 +2634,7 @@ def main() -> int:
     ap.add_argument("--border-filter-px", type=int, default=3, help="Pixel distance from plot border to discard (0 disables).")
     ap.add_argument("--rolling-median-window", type=int, default=5, help="Window size for oscillation-triggered rolling median filter.")
     ap.add_argument("--label-lookahead-pages", type=int, default=1, help="Pages to scan ahead for labels when current page lacks them.")
-    ap.add_argument("--allow-qc-failures", action="store_true", help="Deprecated (no-op). QC failures are always written and flagged.")
+    ap.add_argument("--allow-qc-failures", action="store_true", help="Write spectra even when QC checks fail (entries marked qc_flag=True).")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
     ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
@@ -2822,55 +2895,6 @@ def main() -> int:
     if not entries_df.empty:
         entries_df = entries_df.sort_values(["page_index", "image_index", "spectrum_index"]).reset_index(drop=True)
 
-    qc_failed_by_entry: Dict[str, List[Dict[str, Any]]] = {}
-    for qr in qc_rows:
-        if qr.get("status") == "failed":
-            qc_failed_by_entry.setdefault(qr.get("entry_id", ""), []).append(qr)
-
-    qc_failure_rows: List[Dict[str, Any]] = []
-    qc_reason_counts = Counter()
-    for er in entries_rows:
-        entry_id = er.get("entry_id", "")
-        if not entry_id:
-            continue
-        qc_flag = bool(er.get("qc_flag"))
-        qc_notes = str(er.get("qc_notes") or "").strip()
-        if not qc_flag and not qc_notes:
-            continue
-        reasons: List[str] = []
-        if qc_notes:
-            reasons.extend([r.strip() for r in qc_notes.split(";") if r.strip()])
-        for qr in qc_failed_by_entry.get(entry_id, []):
-            stage = str(qr.get("stage") or "").strip()
-            note = str(qr.get("notes") or "").strip()
-            if stage and note:
-                reasons.append(f"{stage}: {note}")
-            elif note:
-                reasons.append(note)
-            elif stage:
-                reasons.append(stage)
-        reasons = [r for r in reasons if r]
-        if not reasons:
-            reasons = ["unspecified QC failure"]
-        reason_str = "; ".join(dict.fromkeys(reasons))
-        qc_failure_rows.append({
-            "entry_id": entry_id,
-            "page_number_1based": er.get("page_number_1based"),
-            "label_ocr": er.get("label_ocr"),
-            "qc_reasons": reason_str,
-        })
-        for reason in dict.fromkeys(reasons):
-            qc_reason_counts[reason] += 1
-
-    qc_failures_df = pd.DataFrame(qc_failure_rows)
-    qc_csv_path = out_path.with_name(out_stem + "_qc_failures.csv")
-    qc_json_path = out_path.with_name(out_stem + "_qc_failures.json")
-    qc_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    qc_failures_df.to_csv(qc_csv_path, index=False)
-    qc_failures_df.to_json(qc_json_path, orient="records", indent=2)
-    logger.info(f"QC report written: {qc_csv_path}")
-    logger.info(f"QC report written: {qc_json_path}")
-
     sheets = {
         "RunInfo": run_df,
         "Entries": entries_df,
@@ -2926,11 +2950,6 @@ def main() -> int:
             f"(reasons: {summary_reasons})"
         ),
     )
-    qc_reason_parts = []
-    for reason, count in qc_reason_counts.items():
-        qc_reason_parts.append(f"{reason}={count}")
-    qc_summary_reasons = ", ".join(qc_reason_parts) if qc_reason_parts else "none"
-    logger.info(f"QC summary: flagged={len(qc_failure_rows)} (reasons: {qc_summary_reasons})")
     logger.info("Done.")
     return 0
 
