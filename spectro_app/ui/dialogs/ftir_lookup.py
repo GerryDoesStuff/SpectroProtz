@@ -231,6 +231,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         auto_box = QtWidgets.QGroupBox("Auto-search from preview peaks")
         auto_layout = QtWidgets.QVBoxLayout(auto_box)
+        auto_layout.setContentsMargins(6, 6, 6, 6)
+        auto_layout.setSpacing(4)
         auto_layout.addWidget(self._auto_status_label)
         self._auto_plot_from_queue_checkbox = QtWidgets.QCheckBox(
             "Auto-plot selected queue spectrum"
@@ -245,6 +247,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._on_auto_plot_from_queue_toggled
         )
         auto_layout.addWidget(self._auto_plot_from_queue_checkbox)
+        auto_row.setSpacing(6)
         auto_layout.addLayout(auto_row)
         self._preview_spectrum_overlay_enabled = True
         self._preview_spectrum_overlay_checkbox = QtWidgets.QCheckBox(
@@ -325,6 +328,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         summary_row.addStretch(1)
         summary_row.addWidget(self._export_button)
         left_results_layout.addLayout(summary_row)
+        left_results_layout.addWidget(auto_box)
         left_results_layout.addWidget(self._results_list, 1)
         left_results_layout.addLayout(pager_row)
         left_results_layout.addWidget(
@@ -375,7 +379,6 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(auto_box)
         layout.addWidget(self._status_label)
         self._comparison_plot_widget = pg.PlotWidget(background="w")
         self._comparison_plot_widget.setMinimumHeight(220)
