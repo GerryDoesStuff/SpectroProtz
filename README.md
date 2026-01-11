@@ -678,8 +678,7 @@ the QC sheet records the failed stage plus summary notes, and the per-spectrum
 JDX `##NOTES` field appends `QC: ...` for rapid review. The run also writes
 `<out>_qc_failures.csv` and `<out>_qc_failures.json` with `entry_id`, page,
 label, and QC reasons so reviewers can filter failures without opening Excel.
-The legacy `--allow-qc-failures` flag is retained as a no-op for compatibility
-but no longer changes output behavior.
+QC failures no longer block output; QC details are reported separately.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then
