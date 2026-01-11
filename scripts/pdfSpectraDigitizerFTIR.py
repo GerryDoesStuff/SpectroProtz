@@ -929,6 +929,8 @@ def digitize_single_component(
     y_model: Optional[AxisModel],
     y_mode: str,
     interior_shape: Tuple[int,int],
+    global_y_min: Optional[float] = None,
+    global_y_max: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Returns CurvePoints dataframe rows for one component (one spectrum) + qc dict.
@@ -953,10 +955,17 @@ def digitize_single_component(
     if y_model is not None and y_mode == "calibrated":
         # y_model expects pixel in interior y; but we fit with y ticks relative to interior
         T = y_model(y_pix)
+        y_norm_mode = "calibrated"
     else:
         # normalized relative: derive from component range within interior
-        y_min = float(np.min(y_pix))
-        y_max = float(np.max(y_pix))
+        if global_y_min is not None and global_y_max is not None:
+            y_min = float(global_y_min)
+            y_max = float(global_y_max)
+            y_norm_mode = "global"
+        else:
+            y_min = float(np.min(y_pix))
+            y_max = float(np.max(y_pix))
+            y_norm_mode = "component"
         if y_max - y_min < 1e-6:
             T = np.full_like(y_pix, 0.5, dtype=float)
         else:
@@ -981,6 +990,7 @@ def digitize_single_component(
     qc = {
         "n_points": int(len(df)),
         "y_mode": y_mode,
+        "y_normalization": y_norm_mode,
         "y_min": float(np.nanmin(T)),
         "y_max": float(np.nanmax(T)),
     }
@@ -1889,6 +1899,22 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 # Digitize all components for this label (supports split spectra).
                 dfs: List[pd.DataFrame] = []
                 qc_notes_parts: List[str] = []
+                global_y_min = None
+                global_y_max = None
+                y_norm_mode = "calibrated"
+                if y_mode != "calibrated":
+                    y_vals: List[np.ndarray] = []
+                    for comp in comps_for_label:
+                        _, y_pix = curve_points_from_component(comp)
+                        if y_pix.size:
+                            y_vals.append(y_pix)
+                    if y_vals:
+                        y_all = np.concatenate(y_vals)
+                        global_y_min = float(np.min(y_all))
+                        global_y_max = float(np.max(y_all))
+                        y_norm_mode = "global"
+                    else:
+                        y_norm_mode = "component"
                 for ci, comp in enumerate(comps_for_label):
                     try:
                         df_seg, qc_seg = digitize_single_component(
@@ -1900,6 +1926,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             y_model=y_model,
                             y_mode=y_mode,
                             interior_shape=plot_interior.shape[:2],
+                            global_y_min=global_y_min,
+                            global_y_max=global_y_max,
                         )
                         df_seg["component_index"] = ci
                         dfs.append(df_seg)
@@ -1926,6 +1954,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "gap_hi_cm1": break_info.gap_hi,
                         "x_orientation": x_orientation,
                         "y_axis_type": y_mode,
+                        "y_normalization": y_norm_mode,
                         "digitize_status": "failed",
                         "qc_flag": True,
                         "qc_notes": "no curve components digitized; " + "; ".join(qc_notes_parts),
@@ -1939,9 +1968,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "stage": "digitize",
                         "status": "failed",
+                        "y_normalization": y_norm_mode,
                         "notes": "; ".join(qc_notes_parts)[:250],
                     })
-                    continue
+                continue
 
                 df_curve = pd.concat(dfs, ignore_index=True)
                 df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
@@ -1973,6 +2003,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "gap_hi_cm1": break_info.gap_hi,
                         "x_orientation": x_orientation,
                         "y_axis_type": y_mode,
+                        "y_normalization": y_norm_mode,
                         "digitize_status": "failed",
                         "qc_flag": True,
                         "qc_notes": f"Rejected near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted",
@@ -1986,6 +2017,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "stage": "digitize",
                         "status": "failed",
+                        "y_normalization": y_norm_mode,
                         "notes": f"flat_trace y_range={y_rng:.4f}",
                     })
                     continue
@@ -2078,6 +2110,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "gap_hi_cm1": break_info.gap_hi,
                     "x_orientation": x_orientation,
                     "y_axis_type": y_mode,
+                    "y_normalization": y_norm_mode,
                     "digitize_status": "ok",
                     "qc_flag": False,
                     "qc_notes": qc_notes,
@@ -2092,6 +2125,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "spectrum_index": s_idx,
                     "stage": "digitize",
                     "status": "ok",
+                    "y_normalization": y_norm_mode,
                     "notes": f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode}",
                 })
     except Exception as e:
