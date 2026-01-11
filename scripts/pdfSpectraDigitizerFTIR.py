@@ -128,6 +128,7 @@ QUALIFIER_MEANINGS = {
 }
 
 NUM_RE = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+X_RANGE_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*-\s*([+-]?\d+(?:\.\d+)?)\s*$")
 
 
 # Mineral formula heuristic: matches typical chemical formula strings with element symbols and bracketed groups.
@@ -189,6 +190,16 @@ def parse_pages_spec(spec: Optional[str], n_pages: int) -> List[int]:
             pages.append(p-1 if p >= 1 else p)
     pages = [p for p in pages if 0 <= p < n_pages]
     return sorted(set(pages))
+
+def parse_x_range(spec: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not spec:
+        return None
+    match = X_RANGE_RE.match(spec)
+    if not match:
+        raise ValueError(f"Invalid x-range '{spec}'. Expected format like 4000-400.")
+    start = float(match.group(1))
+    end = float(match.group(2))
+    return (start, end)
 
 def safe_float(s: str) -> Optional[float]:
     try:
@@ -330,6 +341,20 @@ def fit_linear(pixels: Sequence[float], values: Sequence[float]) -> Optional[Axi
         return AxisModel(float(m), float(b))
     except Exception:
         return None
+
+def build_fallback_x_model(x_range: Tuple[float, float], axes: PlotAxes) -> Optional[AxisModel]:
+    width = float(axes.x1 - axes.x0)
+    if width <= 0:
+        return None
+    start, end = x_range
+    m = (end - start) / width
+    b = start
+    return AxisModel(float(m), float(b))
+
+def format_x_range(x_range: Optional[Tuple[float, float]]) -> str:
+    if x_range is None:
+        return ""
+    return f"{x_range[0]:g}-{x_range[1]:g}"
 
 @dataclass
 class BreakInfo:
@@ -1903,6 +1928,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         digitized_dir_str,
         verbose,
         source_meta,
+        x_range,
         max_images_per_page,
         bin_representative,
         axis_filter_px,
@@ -2149,9 +2175,19 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
             x_calibration_failed = len(x_ticks) < 2
             x_calibration_note = ""
+            x_mode = "ticks"
+            x_range_used = ""
             if x_calibration_failed:
-                x_calibration_note = f"insufficient x ticks ({len(x_ticks)}); using pixel x"
-                log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
+                if x_range is not None:
+                    x_range_used = format_x_range(x_range)
+                    x_calibration_note = (
+                        f"insufficient x ticks ({len(x_ticks)}); using fallback x-range {x_range_used}"
+                    )
+                    x_mode = "fallback"
+                else:
+                    x_calibration_note = f"insufficient x ticks ({len(x_ticks)}); using pixel x"
+                    x_mode = "pixel"
+                log("WARN", f"Page {pno+1} img {img_idx}: {x_calibration_note}.")
 
             # Build x models
             x_model_left = None
@@ -2170,16 +2206,25 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 else:
                     x_model_left = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
 
+            if x_model_left is None and x_mode == "fallback" and x_range is not None:
+                x_model_left = build_fallback_x_model(x_range, axes)
+                x_model_right = None
+                break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+                if x_model_left is None:
+                    x_calibration_note = "fallback x-range mapping failed; using pixel x"
+                    x_mode = "pixel"
+
             if x_model_left is None:
                 log("WARN", f"Page {pno+1} img {img_idx}: x calibration fit failed; using pixel x.")
                 x_calibration_failed = True
                 if not x_calibration_note:
                     x_calibration_note = "x calibration fit failed; using pixel x"
+                    x_mode = "pixel"
                 x_model_left = AxisModel(1.0, 0.0)
                 x_model_right = None
                 break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
 
-            if x_calibration_failed and len(x_ticks) < 2:
+            if x_calibration_failed and len(x_ticks) < 2 and x_mode == "pixel":
                 log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
 
             x_orientation = "increasing" if x_model_left.m > 0 else "decreasing" if x_model_left.m < 0 else ""
@@ -2249,6 +2294,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "axis_break_present": bool(break_info.present),
                         "gap_lo_cm1": break_info.gap_lo,
                         "gap_hi_cm1": break_info.gap_hi,
+                        "x_mode": x_mode,
+                        "x_range_used": x_range_used,
                         "x_orientation": x_orientation,
                         "y_axis_type": y_mode,
                         "y_normalization": y_norm_mode,
@@ -2473,6 +2520,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "axis_break_present": bool(break_info.present),
                     "gap_lo_cm1": break_info.gap_lo,
                     "gap_hi_cm1": break_info.gap_hi,
+                    "x_mode": x_mode,
+                    "x_range_used": x_range_used,
                     "x_orientation": x_orientation,
                     "y_axis_type": y_mode,
                     "y_normalization": y_norm_mode,
@@ -2569,6 +2618,12 @@ def main() -> int:
     ap.add_argument("--spectrum-jdx-outdir", type=str, default=None, help="Directory for per-spectrum JDX files (default: <out>_spectra_jdx).")
     ap.add_argument("--no-master-xlsx", action="store_true", help="Do not write the combined master XLSX (only per-spectrum XLSX).")
     ap.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    ap.add_argument(
+        "--x-range",
+        type=str,
+        default=None,
+        help="Fallback x-axis range (e.g. 4000-400) when x-axis ticks are insufficient.",
+    )
     args = ap.parse_args()
 
     logger = setup_logger(args.verbose)
@@ -2595,6 +2650,13 @@ def main() -> int:
 
     pages = parse_pages_spec(args.pages, n_pages)
     logger.info(f"Pages selected: {len(pages)} / {n_pages}")
+
+    x_range_spec = args.x_range or os.environ.get("FTIR_PDF_X_RANGE")
+    try:
+        x_range = parse_x_range(x_range_spec)
+    except ValueError as e:
+        logger.error(str(e))
+        return 2
 
     sha = file_sha256(pdf_path)
     source_meta = infer_source_meta(pdf_path, {
@@ -2649,6 +2711,7 @@ def main() -> int:
         "border_filter_px": args.border_filter_px,
         "rolling_median_window": args.rolling_median_window,
         "label_lookahead_pages": args.label_lookahead_pages,
+        "x_range": x_range_spec or "",
         **source_meta,
         "qualifiers": "s=strong band; w=weak band; sh=shoulder",
         "y_output": "transmittance (percent if calibrated; relative otherwise)",
@@ -2664,7 +2727,7 @@ def main() -> int:
             str(pdf_path), pno, args.dpi,
             bool(args.save_images), str(graph_dir) if args.save_images else "",
             bool(save_digitized_plots), str(digitized_dir) if save_digitized_plots else "",
-            args.verbose, source_meta, args.max_images_per_page,
+            args.verbose, source_meta, x_range, args.max_images_per_page,
             args.bin_representative, args.axis_filter_px, args.border_filter_px, args.rolling_median_window,
             args.label_lookahead_pages,
         ))
