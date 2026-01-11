@@ -1131,8 +1131,6 @@ def digitize_single_component(
     y_model: Optional[AxisModel],
     y_mode: str,
     interior_shape: Tuple[int,int],
-    global_y_min: Optional[float] = None,
-    global_y_max: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Returns CurvePoints dataframe rows for one component (one spectrum) + qc dict.
@@ -1153,30 +1151,16 @@ def digitize_single_component(
         wn = x_model_left(x_pix)
         segment_id = np.zeros_like(x_pix, dtype=int)
 
-    # Map to transmittance
+    # Map to transmittance (calibrated mode only; global normalization applied later)
     if y_model is not None and y_mode == "calibrated":
         # y_model expects pixel in interior y; but we fit with y ticks relative to interior
         T = y_model(y_pix)
-        y_norm_mode = "calibrated"
-    else:
-        # normalized relative: derive from component range within interior
-        if global_y_min is not None and global_y_max is not None:
-            y_min = float(global_y_min)
-            y_max = float(global_y_max)
-            y_norm_mode = "global"
-        else:
-            y_min = float(np.min(y_pix))
-            y_max = float(np.max(y_pix))
-            y_norm_mode = "component"
-        if y_max - y_min < 1e-6:
-            T = np.full_like(y_pix, 0.5, dtype=float)
-        else:
-            # higher in plot (smaller y) => higher transmittance
-            T = 1.0 - (y_pix - y_min) / (y_max - y_min)
         # keep in 0..1
         T = np.clip(T, 1e-6, 1.0)
-
-    A = transmittance_to_absorbance(T)
+        A = transmittance_to_absorbance(T)
+    else:
+        T = np.full_like(y_pix, np.nan, dtype=float)
+        A = np.full_like(y_pix, np.nan, dtype=float)
 
     df = pd.DataFrame({
         "wavenumber_cm1": wn,
@@ -1191,12 +1175,19 @@ def digitize_single_component(
     # Sort by wavenumber for later imputation and consistent output
     df = df.sort_values("wavenumber_cm1").reset_index(drop=True)
 
+    if y_mode == "calibrated":
+        y_min = float(np.nanmin(T)) if np.isfinite(T).any() else None
+        y_max = float(np.nanmax(T)) if np.isfinite(T).any() else None
+    else:
+        y_min = None
+        y_max = None
+
     qc = {
         "n_points": int(len(df)),
         "y_mode": y_mode,
-        "y_normalization": y_norm_mode,
-        "y_min": float(np.nanmin(T)),
-        "y_max": float(np.nanmax(T)),
+        "y_normalization": "calibrated" if y_mode == "calibrated" else "global",
+        "y_min": y_min,
+        "y_max": y_max,
     }
     return df, qc
 
@@ -2176,22 +2167,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 # Digitize all components for this label (supports split spectra).
                 dfs: List[pd.DataFrame] = []
                 qc_notes_parts: List[str] = []
-                global_y_min = None
-                global_y_max = None
-                y_norm_mode = "calibrated"
-                if y_mode != "calibrated":
-                    y_vals: List[np.ndarray] = []
-                    for comp in comps_for_label:
-                        _, y_pix = curve_points_from_component(comp)
-                        if y_pix.size:
-                            y_vals.append(y_pix)
-                    if y_vals:
-                        y_all = np.concatenate(y_vals)
-                        global_y_min = float(np.min(y_all))
-                        global_y_max = float(np.max(y_all))
-                        y_norm_mode = "global"
-                    else:
-                        y_norm_mode = "component"
+                y_norm_mode = "calibrated" if y_mode == "calibrated" else "global"
                 for ci, comp in enumerate(comps_for_label):
                     try:
                         df_seg, qc_seg = digitize_single_component(
@@ -2203,8 +2179,6 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             y_model=y_model,
                             y_mode=y_mode,
                             interior_shape=plot_interior.shape[:2],
-                            global_y_min=global_y_min,
-                            global_y_max=global_y_max,
                         )
                         df_seg["component_index"] = ci
                         dfs.append(df_seg)
@@ -2253,6 +2227,25 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 df_curve = pd.concat(dfs, ignore_index=True)
                 df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
+
+                if y_mode != "calibrated":
+                    if "y_pix" not in df_curve.columns:
+                        qc_notes_parts.append("missing y_pix for global normalization")
+                    else:
+                        y_pix_all = df_curve["y_pix"].to_numpy(dtype=float)
+                        if y_pix_all.size:
+                            y_min = float(np.min(y_pix_all))
+                            y_max = float(np.max(y_pix_all))
+                            if y_max - y_min < 1e-6:
+                                T = np.full_like(y_pix_all, 0.5, dtype=float)
+                            else:
+                                T = 1.0 - (y_pix_all - y_min) / (y_max - y_min)
+                            T = np.clip(T, 1e-6, 1.0)
+                            df_curve["transmittance"] = T
+                            df_curve["absorbance"] = transmittance_to_absorbance(T)
+                        else:
+                            df_curve["transmittance"] = np.array([], dtype=float)
+                            df_curve["absorbance"] = np.array([], dtype=float)
 
                 axis_filter_applied = False
                 rolling_median_applied = False

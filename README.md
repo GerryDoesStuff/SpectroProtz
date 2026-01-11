@@ -671,10 +671,10 @@ either side of the marker to define the missing range, even if the tick spacing
 is otherwise ambiguous, and interpolates across that gap so downstream curve
 outputs remain continuous.
 
-If no Y-axis tick labels are detected, the digitizer uses the full spectrum’s
-pixel range across all curve components for that spectrum to compute a single
-0–1 normalization (rather than normalizing each component independently). The
-QC sheet records whether Y normalization was `global`, `component`, or
+If no Y-axis tick labels are detected, the digitizer concatenates all curve
+components for a spectrum, computes a single global 0–1 normalization from the
+full pixel range, and applies that normalization once before any imputation
+steps. The QC sheet records whether Y normalization was `global` or
 `calibrated` so downstream review can distinguish the fallback path.
 
 - `TITLE`: spectrum name parsed from text above the graph (preferably the line
