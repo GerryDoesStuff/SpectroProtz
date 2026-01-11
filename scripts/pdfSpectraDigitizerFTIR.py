@@ -38,6 +38,7 @@ import os
 import re
 import sys
 import traceback
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1919,6 +1920,11 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
     qc_rows: List[Dict[str, Any]] = []
     curve_rows: List[Dict[str, Any]] = []
     written_entry_ids: set = set()
+    page_labels = 0
+    page_curves = 0
+    page_digitized = 0
+    page_rejected = 0
+    page_reasons = Counter()
 
     try:
         doc = fitz.open(str(pdf_path))
@@ -2028,7 +2034,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     )
             if not label_lines:
                 log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; skipping extraction per rule.")
+                page_rejected += 1
+                page_reasons["missing_labels"] += 1
                 continue
+            page_labels += len(label_lines)
 
             plot_bin = preprocess_for_curve(plot_interior)
             skel = skeletonize((plot_bin > 0)).astype(np.uint8) * 255
@@ -2106,7 +2115,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         band_components.append((bi, L, keep))
                 if not band_components:
                     log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
+                    page_rejected += len(label_lines)
+                    page_reasons["no_components"] += len(label_lines)
                     continue
+            page_curves += sum(len(comps) for _, _, comps in band_components)
 
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
@@ -2117,6 +2129,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     label_text = (L.text.strip() if L is not None else "").strip()
                     if not label_text:
                         log("WARN", f"Page {pno+1} img {img_idx} spec {s_idx}: empty label; skipping.")
+                        page_rejected += 1
+                        page_reasons["missing_labels"] += 1
                         continue
                     entry_id = f"p{pno+1:04d}_img{img_idx:02d}_spec{s_idx:02d}"
                     meta_md = parse_mineral_metadata(entry_text, fallback_name=label_text)
@@ -2156,6 +2170,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "status": "failed",
                         "notes": f"x_ticks={len(x_ticks)}",
                     })
+                    page_rejected += 1
+                    page_reasons["insufficient_x_ticks"] += 1
                 continue
 
             # Build x models
@@ -2175,6 +2191,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
             if x_model_left is None:
                 log("ERROR", f"Page {pno+1} img {img_idx}: x calibration fit failed.")
+                page_rejected += len(label_lines)
+                page_reasons["x_calibration_failed"] += len(label_lines)
                 continue
 
             x_orientation = "increasing" if x_model_left.m > 0 else "decreasing" if x_model_left.m < 0 else ""
@@ -2191,6 +2209,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 label_text = (L.text.strip() if L is not None else "").strip()
                 if not label_text:
                     log("WARN", f"Page {pno+1} img {img_idx} spec {s_idx}: empty label; skipping.")
+                    page_rejected += 1
+                    page_reasons["missing_labels"] += 1
                     continue
 
                 entry_id = f"p{pno+1:04d}_img{img_idx:02d}_spec{s_idx:02d}"
@@ -2256,6 +2276,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "y_normalization": y_norm_mode,
                         "notes": "; ".join(qc_notes_parts)[:250],
                     })
+                    page_rejected += 1
+                    page_reasons["component_digitize_failed"] += 1
                 continue
 
                 df_curve = pd.concat(dfs, ignore_index=True)
@@ -2375,6 +2397,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
                         ),
                     })
+                    page_rejected += 1
+                    page_reasons["flat_trace"] += 1
                 continue
 
                 # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
@@ -2495,6 +2519,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
                     ),
                 })
+                page_digitized += 1
     except Exception as e:
         log("ERROR", f"Page {pno+1}: exception: {e}")
         log("ERROR", traceback.format_exc())
@@ -2503,7 +2528,13 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
             doc.close()
         except Exception:
             pass
-
+    log(
+        "INFO",
+        (
+            f"Page {pno+1} summary: labels={page_labels} curves={page_curves} "
+            f"digitized={page_digitized} rejected={page_rejected}"
+        ),
+    )
     return {
         "page_index": pno,
         "entries_rows": entries_rows,
@@ -2511,6 +2542,13 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         "qc_rows": qc_rows,
         "curve_rows": curve_rows,
         "logs": logs,
+        "page_stats": {
+            "labels": page_labels,
+            "curves": page_curves,
+            "digitized": page_digitized,
+            "rejected": page_rejected,
+            "reasons": dict(page_reasons),
+        },
     }
 
 def main() -> int:
@@ -2654,6 +2692,11 @@ def main() -> int:
     per_spectrum_jdx_written = 0
     per_spectrum_jdx_skipped = 0
     master_jdx_written = False
+    total_labels = 0
+    total_curves = 0
+    total_digitized = 0
+    total_rejected = 0
+    total_reasons = Counter()
 
     if args.workers <= 1:
         logger.info("Running in single-process mode (--workers 1).")
@@ -2672,6 +2715,12 @@ def main() -> int:
             page_peaks = res.get("peaks_rows", [])
             page_qc = res.get("qc_rows", [])
             page_curve = res.get("curve_rows", [])
+            page_stats = res.get("page_stats", {})
+            total_labels += int(page_stats.get("labels", 0))
+            total_curves += int(page_stats.get("curves", 0))
+            total_digitized += int(page_stats.get("digitized", 0))
+            total_rejected += int(page_stats.get("rejected", 0))
+            total_reasons.update(page_stats.get("reasons", {}))
             entries_rows.extend(page_entries)
             peaks_rows.extend(page_peaks)
             qc_rows.extend(page_qc)
@@ -2726,6 +2775,12 @@ def main() -> int:
                 page_peaks = res.get("peaks_rows", [])
                 page_qc = res.get("qc_rows", [])
                 page_curve = res.get("curve_rows", [])
+                page_stats = res.get("page_stats", {})
+                total_labels += int(page_stats.get("labels", 0))
+                total_curves += int(page_stats.get("curves", 0))
+                total_digitized += int(page_stats.get("digitized", 0))
+                total_rejected += int(page_stats.get("rejected", 0))
+                total_reasons.update(page_stats.get("reasons", {}))
                 entries_rows.extend(page_entries)
                 peaks_rows.extend(page_peaks)
                 qc_rows.extend(page_qc)
@@ -2809,6 +2864,30 @@ def main() -> int:
         if out_jdx_path:
             summary_parts.append(f"master {'wrote 1' if master_jdx_written else 'skipped'}")
         logger.info(f"JDX summary: {', '.join(summary_parts)}")
+    reason_order = [
+        "missing_labels",
+        "no_components",
+        "insufficient_x_ticks",
+        "x_calibration_failed",
+        "component_digitize_failed",
+        "flat_trace",
+    ]
+    reason_parts = []
+    for key in reason_order:
+        count = total_reasons.get(key)
+        if count:
+            reason_parts.append(f"{key.replace('_', ' ')}={count}")
+    for key, count in total_reasons.items():
+        if key not in reason_order:
+            reason_parts.append(f"{key.replace('_', ' ')}={count}")
+    summary_reasons = ", ".join(reason_parts) if reason_parts else "none"
+    logger.info(
+        (
+            f"Spectra summary: labels={total_labels} curves={total_curves} "
+            f"written={total_digitized} rejected={total_rejected} "
+            f"(reasons: {summary_reasons})"
+        ),
+    )
     logger.info("Done.")
     return 0
 

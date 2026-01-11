@@ -654,6 +654,13 @@ then assigns the closest component(s) to each label based on vertical
 proximity between the label’s y position and the component bounding-box
 center. The logs note when this fallback path is used so reviewers can trace
 why a full scan was required.
+Each processed page emits a summary log line with counts for labels found,
+curve components detected, spectra digitized, and spectra rejected so you can
+spot problematic pages quickly. After the run, the CLI prints a totals summary
+with the number of spectra written/rejected and a breakdown of rejection
+reasons (for example missing labels, missing curve components, calibration
+failures, digitization failures, or near-flat traces) so expected outcomes are
+clear without opening the workbook.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then
