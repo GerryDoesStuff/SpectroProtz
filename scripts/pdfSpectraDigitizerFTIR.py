@@ -1209,12 +1209,24 @@ def _prepare_jdx_xydata(curve_rows: List[Dict[str, Any]]) -> Tuple[np.ndarray, n
     return x, y, firstx, deltax
 
 def _append_header(lines: List[str], key: str, value: Optional[str]) -> None:
-    if value is None:
-        return
-    value_str = str(value).strip()
+    value_str = _sanitize_jdx_str(value)
     if not value_str:
         return
     lines.append(f"##{key}={value_str}")
+
+def _sanitize_jdx_str(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    value_str = _ILLEGAL_XLSX_RE.sub(" ", str(value))
+    value_str = re.sub(r"[ \t]+", " ", value_str).strip()
+    return value_str
+
+def _first_nonempty(*values: Optional[str]) -> str:
+    for value in values:
+        value_str = _sanitize_jdx_str(value)
+        if value_str:
+            return value_str
+    return ""
 
 def _build_jdx_headers(
     entry_row: Dict[str, Any],
@@ -1233,14 +1245,19 @@ def _build_jdx_headers(
         f"##FIRSTX={firstx:.10g}",
         f"##DELTAX={deltax:.10g}",
     ]
-    title = title_override or entry_row.get("label_ocr") or entry_row.get("mineral_name") or entry_row.get("entry_id")
+    title = _first_nonempty(
+        title_override,
+        entry_row.get("label_ocr"),
+        entry_row.get("entry_label"),
+        entry_row.get("entry_id"),
+    )
     _append_header(lines, "TITLE", title)
-    _append_header(lines, "ORIGIN", entry_row.get("source_title"))
-    _append_header(lines, "OWNER", entry_row.get("source_author"))
-    _append_header(lines, "DATE", entry_row.get("date"))
-    names = entry_row.get("mineral_name") or entry_row.get("label_ocr")
+    _append_header(lines, "ORIGIN", _first_nonempty(entry_row.get("source_title"), entry_row.get("origin")))
+    _append_header(lines, "OWNER", _first_nonempty(entry_row.get("source_author"), entry_row.get("owner")))
+    _append_header(lines, "DATE", _first_nonempty(entry_row.get("date"), entry_row.get("timestamp"), entry_row.get("run_timestamp")))
+    names = _first_nonempty(entry_row.get("mineral_name"), entry_row.get("label_ocr"), entry_row.get("entry_label"))
     _append_header(lines, "NAMES", names)
-    _append_header(lines, "CAS REGISTRY NO", entry_row.get("cas_registry_no") or entry_row.get("cas"))
+    _append_header(lines, "CAS REGISTRY NO", _first_nonempty(entry_row.get("cas_registry_no"), entry_row.get("cas")))
     _append_header(lines, "MOLFORM", entry_row.get("formula"))
     return lines
 
