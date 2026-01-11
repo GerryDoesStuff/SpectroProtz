@@ -1734,7 +1734,6 @@ def _build_jdx_headers(
     )
     description = _first_nonempty(entry_row.get("description"), entry_row.get("entry_description"))
     _append_header(lines, "TITLE", title)
-    _append_header(lines, "DESCRIPTION", entry_row.get("entry_description"))
     _append_header(lines, "NOTES", description)
     _append_header(lines, "ORIGIN", _first_nonempty(entry_row.get("source_title"), entry_row.get("origin")))
     _append_header(lines, "OWNER", _first_nonempty(entry_row.get("source_author"), entry_row.get("owner")))
@@ -1765,6 +1764,7 @@ def write_single_spectrum_jdx(
     out_jdx.parent.mkdir(parents=True, exist_ok=True)
     lines = headers + ["##XYDATA=(X++(Y..Y))", xydata_payload, "##END="]
     out_jdx.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info(f"Wrote JDX: {out_jdx}")
     return True
 
 def write_multi_spectrum_jdx(
@@ -1774,7 +1774,7 @@ def write_multi_spectrum_jdx(
     logger: logging.Logger,
     *,
     points_per_line: int = 6,
-) -> None:
+) -> bool:
     spectra: List[Tuple[str, Dict[str, Any], np.ndarray, np.ndarray, float, float]] = []
     for entry_id, entry_row in entries.items():
         curve_rows = curve_by.get(entry_id, [])
@@ -1786,7 +1786,7 @@ def write_multi_spectrum_jdx(
 
     if not spectra:
         logger.warning("Skipping master JDX: no spectra with usable curve data.")
-        return
+        return False
 
     base_x = spectra[0][2]
     base_firstx = spectra[0][4]
@@ -1794,7 +1794,7 @@ def write_multi_spectrum_jdx(
     for entry_id, _, x, _, _, _ in spectra[1:]:
         if x.size != base_x.size or not np.allclose(x, base_x, rtol=1e-6, atol=1e-6):
             logger.warning(f"Skipping master JDX: X-axis mismatch for entry {entry_id}.")
-            return
+            return False
 
     blocks: List[str] = []
     for entry_id, entry_row, x, y, firstx, deltax in spectra:
@@ -1816,10 +1816,12 @@ def write_multi_spectrum_jdx(
 
     if not blocks:
         logger.warning("Skipping master JDX: no XYDATA payloads.")
-        return
+        return False
 
     out_jdx.parent.mkdir(parents=True, exist_ok=True)
     out_jdx.write_text("\n".join(blocks) + "\n", encoding="utf-8")
+    logger.info(f"Wrote JDX: {out_jdx}")
+    return True
 
 def write_excel_with_splitting(
     out_path: Path,
@@ -2510,6 +2512,7 @@ def main() -> int:
     ap.add_argument("--no-per-spectrum-jdx", dest="per_spectrum_jdx", action="store_false", help="Disable per-spectrum JDX output.")
     ap.add_argument("--out-jdx", type=str, default=None, help="Output path for a multi-spectrum JDX file (optional).")
     ap.add_argument("--spectrum-outdir", type=str, default=None, help="Directory for per-spectrum XLSX files (default: <out>_spectra_xlsx).")
+    ap.add_argument("--spectrum-jdx-outdir", type=str, default=None, help="Directory for per-spectrum JDX files (default: <out>_spectra_jdx).")
     ap.add_argument("--no-master-xlsx", action="store_true", help="Do not write the combined master XLSX (only per-spectrum XLSX).")
     ap.add_argument("--verbose", action="store_true", help="Enable debug logging")
     args = ap.parse_args()
@@ -2561,12 +2564,17 @@ def main() -> int:
         logger.info(f"Saving digitized plots to: {digitized_dir}")
 
     spectrum_outdir = Path(args.spectrum_outdir).expanduser().resolve() if args.spectrum_outdir else base_dir / (out_stem + "_spectra_xlsx")
-    if args.per_spectrum_xlsx or args.per_spectrum_jdx:
+    spectrum_jdx_outdir = (
+        Path(args.spectrum_jdx_outdir).expanduser().resolve()
+        if args.spectrum_jdx_outdir
+        else base_dir / (out_stem + "_spectra_jdx")
+    )
+    if args.per_spectrum_xlsx:
         spectrum_outdir.mkdir(parents=True, exist_ok=True)
-        if args.per_spectrum_xlsx:
-            logger.info(f"Per-spectrum XLSX output to: {spectrum_outdir}")
-        if args.per_spectrum_jdx:
-            logger.info(f"Per-spectrum JDX output to: {spectrum_outdir}")
+        logger.info(f"Per-spectrum XLSX output to: {spectrum_outdir}")
+    if args.per_spectrum_jdx:
+        spectrum_jdx_outdir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Per-spectrum JDX output to: {spectrum_jdx_outdir}")
 
     out_jdx_path = Path(args.out_jdx).expanduser().resolve() if args.out_jdx else None
     if out_jdx_path:
@@ -2612,6 +2620,9 @@ def main() -> int:
     qc_rows: List[Dict[str, Any]] = []
     curve_rows: List[Dict[str, Any]] = []
     written_entry_ids: set = set()
+    per_spectrum_jdx_written = 0
+    per_spectrum_jdx_skipped = 0
+    master_jdx_written = False
 
     if args.workers <= 1:
         logger.info("Running in single-process mode (--workers 1).")
@@ -2661,8 +2672,11 @@ def main() -> int:
                             out_xlsx = spectrum_outdir / (base + ".xlsx")
                             write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
                         if args.per_spectrum_jdx:
-                            out_jdx = spectrum_outdir / (base + ".jdx")
-                            write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger)
+                            out_jdx = spectrum_jdx_outdir / (base + ".jdx")
+                            if write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger):
+                                per_spectrum_jdx_written += 1
+                            else:
+                                per_spectrum_jdx_skipped += 1
                         written_entry_ids.add(eid)
     else:
         logger.info(f"Running multiprocessing: workers={args.workers} chunksize={args.chunksize}")
@@ -2712,8 +2726,11 @@ def main() -> int:
                                 out_xlsx = spectrum_outdir / (base + ".xlsx")
                                 write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
                             if args.per_spectrum_jdx:
-                                out_jdx = spectrum_outdir / (base + ".jdx")
-                                write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger)
+                                out_jdx = spectrum_jdx_outdir / (base + ".jdx")
+                                if write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger):
+                                    per_spectrum_jdx_written += 1
+                                else:
+                                    per_spectrum_jdx_skipped += 1
                             written_entry_ids.add(eid)
 
     entries_df = pd.DataFrame(entries_rows)
@@ -2753,7 +2770,14 @@ def main() -> int:
         curve_by: Dict[str, List[Dict[str, Any]]] = {}
         for cr in curve_rows:
             curve_by.setdefault(cr.get("entry_id", ""), []).append(cr)
-        write_multi_spectrum_jdx(out_jdx_path, entries_by_id, curve_by, logger)
+        master_jdx_written = write_multi_spectrum_jdx(out_jdx_path, entries_by_id, curve_by, logger)
+    if args.per_spectrum_jdx or out_jdx_path:
+        summary_parts = []
+        if args.per_spectrum_jdx:
+            summary_parts.append(f"per-spectrum wrote {per_spectrum_jdx_written}, skipped {per_spectrum_jdx_skipped}")
+        if out_jdx_path:
+            summary_parts.append(f"master {'wrote 1' if master_jdx_written else 'skipped'}")
+        logger.info(f"JDX summary: {', '.join(summary_parts)}")
     logger.info("Done.")
     return 0
 

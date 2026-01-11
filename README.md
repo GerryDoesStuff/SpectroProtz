@@ -627,15 +627,16 @@ per-spectrum XLSX workbooks for each `entry_id`. It is fully standalone and does
 not depend on `jdxIndexBuilder.py`, so the digitizer can emit JCAMP-DX payloads
 without importing the FTIR indexer. The same per-spectrum loop can emit JCAMP-DX
 outputs: enable `--per-spectrum-jdx` (or leave it on) to write one JDX file
-alongside each per-spectrum workbook, and use `--out-jdx` to collect all spectra
-into a single multi-spectrum JDX when their X axes are consistent. JDX output
-uses the digitized curve data, converts transmittance to absorbance, and
-normalizes absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))`
-payloads. The digitizer populates JCAMP headers for `JCAMP-DX`, `DATA TYPE`,
-`XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, and `DELTAX`, plus optional metadata
-fields when they are detected from OCR or source metadata. Optional JCAMP
-headers are emitted only when non-empty values are available, with the
-following metadata mapping:
+into the per-spectrum JDX directory (default: `<out>_spectra_jdx`, override with
+`--spectrum-jdx-outdir`), and use `--out-jdx` to collect all spectra into a
+single multi-spectrum JDX when their X axes are consistent. JDX output uses
+the digitized curve data, converts transmittance to absorbance, and normalizes
+absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))` payloads. The
+digitizer populates JCAMP headers for `JCAMP-DX`, `DATA TYPE`, `XUNITS`,
+`YUNITS`, `NPOINTS`, `FIRSTX`, and `DELTAX`, plus optional metadata fields when
+they are detected from OCR or source metadata. Optional JCAMP headers are
+emitted only when non-empty values are available, with the following metadata
+mapping:
 
 Spectra are extracted only when plot labels can be detected. When a plot page
 contains spectra without labels, the digitizer can OCR the next page (or more)
@@ -680,10 +681,8 @@ steps. The QC sheet records whether Y normalization was `global` or
 - `TITLE`: spectrum name parsed from text above the graph (preferably the line
   above the molecular formula); falls back to OCR label or entry ID when
   missing.
-- `DESCRIPTION`: the remainder of a `Description:` line found below the graph
-  (or subsequent wrapped line text if the label is on its own line).
-- `NOTES`: repeats the `Description:` text in a JCAMP `##NOTES` header when a
-  non-empty description is detected.
+- `NOTES`: the remainder of a `Description:` line found below the graph (or
+  subsequent wrapped line text if the label is on its own line).
 - `ORIGIN`: source title / origin metadata.
 - `OWNER`: source author / owner metadata.
 - `DATE`: run timestamp or metadata date.
