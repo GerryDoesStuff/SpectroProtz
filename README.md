@@ -237,12 +237,13 @@ normalized intensity to 0–1, sets the X range to the current spectrum (or
 peak bounds when no spectrum trace is plotted), and disables zooming/panning so
 the preview stays consistent as you browse entries.
 The comparison plot is likewise non-interactive (no zoom/pan and no ViewBox
-context menu) to keep the overlays fixed while still allowing the live cursor
-readout to report the current wavenumber/intensity.
-Both lookup plots now include a live cursor readout anchored to the ViewBox
-top-right corner; moving the mouse inside the plot’s ViewBox shows the current
-wavenumber and normalized intensity, and the readout hides as soon as the
-pointer leaves the ViewBox bounds.
+context menu) to keep the overlays fixed, and it disables auto-range so axes
+remain locked to the selected spectra span (or the reference peak range) with
+intensity clamped to the 0–1 normalized scale.
+Both lookup plots show a live cursor readout beneath the plots; hovering inside
+either ViewBox updates the wavenumber and normalized intensity readouts (with
+explicit cm⁻¹ and a.u. units), and the values clear when the pointer leaves the
+plot area.
 While the lookup window is open, selecting FTIR files in the main file queue
 automatically loads the chosen spectra and overlays them in the lookup
 comparison plot as “selected spectra.” Multi-selecting queue entries plots
@@ -642,13 +643,16 @@ they are detected from OCR or source metadata. Optional JCAMP headers are
 emitted only when non-empty values are available, with the following metadata
 mapping:
 
-Spectra are extracted only when plot labels can be detected. When a plot page
-contains spectra without labels, the digitizer can OCR the next page (or more)
-to recover the label text; configure this behavior with
+Spectra are extracted even when plot labels are missing. The digitizer first
+tries OCR labels on the same page, then optionally OCRs the next page (or more)
+to recover label text; configure this behavior with
 `--label-lookahead-pages` (default: 1). When lookahead labels are applied, the
 Entries sheet records the number of pages ahead that supplied the labels in
 `label_page_offset` (0 means the label was on the same page as the spectra).
-If labels are found but the label bands yield no curve components, the
+If no labels are detected after lookahead, the digitizer scans the full plot
+interior, assigns placeholder labels like `Unknown_01`, and records
+`label_missing = true` in the Entries sheet so unlabeled spectra are easy to
+review later. If labels are found but the label bands yield no curve components, the
 digitizer falls back to scanning the full plot interior for curve components,
 then assigns the closest component(s) to each label based on vertical
 proximity between the label’s y position and the component bounding-box
