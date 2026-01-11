@@ -667,6 +667,14 @@ with the number of spectra written/rejected and a breakdown of rejection
 reasons (for example missing labels, missing curve components, calibration
 failures, digitization failures, or near-flat traces) so expected outcomes are
 clear without opening the workbook.
+If you want QC failures to be logged without blocking output, pass
+`--allow-qc-failures`. With this flag enabled, spectra that fail QC checks
+(such as near-flat traces or missing X-axis tick calibration) are still
+written, the Entries sheet marks them with `qc_flag = true`, and the QC sheet
+records the failed stage so reviewers can triage them without losing data. For
+uncalibrated X-axis outputs, the digitizer preserves the curve using pixel X
+positions and annotates the QC notes so downstream users can filter or
+recalibrate as needed.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then

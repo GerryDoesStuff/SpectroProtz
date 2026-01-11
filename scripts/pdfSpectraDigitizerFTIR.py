@@ -1906,6 +1906,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         border_filter_px,
         rolling_median_window,
         label_lookahead_pages,
+        allow_qc_failures,
     ) = args
     logs: List[Tuple[str, str]] = []  # (level, msg)
     def log(level: str, msg: str):
@@ -2144,7 +2145,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
-            if len(x_ticks) < 2:
+            x_calibration_failed = len(x_ticks) < 2
+            if x_calibration_failed and not allow_qc_failures:
                 log("ERROR", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}).")
                 # record failure rows for each band (including unlabeled fallbacks)
                 for s_idx, (bi, L, _) in enumerate(band_components):
@@ -2198,25 +2200,37 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 continue
 
             # Build x models
-            break_info = detect_axis_break(x_ticks, tick_meta.get("x_break_marker_pix"))
             x_model_left = None
             x_model_right = None
-            if break_info.present and break_info.x_split_pix is not None:
-                x_split_int = break_info.x_split_pix - axes.x0
-                left = [(xp, v) for (xp, v) in x_ticks if xp < x_split_int]
-                right = [(xp, v) for (xp, v) in x_ticks if xp >= x_split_int]
-                if len(left) >= 2:
-                    x_model_left = fit_linear([a for a, _ in left], [b for _, b in left])
-                if len(right) >= 2:
-                    x_model_right = fit_linear([a for a, _ in right], [b for _, b in right])
-            else:
-                x_model_left = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
+            break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+            if not x_calibration_failed:
+                break_info = detect_axis_break(x_ticks, tick_meta.get("x_break_marker_pix"))
+                if break_info.present and break_info.x_split_pix is not None:
+                    x_split_int = break_info.x_split_pix - axes.x0
+                    left = [(xp, v) for (xp, v) in x_ticks if xp < x_split_int]
+                    right = [(xp, v) for (xp, v) in x_ticks if xp >= x_split_int]
+                    if len(left) >= 2:
+                        x_model_left = fit_linear([a for a, _ in left], [b for _, b in left])
+                    if len(right) >= 2:
+                        x_model_right = fit_linear([a for a, _ in right], [b for _, b in right])
+                else:
+                    x_model_left = fit_linear([t[0] for t in x_ticks], [t[1] for t in x_ticks])
 
             if x_model_left is None:
-                log("ERROR", f"Page {pno+1} img {img_idx}: x calibration fit failed.")
-                page_rejected += len(label_lines)
-                page_reasons["x_calibration_failed"] += len(label_lines)
-                continue
+                if allow_qc_failures:
+                    log("WARN", f"Page {pno+1} img {img_idx}: x calibration fit failed; using pixel x.")
+                    x_calibration_failed = True
+                    x_model_left = AxisModel(1.0, 0.0)
+                    x_model_right = None
+                    break_info = BreakInfo(False, None, None, None, [], 0.0, bool(tick_meta.get("x_break_marker_pix")), tick_meta.get("x_break_marker_pix"))
+                else:
+                    log("ERROR", f"Page {pno+1} img {img_idx}: x calibration fit failed.")
+                    page_rejected += len(label_lines)
+                    page_reasons["x_calibration_failed"] += len(label_lines)
+                    continue
+
+            if x_calibration_failed and allow_qc_failures and len(x_ticks) < 2:
+                log("WARN", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}); using pixel x.")
 
             x_orientation = "increasing" if x_model_left.m > 0 else "decreasing" if x_model_left.m < 0 else ""
 
@@ -2243,6 +2257,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 # Digitize all components for this label (supports split spectra).
                 dfs: List[pd.DataFrame] = []
                 qc_notes_parts: List[str] = []
+                qc_failed = False
+                if x_calibration_failed:
+                    qc_failed = True
+                    qc_notes_parts.append("x calibration failed; using pixel x")
                 y_norm_mode = "calibrated" if y_mode == "calibrated" else "global"
                 for ci, comp in enumerate(comps_for_label):
                     try:
@@ -2378,37 +2396,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 except Exception:
                     y_rng = 0.0
                 if y_rng < 0.03:
-                    entries_rows.append({
-                        "entry_id": entry_id,
-                        "page_index": pno,
-                        "page_number_1based": pno+1,
-                        "image_index": img_idx,
-                        "spectrum_index": s_idx,
-                        "label_ocr": label_text,
-                        "label_page_offset": label_page_offset,
-                        "label_missing": label_missing,
-                        "entry_name": entry_name,
-                        "entry_description": entry_description,
-                        "description": entry_description,
-                        "mineral_name": meta_md.get("mineral_name", ""),
-                        "formula": meta_md.get("formula", ""),
-                        "entry_text_raw": entry_text,
-                        "wavenumbers_raw": "",
-                        "axis_break_present": bool(break_info.present),
-                        "gap_lo_cm1": break_info.gap_lo,
-                        "gap_hi_cm1": break_info.gap_hi,
-                        "x_orientation": x_orientation,
-                        "y_axis_type": y_mode,
-                        "y_normalization": y_norm_mode,
-                        "digitize_status": "failed",
-                        "axis_filter_applied": axis_filter_applied,
-                        "rolling_median_applied": rolling_median_applied,
-                        "bin_width_cm1": collapse_info.get("collapse_bin_width"),
-                        "qc_flag": True,
-                        "qc_notes": f"Rejected near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted",
-                        "image_path": image_path,
-                        **source_meta,
-                    })
+                    qc_failed = True
+                    qc_notes_parts.append(
+                        f"near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted"
+                    )
                     qc_rows.append({
                         "entry_id": entry_id,
                         "page_number_1based": pno+1,
@@ -2422,9 +2413,41 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
                         ),
                     })
-                    page_rejected += 1
-                    page_reasons["flat_trace"] += 1
-                continue
+                    if not allow_qc_failures:
+                        entries_rows.append({
+                            "entry_id": entry_id,
+                            "page_index": pno,
+                            "page_number_1based": pno+1,
+                            "image_index": img_idx,
+                            "spectrum_index": s_idx,
+                            "label_ocr": label_text,
+                            "label_page_offset": label_page_offset,
+                            "label_missing": label_missing,
+                            "entry_name": entry_name,
+                            "entry_description": entry_description,
+                            "description": entry_description,
+                            "mineral_name": meta_md.get("mineral_name", ""),
+                            "formula": meta_md.get("formula", ""),
+                            "entry_text_raw": entry_text,
+                            "wavenumbers_raw": "",
+                            "axis_break_present": bool(break_info.present),
+                            "gap_lo_cm1": break_info.gap_lo,
+                            "gap_hi_cm1": break_info.gap_hi,
+                            "x_orientation": x_orientation,
+                            "y_axis_type": y_mode,
+                            "y_normalization": y_norm_mode,
+                            "digitize_status": "failed",
+                            "axis_filter_applied": axis_filter_applied,
+                            "rolling_median_applied": rolling_median_applied,
+                            "bin_width_cm1": collapse_info.get("collapse_bin_width"),
+                            "qc_flag": True,
+                            "qc_notes": f"Rejected near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted",
+                            "image_path": image_path,
+                            **source_meta,
+                        })
+                        page_rejected += 1
+                        page_reasons["flat_trace"] += 1
+                        continue
 
                 # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
                 if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
@@ -2495,6 +2518,16 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 # Record entry metadata
                 qc_notes = "; ".join([p for p in qc_notes_parts if p])[:400]
+                if x_calibration_failed:
+                    qc_rows.append({
+                        "entry_id": entry_id,
+                        "page_number_1based": pno+1,
+                        "image_index": img_idx,
+                        "spectrum_index": s_idx,
+                        "stage": "x_calibration",
+                        "status": "failed",
+                        "notes": f"x_ticks={len(x_ticks)}; used pixel x",
+                    })
                 entries_rows.append({
                     "entry_id": entry_id,
                     "page_index": pno,
@@ -2524,7 +2557,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "collapsed_points": bool(collapse_info.get("collapsed_points", False)),
                     "collapse_bins": int(collapse_info.get("collapse_bins", len(df_curve))),
                     "collapse_bin_width_cm1": collapse_info.get("collapse_bin_width"),
-                    "qc_flag": False,
+                    "qc_flag": qc_failed or bool(qc_notes),
                     "qc_notes": qc_notes,
                     "image_path": image_path,
                     "digitized_plot_path": digitized_plot_path,
@@ -2601,6 +2634,7 @@ def main() -> int:
     ap.add_argument("--border-filter-px", type=int, default=3, help="Pixel distance from plot border to discard (0 disables).")
     ap.add_argument("--rolling-median-window", type=int, default=5, help="Window size for oscillation-triggered rolling median filter.")
     ap.add_argument("--label-lookahead-pages", type=int, default=1, help="Pages to scan ahead for labels when current page lacks them.")
+    ap.add_argument("--allow-qc-failures", action="store_true", help="Write spectra even when QC checks fail (entries marked qc_flag=True).")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
     ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
@@ -2690,6 +2724,7 @@ def main() -> int:
         "border_filter_px": args.border_filter_px,
         "rolling_median_window": args.rolling_median_window,
         "label_lookahead_pages": args.label_lookahead_pages,
+        "allow_qc_failures": bool(args.allow_qc_failures),
         **source_meta,
         "qualifiers": "s=strong band; w=weak band; sh=shoulder",
         "y_output": "transmittance (percent if calibrated; relative otherwise)",
@@ -2708,6 +2743,7 @@ def main() -> int:
             args.verbose, source_meta, args.max_images_per_page,
             args.bin_representative, args.axis_filter_px, args.border_filter_px, args.rolling_median_window,
             args.label_lookahead_pages,
+            bool(args.allow_qc_failures),
         ))
 
     entries_rows: List[Dict[str, Any]] = []
