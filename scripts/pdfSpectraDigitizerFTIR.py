@@ -2034,13 +2034,9 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         f"Page {pno+1} img {img_idx}: no labels detected; using labels from page {pno+1+label_page_offset}.",
                     )
             if not label_lines:
-                log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; skipping extraction per rule.")
-                page_rejected += 1
-                page_reasons["missing_labels"] += 1
-                continue
-            page_labels += len(label_lines)
                 label_missing = True
                 log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; extracting unlabeled components.")
+            page_labels += len(label_lines)
 
             plot_bin = preprocess_for_curve(plot_interior)
             skel = skeletonize((plot_bin > 0)).astype(np.uint8) * 255
@@ -2109,11 +2105,6 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     band_components.append((bi, L, shifted))
 
                 if not band_components:
-                    log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
-                    page_rejected += len(label_lines)
-                    page_reasons["no_components"] += len(label_lines)
-                    continue
-            page_curves += sum(len(comps) for _, _, comps in band_components)
                     log("WARN", f"Page {pno+1} img {img_idx}: label band empty \u2192 full scan fallback.")
                     min_area_full = max(80, int(0.0009 * skel.shape[0] * max(1, skel.shape[1])))
                     comps_full = extract_curve_components(skel, min_area=min_area_full)
@@ -2146,7 +2137,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                             band_components.append((bi, L, keep))
                     if not band_components:
                         log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
+                        page_rejected += len(label_lines)
+                        page_reasons["no_components"] += len(label_lines)
                         continue
+            page_curves += sum(len(comps) for _, _, comps in band_components)
 
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
