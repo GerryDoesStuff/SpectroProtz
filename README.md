@@ -680,7 +680,13 @@ the QC sheet records the failed stage plus summary notes, and the per-spectrum
 JDX `##NOTES` field appends `QC: ...` for rapid review. The run also writes
 `<out>_qc_failures.csv` and `<out>_qc_failures.json` with `entry_id`, page,
 label, and QC reasons so reviewers can filter failures without opening Excel.
-QC failures no longer block output; QC details are reported separately.
+QC failures no longer block output; QC details are reported separately. If
+digitization yields no curve points after filtering and post-processing, the
+digitizer still writes per-spectrum XLSX and JDX artifacts with metadata and QC
+notes, but the CurvePoints sheet is empty and the per-spectrum JDX contains only
+headers (no `XYDATA` block) along with a `digitize_failed_no_curve` QC reason.
+These empty outputs are intended for audit trails and should not be fed into the
+FTIR indexer, which requires finite `XYDATA` values for indexing.
 
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer concatenates all curve components for a spectrum and then
@@ -746,7 +752,8 @@ The FTIR indexer expects at least the following JCAMP headers to be present so
 it can compute a uniform axis and parse spectra reliably: `JCAMP-DX`,
 `DATA TYPE`, `XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, `DELTAX`, and an
 `XYDATA=(X++(Y..Y))` block with finite values. Keep those headers intact when
-preparing JDX files for indexing.
+preparing JDX files for indexing, and skip any empty per-spectrum JDX outputs
+that were written for QC visibility.
 
 Analysts can generate a searchable index of the JCAMP-DX headers bundled in
 `IR_referenceDatabase/` with the `index_ir_metadata.py` helper. The script
