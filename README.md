@@ -198,6 +198,12 @@ the `peaks` table (i.e. `score = Σ(|A| + |area|)` for matched peaks). Higher
 scores indicate both more matches and stronger peak intensity/area. Results are
 sorted by this score (descending), then by matched peak count, so manual and
 preview-driven searches rank references consistently.
+The reference preview plot mirrors the selected spectra context when available:
+if the selection screen supplies spectra, the preview x-axis range is taken
+from the selected spectrum with the widest wavenumber span (ties break by using
+the spectrum with more data points). When no selected spectra are available,
+the preview range falls back to the full span of the previewed reference
+spectrum, and only uses peak centers as a last resort if no trace is loaded.
 The list supports multi-selection, selection-driven previewing of the bottom
 reference plot (with its metadata panel aligned beside the preview), and
 paginates through large result sets with a results cap so the sidebar remains
