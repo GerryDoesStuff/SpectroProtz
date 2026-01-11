@@ -617,8 +617,17 @@ JDX output uses the digitized curve data, converts transmittance to absorbance,
 and normalizes absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))`
 payloads. The digitizer populates JCAMP headers for `JCAMP-DX`, `DATA TYPE`,
 `XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, and `DELTAX`, plus optional metadata
-fields like `TITLE`, `ORIGIN`, `OWNER`, `NAMES`, and `MOLFORM` when they are
-available from OCR metadata.
+fields when they are detected from OCR or source metadata. Optional JCAMP
+headers are emitted only when non-empty values are available, with the
+following metadata mapping:
+
+- `TITLE`: OCR label (preferred) or entry label/ID.
+- `ORIGIN`: source title / origin metadata.
+- `OWNER`: source author / owner metadata.
+- `DATE`: run timestamp or metadata date.
+- `NAMES`: parsed mineral name or OCR label.
+- `CAS REGISTRY NO`: parsed CAS registry value.
+- `MOLFORM`: parsed chemical formula.
 
 The FTIR indexer expects at least the following JCAMP headers to be present so
 it can compute a uniform axis and parse spectra reliably: `JCAMP-DX`,
