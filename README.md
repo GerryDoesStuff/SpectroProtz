@@ -680,6 +680,44 @@ the QC sheet records the failed stage plus summary notes, and the per-spectrum
 JDX `##NOTES` field appends `QC: ...` for rapid review. The run also writes
 `<out>_qc_failures.csv` and `<out>_qc_failures.json` with `entry_id`, page,
 label, and QC reasons so reviewers can filter failures without opening Excel.
+Alongside the QC report, the digitizer writes per-spectrum diagnostic traces
+to `<out>_diagnostics.json` and `<out>_diagnostics.csv`. Each entry includes
+spectrum identifiers plus a `debug_trace` (JSON) or `debug_trace_json` (CSV)
+array of stage objects. Example entry:
+
+```json
+{
+  "entry_id": "p0003_img00_spec01",
+  "page_number_1based": 3,
+  "image_index": 0,
+  "spectrum_index": 1,
+  "label_ocr": "Quartz",
+  "status": "failed",
+  "failed_stage": "x_ticks",
+  "failed_reason": "ocr_count=1",
+  "debug_trace": [
+    {"stage": "image_detected", "status": "ok"},
+    {"stage": "axes_detected", "status": "ok"},
+    {"stage": "x_ticks_found", "status": "fail", "reason": "ocr_count=1"},
+    {"stage": "y_ticks_found", "status": "ok"},
+    {"stage": "labels_found", "status": "ok"},
+    {"stage": "components_found", "status": "ok"},
+    {"stage": "digitize_success", "status": "ok"},
+    {"stage": "qc_status", "status": "fail", "reason": "x calibration failed; using pixel x"}
+  ]
+}
+```
+
+Use the diagnostic trace to interpret failures: `image_detected` covers PDF
+image extraction, `axes_detected` validates the plot crop, `x_ticks_found` and
+`y_ticks_found` reflect OCR tick counts (two or more values are required for
+calibration), `labels_found` reports whether OCR labels were found or a
+placeholder label was used, `components_found` confirms curve components were
+detected, `digitize_success` reports whether any curve points survived
+digitization, and `qc_status` captures whether QC flagged the spectrum. The
+CLI logs also emit a one-line summary per spectrum in the form
+`entry_id=... status=failed stage=x_ticks reason=ocr_count=1` so batch runs can
+be triaged without opening the reports.
 QC failures no longer block output; QC details are reported separately. When
 digitization yields too few points, no curve components, or no curve points
 after filtering and post-processing, the digitizer still writes per-spectrum
