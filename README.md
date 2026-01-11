@@ -607,6 +607,25 @@ stack trace, writing it to `preview_errors.log` inside the log folder (open via
 logger panel for rapid triage and sharing with support.
 
 ## Utilities
+The PDF digitizer in [`scripts/pdfSpectraDigitizerFTIR.py`](scripts/pdfSpectraDigitizerFTIR.py)
+extracts FTIR spectra from figure scans and writes a master XLSX plus optional
+per-spectrum XLSX workbooks for each `entry_id`. The same per-spectrum loop can
+emit JCAMP-DX outputs: enable `--per-spectrum-jdx` (or leave it on) to write one
+JDX file alongside each per-spectrum workbook, and use `--out-jdx` to collect
+all spectra into a single multi-spectrum JDX when their X axes are consistent.
+JDX output uses the digitized curve data, converts transmittance to absorbance,
+and normalizes absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))`
+payloads. The digitizer populates JCAMP headers for `JCAMP-DX`, `DATA TYPE`,
+`XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, and `DELTAX`, plus optional metadata
+fields like `TITLE`, `ORIGIN`, `OWNER`, `NAMES`, and `MOLFORM` when they are
+available from OCR metadata.
+
+The FTIR indexer expects at least the following JCAMP headers to be present so
+it can compute a uniform axis and parse spectra reliably: `JCAMP-DX`,
+`DATA TYPE`, `XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, `DELTAX`, and an
+`XYDATA=(X++(Y..Y))` block with finite values. Keep those headers intact when
+preparing JDX files for indexing.
+
 Analysts can generate a searchable index of the JCAMP-DX headers bundled in
 `IR_referenceDatabase/` with the `index_ir_metadata.py` helper. The script
 walks every `.jdx` file, normalises header names to snake case, merges
