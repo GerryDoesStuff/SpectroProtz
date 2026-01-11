@@ -634,6 +634,12 @@ fields when they are detected from OCR or source metadata. Optional JCAMP
 headers are emitted only when non-empty values are available, with the
 following metadata mapping:
 
+When extracting axis calibration, the digitizer detects X-axis breaks by looking
+for discontinuities between OCR’d tick values and by scanning the x-axis band
+for visual break markers such as “//”. When a break is found, the missing range
+is interpolated automatically so downstream curve outputs remain continuous
+across the gap.
+
 - `TITLE`: spectrum name parsed from text above the graph (preferably the line
   above the molecular formula); falls back to OCR label or entry ID when
   missing.

@@ -338,21 +338,50 @@ class BreakInfo:
     gap_hi: Optional[float]
     deltas: List[float]
     score: float
+    marker_present: bool = False
+    marker_x_pix: Optional[float] = None
 
-def detect_axis_break(x_ticks: List[Tuple[float, float]]) -> BreakInfo:
+def detect_axis_break(
+    x_ticks: List[Tuple[float, float]],
+    marker_x_pix: Optional[float] = None,
+) -> BreakInfo:
     """
     x_ticks: list of (x_center_pix, tick_value) sorted by x.
-    Break detection uses outlier delta in tick_value sequence.
+    Break detection uses outlier delta in tick_value sequence, plus optional
+    break markers (e.g., //) in the x-axis band.
     """
-    if len(x_ticks) < 4:
-        return BreakInfo(False, None, None, None, [], 0.0)
+    marker_present = marker_x_pix is not None
+    if len(x_ticks) < 2:
+        return BreakInfo(False, None, None, None, [], 0.0, marker_present, marker_x_pix)
     xs = np.array([t[0] for t in x_ticks], dtype=float)
     vs = np.array([t[1] for t in x_ticks], dtype=float)
+
+    marker_gap_lo = None
+    marker_gap_hi = None
+    marker_split = None
+    if marker_present:
+        left_idx = np.where(xs <= marker_x_pix)[0]
+        right_idx = np.where(xs >= marker_x_pix)[0]
+        if left_idx.size > 0 and right_idx.size > 0:
+            li = int(left_idx[-1])
+            ri = int(right_idx[0])
+            if li != ri:
+                marker_gap_lo = float(min(vs[li], vs[ri]))
+                marker_gap_hi = float(max(vs[li], vs[ri]))
+                marker_split = float(marker_x_pix)
+
+    if len(x_ticks) < 4:
+        if marker_gap_lo is not None and marker_gap_hi is not None:
+            return BreakInfo(True, marker_split, marker_gap_lo, marker_gap_hi, [], 0.0, True, marker_x_pix)
+        return BreakInfo(False, None, None, None, [], 0.0, marker_present, marker_x_pix)
+
     deltas = np.diff(vs)
     ad = np.abs(deltas)
     med = float(np.median(ad)) if len(ad) else 0.0
     if med <= 0:
-        return BreakInfo(False, None, None, None, deltas.tolist(), 0.0)
+        if marker_gap_lo is not None and marker_gap_hi is not None:
+            return BreakInfo(True, marker_split, marker_gap_lo, marker_gap_hi, deltas.tolist(), 0.0, True, marker_x_pix)
+        return BreakInfo(False, None, None, None, deltas.tolist(), 0.0, marker_present, marker_x_pix)
     # candidate break: largest delta that's much larger than typical
     idx = int(np.argmax(ad))
     score = float(ad[idx] / med)
@@ -361,8 +390,12 @@ def detect_axis_break(x_ticks: List[Tuple[float, float]]) -> BreakInfo:
         x_split = float((xs[idx] + xs[idx+1]) / 2.0)
         gap_lo = float(min(vs[idx], vs[idx+1]))
         gap_hi = float(max(vs[idx], vs[idx+1]))
-        return BreakInfo(True, x_split, gap_lo, gap_hi, deltas.tolist(), score)
-    return BreakInfo(False, None, None, None, deltas.tolist(), score)
+        if marker_split is not None and (xs.min() <= marker_split <= xs.max()):
+            x_split = marker_split
+        return BreakInfo(True, x_split, gap_lo, gap_hi, deltas.tolist(), score, marker_present, marker_x_pix)
+    if marker_gap_lo is not None and marker_gap_hi is not None:
+        return BreakInfo(True, marker_split, marker_gap_lo, marker_gap_hi, deltas.tolist(), score, True, marker_x_pix)
+    return BreakInfo(False, None, None, None, deltas.tolist(), score, marker_present, marker_x_pix)
 
 def estimate_local_slope(x: np.ndarray, y: np.ndarray, tail: bool, n: int = 25) -> float:
     if len(x) < 2:
@@ -728,6 +761,67 @@ def parse_numeric(text: str) -> Optional[float]:
         return safe_float(t)
     return None
 
+def detect_break_marker_in_xband(x_img: np.ndarray) -> Tuple[Optional[float], int]:
+    """
+    Detect visual axis-break markers (e.g., "//") in the x-axis band image.
+    Returns (marker_x_in_x_img, count_of_marker_lines).
+    """
+    if x_img is None or x_img.size == 0:
+        return None, 0
+    if x_img.ndim == 3:
+        gray = cv2.cvtColor(x_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = x_img.copy()
+    h, w = gray.shape[:2]
+    if h < 5 or w < 5:
+        return None, 0
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    min_len = max(6, int(0.02 * w))
+    max_len = max(min_len + 2, int(0.2 * w))
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=max(20, int(0.2 * min(h, w))),
+        minLineLength=min_len,
+        maxLineGap=3,
+    )
+    if lines is None:
+        return None, 0
+    candidates: List[Tuple[float, float, float]] = []
+    for (x1, y1, x2, y2) in lines[:, 0]:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < min_len or length > max_len:
+            continue
+        angle = math.degrees(math.atan2(dy, dx))
+        if abs(angle) < 20 or abs(angle) > 70:
+            continue
+        midx = (x1 + x2) / 2.0
+        midy = (y1 + y2) / 2.0
+        candidates.append((midx, midy, angle))
+    if len(candidates) < 2:
+        return None, 0
+
+    candidates.sort(key=lambda c: c[0])
+    x_tol = max(10.0, 0.04 * w)
+    y_tol = max(10.0, 0.08 * h)
+    ang_tol = 15.0
+    for i in range(len(candidates) - 1):
+        c1 = candidates[i]
+        c2 = candidates[i + 1]
+        if abs(c1[0] - c2[0]) <= x_tol and abs(c1[1] - c2[1]) <= y_tol and abs(c1[2] - c2[2]) <= ang_tol:
+            return float((c1[0] + c2[0]) / 2.0), 2
+
+    for i in range(len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            c1 = candidates[i]
+            c2 = candidates[j]
+            if abs(c1[0] - c2[0]) <= x_tol and abs(c1[1] - c2[1]) <= y_tol and abs(c1[2] - c2[2]) <= ang_tol:
+                return float((c1[0] + c2[0]) / 2.0), 2
+    return None, 0
+
 def extract_ticks(img_bgr: np.ndarray, axes: PlotAxes, logger: logging.Logger) -> Tuple[List[Tuple[float,float]], List[Tuple[float,float]], Dict[str, Any]]:
     """
     Returns:
@@ -747,10 +841,30 @@ def extract_ticks(img_bgr: np.ndarray, axes: PlotAxes, logger: logging.Logger) -
     left_edge = axes.y_axis_x if axes.y_axis_x is not None else axes.x0
     yreg = (max(0, left_edge - int(0.15*w)), axes.y0, max(0, axes.x0 - 5), axes.y1)
 
-    meta: Dict[str, Any] = {"xreg": xreg, "yreg": yreg}
+    meta: Dict[str, Any] = {
+        "xreg": xreg,
+        "yreg": yreg,
+        "x_break_marker_present": False,
+        "x_break_marker_pix": None,
+        "x_break_marker_count": 0,
+    }
 
     x_img = crop_region(img_bgr, xreg)
     y_img = crop_region(img_bgr, yreg) if (yreg[2] > yreg[0] + 5) else None
+
+    marker_x = None
+    marker_count = 0
+    if x_img is not None and x_img.size > 0:
+        marker_x, marker_count = detect_break_marker_in_xband(x_img)
+        if marker_x is not None:
+            marker_x_full = xreg[0] + marker_x
+            meta["x_break_marker_pix"] = float(marker_x_full - axes.x0)
+            meta["x_break_marker_count"] = int(marker_count)
+            meta["x_break_marker_present"] = True
+        else:
+            meta["x_break_marker_pix"] = None
+            meta["x_break_marker_count"] = 0
+            meta["x_break_marker_present"] = False
 
     # OCR x ticks
     x_tokens = ocr_tokens(x_img, psm=6, whitelist="0123456789.-")
@@ -924,6 +1038,35 @@ def impute_gap(
     })
     out = pd.concat([df, df_gap], ignore_index=True).sort_values("wavenumber_cm1").reset_index(drop=True)
     return out
+
+def merged_component_ranges(df: pd.DataFrame) -> List[Tuple[float, float]]:
+    if df is None or df.empty:
+        return []
+    if "component_index" in df.columns:
+        ranges = df.groupby("component_index")["wavenumber_cm1"].agg(["min", "max"]).reset_index()
+        spans = [(float(r["min"]), float(r["max"])) for _, r in ranges.iterrows()]
+    else:
+        spans = [(float(df["wavenumber_cm1"].min()), float(df["wavenumber_cm1"].max()))]
+
+    spans.sort(key=lambda t: t[0])
+    if len(spans) <= 1:
+        return spans
+
+    xvals = df["wavenumber_cm1"].to_numpy(dtype=float)
+    diffs = np.diff(np.sort(xvals))
+    med = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.0
+    tol = max(2.0 * med, 5.0) if med > 0 else 5.0
+
+    merged: List[List[float]] = []
+    for start, end in spans:
+        if not merged:
+            merged.append([start, end])
+            continue
+        if start <= merged[-1][1] + tol:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(float(a), float(b)) for a, b in merged]
 
 def overlay_curve(img_bgr: np.ndarray, axes: PlotAxes, curve_df: pd.DataFrame, out_path: Path) -> None:
     """
@@ -1705,7 +1848,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 continue
 
             # Build x models
-            break_info = detect_axis_break(x_ticks)
+            break_info = detect_axis_break(x_ticks, tick_meta.get("x_break_marker_pix"))
             x_model_left = None
             x_model_right = None
             if break_info.present and break_info.x_split_pix is not None:
@@ -1856,13 +1999,29 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 if len(xvals) > 5:
                     diffs = np.diff(xvals)
                     med = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.0
-                    thr_gap = max(60.0, 12.0 * med) if med > 0 else 120.0
-                    gap_idx = np.where(diffs > thr_gap)[0]
-                    # limit to a few gaps to avoid runaway imputation
-                    for gi in gap_idx[:2]:
-                        g0 = float(xvals[gi])
-                        g1 = float(xvals[gi + 1])
+                    if med > 0:
+                        thr_gap = max(60.0, 12.0 * med)
+                        if med < 5.0:
+                            thr_gap = max(30.0, 8.0 * med)
+                    else:
+                        thr_gap = 120.0
+                    if break_info.marker_present:
+                        if med > 0:
+                            thr_gap = min(thr_gap, max(30.0, 6.0 * med))
+                        else:
+                            thr_gap = min(thr_gap, 80.0)
+
+                    ranges = merged_component_ranges(df_curve)
+                    gap_count = 0
+                    for ri in range(len(ranges) - 1):
+                        g0 = float(ranges[ri][1])
+                        g1 = float(ranges[ri + 1][0])
+                        if g1 - g0 <= thr_gap:
+                            continue
                         df_curve = impute_gap(df_curve, g0, g1)
+                        gap_count += 1
+                        if gap_count >= 2:
+                            break
 
                 # Keep transmittance only (drop absorbance) to match requirement
                 if "absorbance" in df_curve.columns:
