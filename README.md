@@ -27,13 +27,14 @@ into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
 includes Savitzky-Golay smoothing, optional baseline correction, and a
 normalisation pass that scales the working spectrum by its maximum absolute
 value to stabilise fitting. Peak model fits always run on the normalised data,
-but the indexer separately computes raw absorbance metrics for storage: the
-persisted peak amplitude is sampled directly from the raw absorbance series at
-the fitted center, and the persisted peak area is integrated from the raw
-absorbance window after subtracting a local median baseline. Fit-space
-amplitude/area values are kept alongside each fit (under `fit_amplitude` and
-`fit_area`) for QA without mixing normalized units into the stored peak
-columns.
+but the indexer separately computes raw absorbance metrics for storage after
+converting the original JCAMP Y-units into absorbance (for %T or fractional
+transmittance, `A = -log10(T)`). The persisted `peaks.amplitude` is sampled
+directly from that raw absorbance series at the fitted center, and
+`peaks.area` is integrated from the raw absorbance window without applying
+normalisation or baseline correction. Fit-space amplitude/area values are kept
+alongside each fit (under `fit_amplitude` and `fit_area`) for QA without mixing
+normalised units into the stored peak columns.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in
