@@ -61,6 +61,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 EXCEL_MAX_ROWS = 1_048_576  # includes header row
+MIN_CURVE_POINTS_QC = 6
 
 # Excel / openpyxl rejects certain control characters in cell strings.
 # This regex matches ASCII control chars except TAB(\x09), LF(\x0A), CR(\x0D).
@@ -2364,52 +2365,16 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         qc_notes_parts.append(f"component {ci} failed: {e}")
 
                 if not dfs:
-                    entries_rows.append({
-                        "entry_id": entry_id,
-                        "page_index": pno,
-                        "page_number_1based": pno+1,
-                        "image_index": img_idx,
-                        "spectrum_index": s_idx,
-                        "label_ocr": label_text,
-                        "label_page_offset": label_page_offset,
-                        "label_missing": label_missing,
-                        "entry_name": entry_name,
-                        "entry_description": entry_description,
-                        "description": entry_description,
-                        "mineral_name": meta_md.get("mineral_name", ""),
-                        "formula": meta_md.get("formula", ""),
-                        "entry_text_raw": entry_text,
-                        "wavenumbers_raw": "",
-                        "axis_break_present": bool(break_info.present),
-                        "gap_lo_cm1": break_info.gap_lo,
-                        "gap_hi_cm1": break_info.gap_hi,
-                        "x_mode": x_mode,
-                        "x_range_used": x_range_used,
-                        "x_orientation": x_orientation,
-                        "y_axis_type": y_mode,
-                        "y_normalization": y_norm_mode,
-                        "digitize_status": "failed",
-                        "qc_flag": True,
-                        "qc_notes": "no curve components digitized; " + "; ".join(qc_notes_parts),
-                        "image_path": image_path,
-                        **source_meta,
-                    })
-                    qc_rows.append({
-                        "entry_id": entry_id,
-                        "page_number_1based": pno+1,
-                        "image_index": img_idx,
-                        "spectrum_index": s_idx,
-                        "stage": "digitize",
-                        "status": "failed",
-                        "y_normalization": y_norm_mode,
-                        "notes": "; ".join(qc_notes_parts)[:250],
-                    })
+                    qc_failed = True
+                    qc_notes_parts.append("no curve components digitized")
+                    df_curve = pd.DataFrame(
+                        columns=["wavenumber_cm1", "transmittance", "segment_id", "imputed"]
+                    )
                     page_rejected += 1
                     page_reasons["component_digitize_failed"] += 1
-                continue
-
-                df_curve = pd.concat(dfs, ignore_index=True)
-                df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
+                else:
+                    df_curve = pd.concat(dfs, ignore_index=True)
+                    df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
 
                 axis_filter_applied = False
                 rolling_median_applied = False
@@ -2421,6 +2386,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 if digitize_no_curve:
                     qc_failed = True
                     qc_notes_parts.append("digitize_failed_no_curve")
+                    digitize_note = "; ".join([p for p in qc_notes_parts if p])[:250]
                     qc_rows.append({
                         "entry_id": entry_id,
                         "page_number_1based": pno+1,
@@ -2429,7 +2395,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "stage": "digitize",
                         "status": "failed",
                         "y_normalization": y_norm_mode,
-                        "notes": "digitize_failed_no_curve",
+                        "notes": digitize_note or "digitize_failed_no_curve",
                     })
                     page_rejected += 1
                     page_reasons["digitize_failed_no_curve"] += 1
@@ -2493,6 +2459,22 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     for col in ("x_pix", "y_pix"):
                         if col in df_curve.columns:
                             df_curve = df_curve.drop(columns=[col])
+
+                    if len(df_curve) < MIN_CURVE_POINTS_QC:
+                        qc_failed = True
+                        qc_notes_parts.append(
+                            f"too_few_points ({len(df_curve)} < {MIN_CURVE_POINTS_QC})"
+                        )
+                        qc_rows.append({
+                            "entry_id": entry_id,
+                            "page_number_1based": pno+1,
+                            "image_index": img_idx,
+                            "spectrum_index": s_idx,
+                            "stage": "digitize",
+                            "status": "failed",
+                            "y_normalization": y_norm_mode,
+                            "notes": f"too_few_points points={len(df_curve)} min={MIN_CURVE_POINTS_QC}",
+                        })
 
                     # Reject near-flat traces (common failure: digitizing an axis line instead of a spectrum)
                     try:
