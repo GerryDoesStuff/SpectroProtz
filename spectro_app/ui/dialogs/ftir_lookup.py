@@ -1206,9 +1206,14 @@ class FtirLookupWindow(QtWidgets.QDialog):
         label: pg.TextItem,
     ) -> None:
         plot_item = plot_widget.getPlotItem()
-        if hasattr(plot_item, "items") and label in plot_item.items:
+        view_box = plot_item.vb
+        added_items = getattr(view_box, "addedItems", None)
+        if added_items is not None and label in added_items:
             return
-        plot_item.addItem(label, ignoreBounds=True)
+        if label.parentItem() is view_box:
+            return
+        view_box.addItem(label)
+        label.setParentItem(view_box)
 
     def _update_cursor_label(
         self,
@@ -1217,20 +1222,27 @@ class FtirLookupWindow(QtWidgets.QDialog):
         pos: QtCore.QPointF,
     ) -> None:
         plot_item = plot_widget.getPlotItem()
+        view_box = plot_item.vb
         self._ensure_cursor_label(plot_widget, label)
-        if not plot_item.sceneBoundingRect().contains(pos):
+        if not view_box.sceneBoundingRect().contains(pos):
             label.hide()
             return
-        view_pos = plot_item.vb.mapSceneToView(pos)
+        view_pos = view_box.mapSceneToView(pos)
         x_val = float(view_pos.x())
         y_val = float(view_pos.y())
         if not (math.isfinite(x_val) and math.isfinite(y_val)):
             label.hide()
             return
         label.setText(f"Wavenumber: {x_val:.4f}, Intensity: {y_val:.4f}")
-        view_rect = plot_item.vb.viewRect()
+        view_rect = view_box.viewRect()
         if view_rect is not None:
-            label.setPos(view_rect.right(), view_rect.top())
+            right = view_rect.right()
+            top = view_rect.top()
+        else:
+            x_range, y_range = view_box.viewRange()
+            right = x_range[1]
+            top = y_range[1]
+        label.setPos(right, top)
         label.show()
 
     def _on_comparison_plot_mouse_moved(self, pos: QtCore.QPointF) -> None:
