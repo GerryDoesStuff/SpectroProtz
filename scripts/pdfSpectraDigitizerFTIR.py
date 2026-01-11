@@ -360,8 +360,16 @@ def detect_axis_break(
     marker_gap_hi = None
     marker_split = None
     if marker_present:
-        left_idx = np.where(xs <= marker_x_pix)[0]
-        right_idx = np.where(xs >= marker_x_pix)[0]
+        left_idx = np.where(xs < marker_x_pix)[0]
+        right_idx = np.where(xs > marker_x_pix)[0]
+        if left_idx.size == 0 or right_idx.size == 0:
+            eq_idx = np.where(xs == marker_x_pix)[0]
+            if eq_idx.size > 0:
+                idx = int(eq_idx[0])
+                if left_idx.size == 0 and idx > 0:
+                    left_idx = np.array([idx - 1])
+                if right_idx.size == 0 and idx + 1 < len(xs):
+                    right_idx = np.array([idx + 1])
         if left_idx.size > 0 and right_idx.size > 0:
             li = int(left_idx[-1])
             ri = int(right_idx[0])
@@ -1014,17 +1022,29 @@ def extract_ticks(img_bgr: np.ndarray, axes: PlotAxes, logger: logging.Logger) -
 
     marker_x = None
     marker_count = 0
-    if x_img is not None and x_img.size > 0:
+    axis_band_half = max(3, int(0.03 * h))
+    axis_y0 = max(0, axes.x_axis_y - axis_band_half)
+    axis_y1 = min(h, axes.x_axis_y + axis_band_half)
+    axis_xreg = (axes.x0, axis_y0, axes.x1, max(axis_y0 + 1, axis_y1))
+    axis_img = crop_region(img_bgr, axis_xreg)
+    if axis_img is not None and axis_img.size > 0:
+        marker_x, marker_count = detect_break_marker_in_xband(axis_img)
+        if marker_x is not None:
+            marker_x_full = axis_xreg[0] + marker_x
+            meta["x_break_marker_pix"] = float(marker_x_full - axes.x0)
+            meta["x_break_marker_count"] = int(marker_count)
+            meta["x_break_marker_present"] = True
+    if marker_x is None and x_img is not None and x_img.size > 0:
         marker_x, marker_count = detect_break_marker_in_xband(x_img)
         if marker_x is not None:
             marker_x_full = xreg[0] + marker_x
             meta["x_break_marker_pix"] = float(marker_x_full - axes.x0)
             meta["x_break_marker_count"] = int(marker_count)
             meta["x_break_marker_present"] = True
-        else:
-            meta["x_break_marker_pix"] = None
-            meta["x_break_marker_count"] = 0
-            meta["x_break_marker_present"] = False
+    if marker_x is None:
+        meta["x_break_marker_pix"] = None
+        meta["x_break_marker_count"] = 0
+        meta["x_break_marker_present"] = False
 
     # OCR x ticks
     x_tokens = ocr_tokens(x_img, psm=6, whitelist="0123456789.-")

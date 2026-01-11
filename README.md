@@ -661,10 +661,12 @@ bands. The per-spectrum entry metadata records whether points were collapsed
 post-processing step.
 
 When extracting axis calibration, the digitizer detects X-axis breaks by looking
-for discontinuities between OCR’d tick values and by scanning the x-axis band
-for visual break markers such as “//”. When a break is found, the missing range
-is interpolated automatically so downstream curve outputs remain continuous
-across the gap.
+for discontinuities between OCR’d tick values and by scanning both the x-axis
+label band and the axis-line region for visual break markers such as “//”.
+When a break marker is detected, the digitizer uses the nearest tick values on
+either side of the marker to define the missing range, even if the tick spacing
+is otherwise ambiguous, and interpolates across that gap so downstream curve
+outputs remain continuous.
 
 If no Y-axis tick labels are detected, the digitizer uses the full spectrum’s
 pixel range across all curve components for that spectrum to compute a single
