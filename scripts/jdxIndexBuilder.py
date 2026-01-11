@@ -2541,6 +2541,9 @@ def refine_peak_candidates(
         time.monotonic() + fit_timeout_sec if fit_timeout_sec and fit_timeout_sec > 0 else None
     )
     y_abs_data = np.asarray(y_abs, dtype=float) if y_abs is not None else None
+    raw_absorbance_available = (
+        y_abs_data is not None and x.size > 0 and y_abs_data.size == x.size
+    )
 
     def _remaining_spectrum_time() -> Optional[float]:
         if spectrum_deadline is None:
@@ -2582,9 +2585,9 @@ def refine_peak_candidates(
         center: float | None,
         fallback_index: int,
         fit_amplitude: float,
-    ) -> float:
-        if y_abs_data is None or x.size == 0 or y_abs_data.size != x.size:
-            return float(fit_amplitude)
+    ) -> tuple[float, bool]:
+        if not raw_absorbance_available:
+            return float(fit_amplitude), False
         idx = fallback_index
         if center is not None:
             try:
@@ -2594,8 +2597,50 @@ def refine_peak_candidates(
             if center_val is not None and np.isfinite(center_val):
                 idx = int(np.argmin(np.abs(x - center_val)))
         if idx < 0 or idx >= y_abs_data.size:
-            return float(fit_amplitude)
-        return float(y_abs_data[idx])
+            return float(fit_amplitude), False
+        return float(y_abs_data[idx]), True
+
+    def _raw_area(
+        center: float | None,
+        fallback_index: int,
+        fit_area: float,
+        window_pts: int,
+        plateau_bounds: tuple[int, int] | None,
+        polarity: int,
+    ) -> tuple[float, bool]:
+        if not raw_absorbance_available:
+            return float(fit_area), False
+        idx = fallback_index
+        if center is not None:
+            try:
+                center_val = float(center)
+            except (TypeError, ValueError):
+                center_val = None
+            if center_val is not None and np.isfinite(center_val):
+                idx = int(np.argmin(np.abs(x - center_val)))
+        if idx < 0 or idx >= y_abs_data.size:
+            return float(fit_area), False
+        if plateau_bounds is not None:
+            left_idx, right_idx = plateau_bounds
+            start = max(min(left_idx, right_idx), 0)
+            end = min(max(left_idx, right_idx) + 1, y_abs_data.size)
+        else:
+            start = max(idx - window_pts, 0)
+            end = min(idx + window_pts, y_abs_data.size)
+        xs = x[start:end]
+        ys = y_abs_data[start:end]
+        if xs.size < 2:
+            return float(fit_area), False
+        baseline = float(np.median(ys))
+        if polarity < 0:
+            component = np.maximum(baseline - ys, 0.0)
+        else:
+            component = np.maximum(ys - baseline, 0.0)
+        if hasattr(np, "trapezoid"):
+            area = float(np.trapezoid(component, xs))
+        else:
+            area = float(np.trapz(component, xs))
+        return area, True
 
     def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
         sources = candidate.get("sources", [])
@@ -2664,9 +2709,6 @@ def refine_peak_candidates(
         if not group:
             continue
         fit_y = -y_proc if polarity < 0 else y_proc
-        fit_y_abs = None
-        if y_abs is not None and polarity > 0:
-            fit_y_abs = np.asarray(y_abs, dtype=float)
         clusters = _cluster_candidates_by_window(group, window=fit_window)
         for cluster in clusters:
             if _spectrum_timed_out():
@@ -2761,17 +2803,29 @@ def refine_peak_candidates(
                         result["index"] = int(candidate["index"])
                         result["polarity"] = int(polarity)
                         result["sources"] = candidate_sources
-                        result["normalized"] = True
                         signed_fit_amplitude = float(result.get("amplitude", 0.0))
-                        raw_amplitude = _raw_amplitude(
+                        fit_area = float(result.get("area", 0.0))
+                        raw_amplitude, _ = _raw_amplitude(
                             result.get("center"),
                             result["index"],
                             signed_fit_amplitude,
                         )
+                        raw_area, area_is_raw = _raw_area(
+                            result.get("center"),
+                            result["index"],
+                            fit_area,
+                            fit_window,
+                            None,
+                            polarity,
+                        )
                         result["fit_amplitude"] = signed_fit_amplitude
+                        result["fit_area"] = fit_area
                         result["amplitude"] = raw_amplitude
+                        result["area"] = raw_area
+                        result["normalized"] = not area_is_raw
                         if polarity < 0:
                             result["fit_amplitude"] = float(result.get("fit_amplitude", 0.0)) * -1
+                            result["fit_area"] = float(result.get("fit_area", 0.0)) * -1
                             result["area"] = float(result.get("area", 0.0)) * -1
                         results.append(result)
                         mark_candidate_processed()
@@ -2786,7 +2840,6 @@ def refine_peak_candidates(
                 plateau_bounds = candidate.get("plateau_bounds")
                 x0_guess = float(x[idx])
                 center_bounds = None
-                use_absorbance = fit_y_abs is not None and plateau_bounds is not None
                 is_shoulder = _shoulder_candidate(candidate)
                 candidate_fit_window = shoulder_fit_window if is_shoulder else fit_window
                 candidate_min_r2 = shoulder_min_r2 if is_shoulder else min_r2
@@ -2796,8 +2849,7 @@ def refine_peak_candidates(
                     right_x = float(x[right_idx])
                     center_bounds = (min(left_x, right_x), max(left_x, right_x))
                     x0_guess = (center_bounds[0] + center_bounds[1]) / 2.0
-                fit_source = fit_y_abs if use_absorbance else fit_y
-                fit_used_normalized = not use_absorbance
+                fit_source = fit_y
                 fit = None
                 fit_timed_out = False
                 try:
@@ -2881,17 +2933,29 @@ def refine_peak_candidates(
                 result["index"] = int(candidate["index"])
                 result["polarity"] = int(polarity)
                 result["sources"] = list(candidate.get("sources", []))
-                result["normalized"] = fit_used_normalized
                 signed_fit_amplitude = float(result.get("amplitude", 0.0))
-                raw_amplitude = _raw_amplitude(
+                fit_area = float(result.get("area", 0.0))
+                raw_amplitude, _ = _raw_amplitude(
                     result.get("center"),
                     result["index"],
                     signed_fit_amplitude,
                 )
+                raw_area, area_is_raw = _raw_area(
+                    result.get("center"),
+                    result["index"],
+                    fit_area,
+                    candidate_fit_window,
+                    plateau_bounds if plateau_bounds is not None else None,
+                    polarity,
+                )
                 result["fit_amplitude"] = signed_fit_amplitude
+                result["fit_area"] = fit_area
                 result["amplitude"] = raw_amplitude
+                result["area"] = raw_area
+                result["normalized"] = not area_is_raw
                 if polarity < 0:
                     result["fit_amplitude"] = float(result.get("fit_amplitude", 0.0)) * -1
+                    result["fit_area"] = float(result.get("fit_area", 0.0)) * -1
                     result["area"] = float(result.get("area", 0.0)) * -1
                 results.append(result)
                 mark_candidate_processed()
