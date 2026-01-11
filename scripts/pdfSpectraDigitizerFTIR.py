@@ -683,10 +683,66 @@ def despike_vertical_artifacts(df: pd.DataFrame) -> pd.DataFrame:
         return out
     return df
 
+def _axis_filter_mask(
+    df: pd.DataFrame,
+    *,
+    axes: PlotAxes,
+    interior_shape: Tuple[int, int],
+    border_px: int = 3,
+    axis_px: int = 3,
+) -> np.ndarray:
+    if df is None or df.empty:
+        return np.zeros(0, dtype=bool)
+    if "x_pix" not in df.columns or "y_pix" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    if border_px <= 0 and axis_px <= 0:
+        return np.zeros(len(df), dtype=bool)
+
+    w_int, h_int = interior_shape[1], interior_shape[0]
+    x_pix = df["x_pix"].to_numpy(dtype=float)
+    y_pix = df["y_pix"].to_numpy(dtype=float)
+    full_x = x_pix + float(axes.x0)
+    full_y = y_pix + float(axes.y0)
+
+    mask = np.zeros(len(df), dtype=bool)
+    if border_px > 0:
+        mask |= (x_pix <= border_px) | (x_pix >= (w_int - border_px))
+        mask |= (y_pix <= border_px) | (y_pix >= (h_int - border_px))
+    if axis_px > 0:
+        mask |= np.abs(full_y - float(axes.x_axis_y)) <= axis_px
+        if axes.y_axis_x is not None:
+            mask |= np.abs(full_x - float(axes.y_axis_x)) <= axis_px
+    return mask
+
+def filter_points_near_axes(
+    df: pd.DataFrame,
+    *,
+    axes: PlotAxes,
+    interior_shape: Tuple[int, int],
+    border_px: int = 3,
+    axis_px: int = 3,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Filter points that lie near the plot border or axis lines."""
+    if df is None or df.empty:
+        return df, {"axis_filter_applied": False, "axis_filter_removed": 0}
+    mask = _axis_filter_mask(
+        df,
+        axes=axes,
+        interior_shape=interior_shape,
+        border_px=border_px,
+        axis_px=axis_px,
+    )
+    if mask.size == 0 or not np.any(mask):
+        return df, {"axis_filter_applied": False, "axis_filter_removed": 0}
+    filtered = df.loc[~mask].copy()
+    filtered = filtered.sort_values("wavenumber_cm1").reset_index(drop=True)
+    return filtered, {"axis_filter_applied": True, "axis_filter_removed": int(mask.sum())}
+
 def collapse_duplicate_wavenumbers(
     df: pd.DataFrame,
     *,
     min_bin_width: float = 0.2,
+    representative: str = "median",
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Bin nearby x positions and take robust summaries to stabilize dense traces."""
     if df is None or df.empty:
@@ -709,6 +765,8 @@ def collapse_duplicate_wavenumbers(
     x0 = float(x[0])
     bin_id = np.floor((x - x0) / bin_width).astype(int)
 
+    representative = (representative or "median").lower()
+    use_top = representative in {"top", "top-most", "topmost", "min_y"}
     agg_map: Dict[str, Any] = {
         "wavenumber_cm1": "median",
         "transmittance": "median",
@@ -725,15 +783,20 @@ def collapse_duplicate_wavenumbers(
             agg_map[col] = _mode_int
     if "imputed" in df_sorted.columns:
         agg_map["imputed"] = "max"
+    if "x_pix" in df_sorted.columns:
+        agg_map["x_pix"] = "median"
+    if "y_pix" in df_sorted.columns:
+        agg_map["y_pix"] = "median"
 
-    collapsed = (
-        df_sorted.assign(_bin_id=bin_id)
-        .groupby("_bin_id", sort=True, as_index=False)
-        .agg(agg_map)
-        .drop(columns=["_bin_id"])
-        .sort_values("wavenumber_cm1")
-        .reset_index(drop=True)
-    )
+    grouped = df_sorted.assign(_bin_id=bin_id).groupby("_bin_id", sort=True, as_index=False)
+    collapsed = grouped.agg(agg_map)
+    if use_top and "y_pix" in df_sorted.columns:
+        idx = grouped["y_pix"].idxmin()
+        top_rows = df_sorted.loc[idx, ["_bin_id", "transmittance"]].rename(columns={"transmittance": "_top_T"})
+        collapsed = collapsed.merge(top_rows, on="_bin_id", how="left")
+        collapsed["transmittance"] = collapsed["_top_T"].fillna(collapsed["transmittance"])
+        collapsed = collapsed.drop(columns=["_top_T"])
+    collapsed = collapsed.drop(columns=["_bin_id"]).sort_values("wavenumber_cm1").reset_index(drop=True)
 
     info = {
         "collapsed_points": len(collapsed) < len(df_sorted),
@@ -741,6 +804,43 @@ def collapse_duplicate_wavenumbers(
         "collapse_bin_width": float(bin_width),
     }
     return collapsed, info
+
+def apply_rolling_median_if_oscillatory(
+    df: pd.DataFrame,
+    *,
+    window: int = 5,
+    osc_ratio: float = 4.0,
+    osc_min_amplitude: float = 0.08,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Apply a rolling median filter if large oscillations are detected."""
+    if df is None or df.empty:
+        return df, {"rolling_median_applied": False}
+    if "transmittance" not in df.columns:
+        return df, {"rolling_median_applied": False}
+    y = df["transmittance"].to_numpy(dtype=float)
+    if len(y) < max(3, window):
+        return df, {"rolling_median_applied": False}
+    diffs = np.abs(np.diff(y))
+    if diffs.size == 0:
+        return df, {"rolling_median_applied": False}
+    med = float(np.median(diffs))
+    p90 = float(np.percentile(diffs, 90))
+    if med <= 0:
+        osc = p90 >= osc_min_amplitude
+    else:
+        osc = (p90 / med) >= osc_ratio and p90 >= osc_min_amplitude
+    if not osc:
+        return df, {"rolling_median_applied": False}
+
+    y_series = pd.Series(y)
+    smooth = (
+        y_series.rolling(window=window, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+    out = df.copy()
+    out["transmittance"] = smooth
+    return out, {"rolling_median_applied": True}
 
 @dataclass
 class CurveComponent:
@@ -1042,6 +1142,8 @@ def digitize_single_component(
         "absorbance": A,
         "segment_id": segment_id,
         "imputed": False,
+        "x_pix": x_pix,
+        "y_pix": y_pix,
     })
 
     # Sort by wavenumber for later imputation and consistent output
@@ -1735,7 +1837,22 @@ def _expand_clip_for_axes(page_rect: fitz.Rect, rect: fitz.Rect) -> fitz.Rect:
     return clip
 
 def _process_page_worker(args: Tuple) -> Dict[str, Any]:
-    (pdf_path_str, pno, dpi, save_graph_images, graph_dir_str, save_digitized_plots, digitized_dir_str, verbose, source_meta, max_images_per_page) = args
+    (
+        pdf_path_str,
+        pno,
+        dpi,
+        save_graph_images,
+        graph_dir_str,
+        save_digitized_plots,
+        digitized_dir_str,
+        verbose,
+        source_meta,
+        max_images_per_page,
+        bin_representative,
+        axis_filter_px,
+        border_filter_px,
+        rolling_median_window,
+    ) = args
     logs: List[Tuple[str, str]] = []  # (level, msg)
     def log(level: str, msg: str):
         logs.append((level, msg))
@@ -2035,10 +2152,39 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 df_curve = pd.concat(dfs, ignore_index=True)
                 df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
-                df_curve, collapse_info = collapse_duplicate_wavenumbers(df_curve)
+
+                axis_filter_applied = False
+                rolling_median_applied = False
+
+                if (axis_filter_px > 0) or (border_filter_px > 0):
+                    df_curve, axis_info = filter_points_near_axes(
+                        df_curve,
+                        axes=axes,
+                        interior_shape=plot_interior.shape[:2],
+                        border_px=border_filter_px,
+                        axis_px=axis_filter_px,
+                    )
+                    axis_filter_applied = bool(axis_info.get("axis_filter_applied", False))
+
+                df_curve, collapse_info = collapse_duplicate_wavenumbers(
+                    df_curve,
+                    representative=bin_representative,
+                )
 
                 # Remove obvious vertical 'infill' artifacts (conservative)
                 df_curve = despike_vertical_artifacts(df_curve)
+
+                df_curve, roll_info = apply_rolling_median_if_oscillatory(
+                    df_curve,
+                    window=rolling_median_window,
+                )
+                rolling_median_applied = bool(roll_info.get("rolling_median_applied", False))
+
+                # Drop pixel coordinates now that post-processing is done.
+                for col in ("x_pix", "y_pix"):
+                    if col in df_curve.columns:
+                        df_curve = df_curve.drop(columns=[col])
+
                 # Reject near-flat traces (common failure: digitizing an axis line instead of a spectrum)
                 try:
                     y_rng = float(df_curve["transmittance"].max() - df_curve["transmittance"].min())
@@ -2066,6 +2212,9 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "y_axis_type": y_mode,
                         "y_normalization": y_norm_mode,
                         "digitize_status": "failed",
+                        "axis_filter_applied": axis_filter_applied,
+                        "rolling_median_applied": rolling_median_applied,
+                        "bin_width_cm1": collapse_info.get("collapse_bin_width"),
                         "qc_flag": True,
                         "qc_notes": f"Rejected near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted",
                         "image_path": image_path,
@@ -2079,9 +2228,12 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "stage": "digitize",
                         "status": "failed",
                         "y_normalization": y_norm_mode,
-                        "notes": f"flat_trace y_range={y_rng:.4f}",
+                        "notes": (
+                            f"flat_trace y_range={y_rng:.4f} "
+                            f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
+                        ),
                     })
-                    continue
+                continue
 
                 # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
                 if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
@@ -2173,6 +2325,9 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "y_axis_type": y_mode,
                     "y_normalization": y_norm_mode,
                     "digitize_status": "ok",
+                    "axis_filter_applied": axis_filter_applied,
+                    "rolling_median_applied": rolling_median_applied,
+                    "bin_width_cm1": collapse_info.get("collapse_bin_width"),
                     "collapsed_points": bool(collapse_info.get("collapsed_points", False)),
                     "collapse_bins": int(collapse_info.get("collapse_bins", len(df_curve))),
                     "collapse_bin_width_cm1": collapse_info.get("collapse_bin_width"),
@@ -2193,7 +2348,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "notes": (
                         f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode} "
                         f"collapsed_points={collapse_info.get('collapsed_points', False)} "
-                        f"collapse_bins={collapse_info.get('collapse_bins', len(df_curve))}"
+                        f"collapse_bins={collapse_info.get('collapse_bins', len(df_curve))} "
+                        f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
                     ),
                 })
     except Exception as e:
@@ -2233,6 +2389,10 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1), help="Number of worker processes (1 disables multiprocessing).")
     ap.add_argument("--chunksize", type=int, default=1, help="Pool imap chunksize.")
     ap.add_argument("--max-images-per-page", type=int, default=50, help="Safety cap for images per page")
+    ap.add_argument("--bin-representative", type=str, default="median", choices=["median", "top"], help="Representative y per bin (median or top).")
+    ap.add_argument("--axis-filter-px", type=int, default=3, help="Pixel distance from axis lines to discard (0 disables).")
+    ap.add_argument("--border-filter-px", type=int, default=3, help="Pixel distance from plot border to discard (0 disables).")
+    ap.add_argument("--rolling-median-window", type=int, default=5, help="Window size for oscillation-triggered rolling median filter.")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
     ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
@@ -2311,6 +2471,10 @@ def main() -> int:
         "save_digitized_plots": bool(save_digitized_plots),
         "workers": args.workers,
         "chunksize": args.chunksize,
+        "bin_representative": args.bin_representative,
+        "axis_filter_px": args.axis_filter_px,
+        "border_filter_px": args.border_filter_px,
+        "rolling_median_window": args.rolling_median_window,
         **source_meta,
         "qualifiers": "s=strong band; w=weak band; sh=shoulder",
         "y_output": "transmittance (percent if calibrated; relative otherwise)",
@@ -2326,7 +2490,8 @@ def main() -> int:
             str(pdf_path), pno, args.dpi,
             bool(args.save_images), str(graph_dir) if args.save_images else "",
             bool(save_digitized_plots), str(digitized_dir) if save_digitized_plots else "",
-            args.verbose, source_meta, args.max_images_per_page
+            args.verbose, source_meta, args.max_images_per_page,
+            args.bin_representative, args.axis_filter_px, args.border_filter_px, args.rolling_median_window,
         ))
 
     entries_rows: List[Dict[str, Any]] = []
