@@ -652,7 +652,8 @@ Entries sheet records the number of pages ahead that supplied the labels in
 If no labels are detected after lookahead, the digitizer scans the full plot
 interior, assigns placeholder labels like `Unknown_01`, and records
 `label_missing = true` in the Entries sheet so unlabeled spectra are easy to
-review later. If labels are found but the label bands yield no curve components, the
+review later; the Entries sheet keeps `label_missing` as a boolean flag so
+downstream reviewers can filter and audit unlabeled extractions quickly. If labels are found but the label bands yield no curve components, the
 digitizer falls back to scanning the full plot interior for curve components,
 then assigns the closest component(s) to each label based on vertical
 proximity between the label’s y position and the component bounding-box
