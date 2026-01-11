@@ -620,12 +620,14 @@ logger panel for rapid triage and sharing with support.
 ## Utilities
 The PDF digitizer in [`scripts/pdfSpectraDigitizerFTIR.py`](scripts/pdfSpectraDigitizerFTIR.py)
 extracts FTIR spectra from figure scans and writes a master XLSX plus optional
-per-spectrum XLSX workbooks for each `entry_id`. The same per-spectrum loop can
-emit JCAMP-DX outputs: enable `--per-spectrum-jdx` (or leave it on) to write one
-JDX file alongside each per-spectrum workbook, and use `--out-jdx` to collect
-all spectra into a single multi-spectrum JDX when their X axes are consistent.
-JDX output uses the digitized curve data, converts transmittance to absorbance,
-and normalizes absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))`
+per-spectrum XLSX workbooks for each `entry_id`. It is fully standalone and does
+not depend on `jdxIndexBuilder.py`, so the digitizer can emit JCAMP-DX payloads
+without importing the FTIR indexer. The same per-spectrum loop can emit JCAMP-DX
+outputs: enable `--per-spectrum-jdx` (or leave it on) to write one JDX file
+alongside each per-spectrum workbook, and use `--out-jdx` to collect all spectra
+into a single multi-spectrum JDX when their X axes are consistent. JDX output
+uses the digitized curve data, converts transmittance to absorbance, and
+normalizes absorbance to a 0–1 range before writing `##XYDATA=(X++(Y..Y))`
 payloads. The digitizer populates JCAMP headers for `JCAMP-DX`, `DATA TYPE`,
 `XUNITS`, `YUNITS`, `NPOINTS`, `FIRSTX`, and `DELTAX`, plus optional metadata
 fields when they are detected from OCR or source metadata. Optional JCAMP

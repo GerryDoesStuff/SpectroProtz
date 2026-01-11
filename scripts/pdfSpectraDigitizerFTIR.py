@@ -59,9 +59,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from jdxIndexBuilder import build_xydata_payload
-
-
 EXCEL_MAX_ROWS = 1_048_576  # includes header row
 
 # Excel / openpyxl rejects certain control characters in cell strings.
@@ -82,6 +79,43 @@ def sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
         if pd.api.types.is_object_dtype(df2[col]) or pd.api.types.is_string_dtype(df2[col]):
             df2[col] = df2[col].map(lambda x: _sanitize_excel_str(x) if isinstance(x, str) else x)
     return df2
+
+def _build_xydata_payload(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    points_per_line: int = 1,
+) -> str:
+    """Return a JCAMP-style XYDATA payload using (X,Y) or X++(Y..Y) lines."""
+
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    n = min(len(x_arr), len(y_arr))
+    if n == 0:
+        return ""
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.any(mask):
+        return ""
+    x_arr = x_arr[mask]
+    y_arr = y_arr[mask]
+    if x_arr.size == 0:
+        return ""
+
+    step = max(1, int(points_per_line))
+
+    def _fmt(value: float) -> str:
+        return f"{value:.10g}"
+
+    lines: List[str] = []
+    for idx in range(0, len(x_arr), step):
+        start_x = x_arr[idx]
+        y_slice = y_arr[idx : idx + step]
+        parts = [_fmt(start_x)]
+        parts.extend(_fmt(val) for val in y_slice)
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
 DEFAULT_DPI = 600
 
 QUALIFIER_MEANINGS = {
@@ -1274,7 +1308,7 @@ def write_single_spectrum_jdx(
         logger.warning(f"Skipping JDX for {entry_row.get('entry_id', '')}: no finite curve data.")
         return False
     headers = _build_jdx_headers(entry_row, npoints=int(x.size), firstx=firstx, deltax=deltax)
-    xydata_payload = build_xydata_payload(x, y, points_per_line=points_per_line)
+    xydata_payload = _build_xydata_payload(x, y, points_per_line=points_per_line)
     if not xydata_payload:
         logger.warning(f"Skipping JDX for {entry_row.get('entry_id', '')}: no XYDATA payload.")
         return False
@@ -1321,7 +1355,7 @@ def write_multi_spectrum_jdx(
             deltax=deltax,
             title_override=f"{entry_id} {entry_row.get('label_ocr', '')}".strip(),
         )
-        xydata_payload = build_xydata_payload(x, y, points_per_line=points_per_line)
+        xydata_payload = _build_xydata_payload(x, y, points_per_line=points_per_line)
         if not xydata_payload:
             logger.warning(f"Skipping master JDX entry {entry_id}: no XYDATA payload.")
             continue
