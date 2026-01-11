@@ -237,14 +237,13 @@ normalized intensity to 0–1, sets the X range to the current spectrum (or
 peak bounds when no spectrum trace is plotted), and disables zooming/panning so
 the preview stays consistent as you browse entries.
 The comparison plot is likewise non-interactive (no zoom/pan and no ViewBox
-context menu) to keep the overlays fixed while still allowing the live cursor
-readout to report the current wavenumber/intensity, and it disables auto-range
-so axes remain locked to the selected spectra span (or the reference peak
-range) with intensity clamped to the 0–1 normalized scale.
-Both lookup plots now include a live cursor readout anchored to the ViewBox
-top-right corner; moving the mouse inside the plot’s ViewBox shows the current
-wavenumber and normalized intensity, and the readout hides as soon as the
-pointer leaves the ViewBox bounds.
+context menu) to keep the overlays fixed, and it disables auto-range so axes
+remain locked to the selected spectra span (or the reference peak range) with
+intensity clamped to the 0–1 normalized scale.
+Both lookup plots show a live cursor readout beneath the plots; hovering inside
+either ViewBox updates the wavenumber and normalized intensity readouts (with
+explicit cm⁻¹ and a.u. units), and the values clear when the pointer leaves the
+plot area.
 While the lookup window is open, selecting FTIR files in the main file queue
 automatically loads the chosen spectra and overlays them in the lookup
 comparison plot as “selected spectra.” Multi-selecting queue entries plots

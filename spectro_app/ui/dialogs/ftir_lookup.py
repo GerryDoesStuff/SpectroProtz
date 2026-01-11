@@ -384,13 +384,12 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._comparison_plot_widget.setLabel("left", "Normalized intensity")
         self._comparison_plot_widget.setTitle("Selected reference peaks")
         # Keep the comparison plot fixed while still allowing hover readouts.
+        self._comparison_plot_widget.setMenuEnabled(False)
         self._comparison_plot_widget.setMouseEnabled(x=False, y=False)
         self._comparison_plot_widget.getPlotItem().vb.setMouseEnabled(x=False, y=False)
-        self._comparison_plot_widget.setMenuEnabled(False)
         self._comparison_plot_widget.enableAutoRange(x=False, y=False)
-        self._comparison_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
-        self._comparison_cursor_label.setZValue(100)
-        self._comparison_cursor_label.hide()
+        self._comparison_cursor_label = QtWidgets.QLabel("x: ––– cm⁻¹ | y: ––– a.u.")
+        self._comparison_cursor_label.setContentsMargins(12, 4, 12, 8)
         self._preview_plot_widget = pg.PlotWidget(background="w")
         self._preview_plot_widget.setMinimumHeight(200)
         self._preview_plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -399,9 +398,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._preview_plot_widget.setTitle("Reference preview")
         self._preview_plot_widget.setMouseEnabled(x=False, y=False)
         self._preview_plot_widget.setMenuEnabled(False)
-        self._preview_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
-        self._preview_cursor_label.setZValue(100)
-        self._preview_cursor_label.hide()
+        self._preview_plot_widget.getPlotItem().vb.setMouseEnabled(x=False, y=False)
+        self._preview_cursor_label = QtWidgets.QLabel("x: ––– cm⁻¹ | y: ––– a.u.")
+        self._preview_cursor_label.setContentsMargins(12, 4, 12, 8)
         self._comparison_plot_widget.scene().sigMouseMoved.connect(
             self._on_comparison_plot_mouse_moved
         )
@@ -423,6 +422,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         comparison_layout = QtWidgets.QVBoxLayout(comparison_container)
         comparison_layout.setContentsMargins(0, 0, 0, 0)
         comparison_layout.addWidget(self._comparison_plot_widget, 1)
+        comparison_layout.addWidget(self._comparison_cursor_label)
 
         preview_container = QtWidgets.QWidget()
         preview_layout = QtWidgets.QHBoxLayout(preview_container)
@@ -432,6 +432,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
         preview_plot_layout.setContentsMargins(0, 0, 0, 0)
         preview_plot_layout.addWidget(self._preview_spectrum_overlay_checkbox)
         preview_plot_layout.addWidget(self._preview_plot_widget, 1)
+        preview_plot_layout.addWidget(self._preview_cursor_label)
         preview_layout.addWidget(preview_plot_container, 3)
         preview_layout.addWidget(metadata_box, 1)
 
@@ -1012,7 +1013,6 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if self._comparison_plot_legend is not None:
             self._comparison_plot_widget.removeItem(self._comparison_plot_legend)
         self._comparison_plot_legend = self._comparison_plot_widget.addLegend(offset=(10, 10))
-        self._ensure_cursor_label(self._comparison_plot_widget, self._comparison_cursor_label)
 
         has_selected_spectra = bool(self._selected_spectra)
         if has_selected_spectra:
@@ -1096,7 +1096,6 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if self._preview_plot_legend is not None:
             self._preview_plot_widget.removeItem(self._preview_plot_legend)
         self._preview_plot_legend = self._preview_plot_widget.addLegend(offset=(10, 10))
-        self._ensure_cursor_label(self._preview_plot_widget, self._preview_cursor_label)
 
         preview_entry = self._preview_entry
         if preview_entry is None:
@@ -1260,50 +1259,24 @@ class FtirLookupWindow(QtWidgets.QDialog):
             pen=pen,
         )
 
-    def _ensure_cursor_label(
-        self,
-        plot_widget: pg.PlotWidget,
-        label: pg.TextItem,
-    ) -> None:
-        plot_item = plot_widget.getPlotItem()
-        view_box = plot_item.vb
-        added_items = getattr(view_box, "addedItems", None)
-        if added_items is not None and label in added_items:
-            return
-        if label.parentItem() is view_box:
-            return
-        view_box.addItem(label)
-        label.setParentItem(view_box)
-
     def _update_cursor_label(
         self,
         plot_widget: pg.PlotWidget,
-        label: pg.TextItem,
+        label: QtWidgets.QLabel,
         pos: QtCore.QPointF,
     ) -> None:
         plot_item = plot_widget.getPlotItem()
         view_box = plot_item.vb
-        self._ensure_cursor_label(plot_widget, label)
         if not view_box.sceneBoundingRect().contains(pos):
-            label.hide()
+            label.setText("x: ––– cm⁻¹ | y: ––– a.u.")
             return
         view_pos = view_box.mapSceneToView(pos)
         x_val = float(view_pos.x())
         y_val = float(view_pos.y())
         if not (math.isfinite(x_val) and math.isfinite(y_val)):
-            label.hide()
+            label.setText("x: ––– cm⁻¹ | y: ––– a.u.")
             return
-        label.setText(f"Wavenumber: {x_val:.4f}, Intensity: {y_val:.4f}")
-        view_rect = view_box.viewRect()
-        if view_rect is not None:
-            right = view_rect.right()
-            top = view_rect.top()
-        else:
-            x_range, y_range = view_box.viewRange()
-            right = x_range[1]
-            top = y_range[1]
-        label.setPos(right, top)
-        label.show()
+        label.setText(f"x: {x_val:.4g} cm⁻¹ | y: {y_val:.4g} a.u.")
 
     def _on_comparison_plot_mouse_moved(self, pos: QtCore.QPointF) -> None:
         self._update_cursor_label(
