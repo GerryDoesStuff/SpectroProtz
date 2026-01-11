@@ -708,6 +708,14 @@ When a break marker is detected, the digitizer uses the nearest tick values on
 either side of the marker to define the missing range, even if the tick spacing
 is otherwise ambiguous, and interpolates across that gap so downstream curve
 outputs remain continuous.
+If too few X-axis ticks are detected to build a calibration, the digitizer can
+fall back to a user-supplied range by passing `--x-range` (for example
+`4000-400`) or setting the `FTIR_PDF_X_RANGE` environment variable; the leftmost
+plot pixel is mapped to the first value and the rightmost plot pixel to the
+second value so digitization can still proceed. Entries record
+`x_mode = fallback` along with the `x_range_used` string when this fallback is
+applied, while runs without a supplied range revert to pixel-space x values
+(`x_mode = pixel`) and retain QC notes about the missing ticks.
 
 If no Y-axis tick labels are detected, the digitizer concatenates all curve
 components for a spectrum, computes a single global 0–1 normalization from the
