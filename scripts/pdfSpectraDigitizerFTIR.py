@@ -1579,6 +1579,23 @@ def label_bands_from_lines(label_lines: List[LabelLine], axes: PlotAxes, pad: in
             labels[comp.comp_id] = best
     return labels
 
+def remap_label_lines_to_axes(
+    label_lines: List[LabelLine],
+    source_axes: PlotAxes,
+    target_axes: PlotAxes,
+) -> List[LabelLine]:
+    if not label_lines:
+        return []
+    src_span = float(max(1, source_axes.y1 - source_axes.y0))
+    tgt_span = float(max(1, target_axes.y1 - target_axes.y0))
+    remapped: List[LabelLine] = []
+    for L in label_lines:
+        frac = (L.cy - source_axes.y0) / src_span
+        cy = target_axes.y0 + frac * tgt_span
+        remapped.append(LabelLine(text=L.text, bbox=(target_axes.x1, int(cy), target_axes.x1, int(cy)), cy=cy))
+    remapped.sort(key=lambda L: L.cy)
+    return remapped
+
 
 def write_single_spectrum_xlsx(
     out_xlsx: Path,
@@ -1852,6 +1869,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         axis_filter_px,
         border_filter_px,
         rolling_median_window,
+        label_lookahead_pages,
     ) = args
     logs: List[Tuple[str, str]] = []  # (level, msg)
     def log(level: str, msg: str):
@@ -1883,6 +1901,37 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
         log("INFO", f"Page {pno+1}: {len(images)} image(s)")
 
         page_rect = page.rect
+
+        def _render_image_crop_for_page(target_page: fitz.Page, target_rect: fitz.Rect) -> np.ndarray:
+            clip = _expand_clip_for_axes(target_page.rect, target_rect)
+            pix = target_page.get_pixmap(clip=clip, dpi=dpi)
+            pil = pixmap_to_pil(pix)
+            return pil_to_bgr(pil)
+
+        def _find_lookahead_labels() -> Tuple[List[LabelLine], int]:
+            if label_lookahead_pages <= 0:
+                return [], 0
+            for offset in range(1, label_lookahead_pages + 1):
+                next_idx = pno + offset
+                if next_idx >= len(doc):
+                    break
+                next_page = doc[next_idx]
+                next_images = next_page.get_images(full=True)
+                if img_idx >= len(next_images):
+                    continue
+                next_xref = next_images[img_idx][0]
+                next_rects = next_page.get_image_rects(next_xref)
+                if not next_rects:
+                    continue
+                next_rect = next_rects[0]
+                next_bgr = _render_image_crop_for_page(next_page, next_rect)
+                next_axes = detect_plot_axes(next_bgr)
+                next_label_lines = detect_label_lines(next_bgr, next_axes)
+                if next_label_lines:
+                    remapped = remap_label_lines_to_axes(next_label_lines, next_axes, axes)
+                    if remapped:
+                        return remapped, offset
+            return [], 0
 
         for img_idx, img_info in enumerate(images):
             xref = img_info[0]
@@ -1934,6 +1983,14 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
             # Label-driven demarcation: only extract spectra that have OCR-detectable labels.
             label_lines = detect_label_lines(bgr, axes)
+            label_page_offset = 0
+            if not label_lines:
+                label_lines, label_page_offset = _find_lookahead_labels()
+                if label_lines:
+                    log(
+                        "WARN",
+                        f"Page {pno+1} img {img_idx}: no labels detected; using labels from page {pno+1+label_page_offset}.",
+                    )
             if not label_lines:
                 log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; skipping extraction per rule.")
                 continue
@@ -2005,6 +2062,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "label_page_offset": label_page_offset,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2119,6 +2177,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "label_page_offset": label_page_offset,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2198,6 +2257,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "label_page_offset": label_page_offset,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2311,6 +2371,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "image_index": img_idx,
                     "spectrum_index": s_idx,
                     "label_ocr": label_text,
+                    "label_page_offset": label_page_offset,
                     "entry_name": entry_name,
                     "entry_description": entry_description,
                     "description": entry_description,
@@ -2393,6 +2454,7 @@ def main() -> int:
     ap.add_argument("--axis-filter-px", type=int, default=3, help="Pixel distance from axis lines to discard (0 disables).")
     ap.add_argument("--border-filter-px", type=int, default=3, help="Pixel distance from plot border to discard (0 disables).")
     ap.add_argument("--rolling-median-window", type=int, default=5, help="Window size for oscillation-triggered rolling median filter.")
+    ap.add_argument("--label-lookahead-pages", type=int, default=1, help="Pages to scan ahead for labels when current page lacks them.")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
     ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
@@ -2475,6 +2537,7 @@ def main() -> int:
         "axis_filter_px": args.axis_filter_px,
         "border_filter_px": args.border_filter_px,
         "rolling_median_window": args.rolling_median_window,
+        "label_lookahead_pages": args.label_lookahead_pages,
         **source_meta,
         "qualifiers": "s=strong band; w=weak band; sh=shoulder",
         "y_output": "transmittance (percent if calibrated; relative otherwise)",
@@ -2492,6 +2555,7 @@ def main() -> int:
             bool(save_digitized_plots), str(digitized_dir) if save_digitized_plots else "",
             args.verbose, source_meta, args.max_images_per_page,
             args.bin_representative, args.axis_filter_px, args.border_filter_px, args.rolling_median_window,
+            args.label_lookahead_pages,
         ))
 
     entries_rows: List[Dict[str, Any]] = []
