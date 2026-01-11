@@ -634,6 +634,15 @@ fields when they are detected from OCR or source metadata. Optional JCAMP
 headers are emitted only when non-empty values are available, with the
 following metadata mapping:
 
+To stabilize digitized traces that include repeated or jittered x positions,
+the digitizer post-processes the raw curve points by collapsing them into small
+wavenumber bins (using the larger of 0.2 cm⁻¹ or half the median spacing).
+Within each bin it takes the median transmittance and the median x as the bin
+center before proceeding to gap imputation and output. The per-spectrum entry
+metadata records whether points were collapsed (`collapsed_points`) and how
+many bins were retained (`collapse_bins`) so reviewers can trace the
+post-processing step.
+
 When extracting axis calibration, the digitizer detects X-axis breaks by looking
 for discontinuities between OCR’d tick values and by scanning the x-axis band
 for visual break markers such as “//”. When a break is found, the missing range

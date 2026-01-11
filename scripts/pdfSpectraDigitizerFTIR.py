@@ -682,6 +682,66 @@ def despike_vertical_artifacts(df: pd.DataFrame) -> pd.DataFrame:
         out = out.sort_values("wavenumber_cm1").reset_index(drop=True)
         return out
     return df
+
+def collapse_duplicate_wavenumbers(
+    df: pd.DataFrame,
+    *,
+    min_bin_width: float = 0.2,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Bin nearby x positions and take robust summaries to stabilize dense traces."""
+    if df is None or df.empty:
+        return df, {"collapsed_points": False, "collapse_bins": 0, "collapse_bin_width": None}
+    if "wavenumber_cm1" not in df.columns or "transmittance" not in df.columns:
+        return df, {"collapsed_points": False, "collapse_bins": 0, "collapse_bin_width": None}
+
+    df_sorted = df.sort_values("wavenumber_cm1").reset_index(drop=True)
+    x = df_sorted["wavenumber_cm1"].to_numpy(dtype=float)
+    if len(x) < 2:
+        return df_sorted, {"collapsed_points": False, "collapse_bins": len(df_sorted), "collapse_bin_width": None}
+
+    diffs = np.diff(x)
+    pos = diffs[diffs > 0]
+    med_dx = float(np.median(pos)) if pos.size else 0.0
+    bin_width = max(float(min_bin_width), 0.5 * med_dx) if med_dx > 0 else float(min_bin_width)
+    if bin_width <= 0:
+        return df_sorted, {"collapsed_points": False, "collapse_bins": len(df_sorted), "collapse_bin_width": None}
+
+    x0 = float(x[0])
+    bin_id = np.floor((x - x0) / bin_width).astype(int)
+
+    agg_map: Dict[str, Any] = {
+        "wavenumber_cm1": "median",
+        "transmittance": "median",
+    }
+
+    def _mode_int(series: pd.Series) -> int:
+        mode_vals = series.mode()
+        if not mode_vals.empty:
+            return int(mode_vals.iloc[0])
+        return int(series.iloc[0])
+
+    for col in ("segment_id", "component_index"):
+        if col in df_sorted.columns:
+            agg_map[col] = _mode_int
+    if "imputed" in df_sorted.columns:
+        agg_map["imputed"] = "max"
+
+    collapsed = (
+        df_sorted.assign(_bin_id=bin_id)
+        .groupby("_bin_id", sort=True, as_index=False)
+        .agg(agg_map)
+        .drop(columns=["_bin_id"])
+        .sort_values("wavenumber_cm1")
+        .reset_index(drop=True)
+    )
+
+    info = {
+        "collapsed_points": len(collapsed) < len(df_sorted),
+        "collapse_bins": int(len(collapsed)),
+        "collapse_bin_width": float(bin_width),
+    }
+    return collapsed, info
+
 @dataclass
 class CurveComponent:
     comp_id: int
@@ -1975,6 +2035,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 df_curve = pd.concat(dfs, ignore_index=True)
                 df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
+                df_curve, collapse_info = collapse_duplicate_wavenumbers(df_curve)
 
                 # Remove obvious vertical 'infill' artifacts (conservative)
                 df_curve = despike_vertical_artifacts(df_curve)
@@ -2112,6 +2173,9 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "y_axis_type": y_mode,
                     "y_normalization": y_norm_mode,
                     "digitize_status": "ok",
+                    "collapsed_points": bool(collapse_info.get("collapsed_points", False)),
+                    "collapse_bins": int(collapse_info.get("collapse_bins", len(df_curve))),
+                    "collapse_bin_width_cm1": collapse_info.get("collapse_bin_width"),
                     "qc_flag": False,
                     "qc_notes": qc_notes,
                     "image_path": image_path,
@@ -2126,7 +2190,11 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "stage": "digitize",
                     "status": "ok",
                     "y_normalization": y_norm_mode,
-                    "notes": f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode}",
+                    "notes": (
+                        f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode} "
+                        f"collapsed_points={collapse_info.get('collapsed_points', False)} "
+                        f"collapse_bins={collapse_info.get('collapse_bins', len(df_curve))}"
+                    ),
                 })
     except Exception as e:
         log("ERROR", f"Page {pno+1}: exception: {e}")
