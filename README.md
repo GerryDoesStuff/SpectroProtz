@@ -634,13 +634,24 @@ fields when they are detected from OCR or source metadata. Optional JCAMP
 headers are emitted only when non-empty values are available, with the
 following metadata mapping:
 
-- `TITLE`: OCR label (preferred) or entry label/ID.
+- `TITLE`: spectrum name parsed from text above the graph (preferably the line
+  above the molecular formula); falls back to OCR label or entry ID when
+  missing.
+- `DESCRIPTION`: the remainder of a `Description:` line found below the graph
+  (or subsequent wrapped line text if the label is on its own line).
 - `ORIGIN`: source title / origin metadata.
 - `OWNER`: source author / owner metadata.
 - `DATE`: run timestamp or metadata date.
 - `NAMES`: parsed mineral name or OCR label.
 - `CAS REGISTRY NO`: parsed CAS registry value.
 - `MOLFORM`: parsed chemical formula.
+
+To build those fields, the digitizer extracts text in a rectangular band around
+each graph using PyMuPDF `page.get_text(...)` clips, then runs targeted passes
+on the text above the image (to capture the spectrum name near the molecular
+formula) and the text below the image (to capture `Description:` lines). The
+full text block around the graph is still used for peak list parsing, mineral
+name detection, and formula extraction.
 
 The FTIR indexer expects at least the following JCAMP headers to be present so
 it can compute a uniform axis and parse spectra reliably: `JCAMP-DX`,
