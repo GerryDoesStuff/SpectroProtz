@@ -745,6 +745,16 @@ records whether points were collapsed (`collapsed_points`), the bin width
 `rolling_median_applied`) so reviewers can trace the post-processing step, and
 the run logs capture per-spectrum QC stats for axis/border removals and bin
 collapses.
+During component selection, the digitizer evaluates the raw pixel y-range for
+each connected curve component before any y normalization. Components whose
+pixel y-span is below a small threshold (currently 8 pixels) are tagged as
+axis/border candidates and excluded from digitization so axis lines or plot
+borders do not yield flat normalized traces. When multiple components remain in
+the plot interior, the selection step prefers components with the largest
+pixel y-range to emphasize full-height spectra over stray fragments. If every
+component is filtered out as an axis/border candidate, the digitizer records a
+diagnostic failure reason and leaves the curve output empty instead of emitting
+a flat-line spectrum.
 
 When extracting axis calibration, the digitizer detects X-axis breaks by
 digitizing the full curve in pixel space, sorting the x positions, and finding
