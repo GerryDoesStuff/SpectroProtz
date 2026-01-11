@@ -27,9 +27,13 @@ into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
 includes Savitzky-Golay smoothing, optional baseline correction, and a
 normalisation pass that scales the working spectrum by its maximum absolute
 value to stabilise fitting. The indexer records the scaling factor and rescales
-all fitted peak amplitudes and areas back into the original absorbance units
-when persisting `peaks` rows, keeping stored intensities consistent across
-multi-peak fits, single-peak fits, and plateau fallbacks.
+all fitted peak areas back into the original absorbance units when persisting
+`peaks` rows. Peak amplitudes stored in the index are taken directly from the
+raw absorbance series (after Y-unit conversion, before smoothing or baseline
+correction) at the fitted center so overlay visuals and lookup scores reflect
+the true absorbance baseline. The fitted-model amplitude is kept alongside each
+fit in memory (under `fit_amplitude`) for QA without mixing normalized fit
+units into the persisted peak amplitude column.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in

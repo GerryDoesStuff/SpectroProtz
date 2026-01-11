@@ -2540,6 +2540,7 @@ def refine_peak_candidates(
     spectrum_deadline = (
         time.monotonic() + fit_timeout_sec if fit_timeout_sec and fit_timeout_sec > 0 else None
     )
+    y_abs_data = np.asarray(y_abs, dtype=float) if y_abs is not None else None
 
     def _remaining_spectrum_time() -> Optional[float]:
         if spectrum_deadline is None:
@@ -2576,6 +2577,25 @@ def refine_peak_candidates(
                     "skipped_due_to_timeout": timeout_skips + spectrum_timeout_skips,
                 }
             )
+
+    def _raw_amplitude(
+        center: float | None,
+        fallback_index: int,
+        fit_amplitude: float,
+    ) -> float:
+        if y_abs_data is None or x.size == 0 or y_abs_data.size != x.size:
+            return float(fit_amplitude)
+        idx = fallback_index
+        if center is not None:
+            try:
+                center_val = float(center)
+            except (TypeError, ValueError):
+                center_val = None
+            if center_val is not None and np.isfinite(center_val):
+                idx = int(np.argmin(np.abs(x - center_val)))
+        if idx < 0 or idx >= y_abs_data.size:
+            return float(fit_amplitude)
+        return float(y_abs_data[idx])
 
     def _shoulder_candidate(candidate: Dict[str, object]) -> bool:
         sources = candidate.get("sources", [])
@@ -2742,8 +2762,16 @@ def refine_peak_candidates(
                         result["polarity"] = int(polarity)
                         result["sources"] = candidate_sources
                         result["normalized"] = True
+                        signed_fit_amplitude = float(result.get("amplitude", 0.0))
+                        raw_amplitude = _raw_amplitude(
+                            result.get("center"),
+                            result["index"],
+                            signed_fit_amplitude,
+                        )
+                        result["fit_amplitude"] = signed_fit_amplitude
+                        result["amplitude"] = raw_amplitude
                         if polarity < 0:
-                            result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
+                            result["fit_amplitude"] = float(result.get("fit_amplitude", 0.0)) * -1
                             result["area"] = float(result.get("area", 0.0)) * -1
                         results.append(result)
                         mark_candidate_processed()
@@ -2854,8 +2882,16 @@ def refine_peak_candidates(
                 result["polarity"] = int(polarity)
                 result["sources"] = list(candidate.get("sources", []))
                 result["normalized"] = fit_used_normalized
+                signed_fit_amplitude = float(result.get("amplitude", 0.0))
+                raw_amplitude = _raw_amplitude(
+                    result.get("center"),
+                    result["index"],
+                    signed_fit_amplitude,
+                )
+                result["fit_amplitude"] = signed_fit_amplitude
+                result["amplitude"] = raw_amplitude
                 if polarity < 0:
-                    result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
+                    result["fit_amplitude"] = float(result.get("fit_amplitude", 0.0)) * -1
                     result["area"] = float(result.get("area", 0.0)) * -1
                 results.append(result)
                 mark_candidate_processed()
@@ -3019,7 +3055,6 @@ def _scale_fit_for_storage(
     amplitude = float(fit.get("amplitude", 0.0))
     area = float(fit.get("area", 0.0))
     if normalized:
-        amplitude *= factor
         area *= factor
     return amplitude, area
 
