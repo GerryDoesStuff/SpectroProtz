@@ -1098,7 +1098,7 @@ def extract_entry_text_near_image(page: fitz.Page, img_rect: fitz.Rect) -> str:
     return "\n".join(texts)
 
 
-def extract_entry_text_around_image(page: fitz.Page, img_rect: fitz.Rect, pad_top: float = 320.0, pad_bottom: float = 420.0) -> str:
+def extract_entry_text_around_image(page: fitz.Page, img_rect: fitz.Rect, pad_top: float = 320.0, pad_bottom: float = 680.0) -> str:
     """
     Extract text around an image using a clip rectangle expanded above/below.
     This is usually better than "near" heuristics for capturing mineral name/formula/peaks.
@@ -1119,7 +1119,7 @@ def extract_entry_text_bands(
     img_rect: fitz.Rect,
     *,
     pad_top: float = 320.0,
-    pad_bottom: float = 420.0,
+    pad_bottom: float = 680.0,
 ) -> Tuple[str, str]:
     """
     Extract text above and below an image using expanded clip rectangles.
@@ -1367,8 +1367,10 @@ def _build_jdx_headers(
         entry_row.get("entry_label"),
         entry_row.get("entry_id"),
     )
+    description = _first_nonempty(entry_row.get("description"), entry_row.get("entry_description"))
     _append_header(lines, "TITLE", title)
     _append_header(lines, "DESCRIPTION", entry_row.get("entry_description"))
+    _append_header(lines, "NOTES", description)
     _append_header(lines, "ORIGIN", _first_nonempty(entry_row.get("source_title"), entry_row.get("origin")))
     _append_header(lines, "OWNER", _first_nonempty(entry_row.get("source_author"), entry_row.get("owner")))
     _append_header(lines, "DATE", _first_nonempty(entry_row.get("date"), entry_row.get("timestamp"), entry_row.get("run_timestamp")))
@@ -1675,6 +1677,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "label_ocr": label_text,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
+                        "description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1770,6 +1773,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "label_ocr": label_text,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
+                        "description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1816,6 +1820,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "label_ocr": label_text,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
+                        "description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1904,6 +1909,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "label_ocr": label_text,
                     "entry_name": entry_name,
                     "entry_description": entry_description,
+                    "description": entry_description,
                     "mineral_name": meta_md.get("mineral_name", ""),
                     "formula": meta_md.get("formula", ""),
                     "entry_text_raw": entry_text,
