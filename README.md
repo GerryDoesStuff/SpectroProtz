@@ -639,6 +639,8 @@ following metadata mapping:
   missing.
 - `DESCRIPTION`: the remainder of a `Description:` line found below the graph
   (or subsequent wrapped line text if the label is on its own line).
+- `NOTES`: repeats the `Description:` text in a JCAMP `##NOTES` header when a
+  non-empty description is detected.
 - `ORIGIN`: source title / origin metadata.
 - `OWNER`: source author / owner metadata.
 - `DATE`: run timestamp or metadata date.
