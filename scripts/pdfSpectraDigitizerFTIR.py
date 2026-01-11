@@ -59,6 +59,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from jdxIndexBuilder import build_xydata_payload
+
 
 EXCEL_MAX_ROWS = 1_048_576  # includes header row
 
@@ -1169,6 +1171,155 @@ def write_single_spectrum_xlsx(
         "QC": qc_df,
     }
     write_excel_with_splitting(out_xlsx, sheets, logger)
+
+def _prepare_jdx_xydata(curve_rows: List[Dict[str, Any]]) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    if not curve_rows:
+        return np.array([]), np.array([]), 0.0, 0.0
+    df = pd.DataFrame(curve_rows)
+    if df.empty or "wavenumber_cm1" not in df.columns or "transmittance" not in df.columns:
+        return np.array([]), np.array([]), 0.0, 0.0
+    df = df.sort_values("wavenumber_cm1").reset_index(drop=True)
+    x = df["wavenumber_cm1"].to_numpy(dtype=float)
+    t = df["transmittance"].to_numpy(dtype=float)
+    finite_mask = np.isfinite(x) & np.isfinite(t)
+    if not np.any(finite_mask):
+        return np.array([]), np.array([]), 0.0, 0.0
+    x = x[finite_mask]
+    t = t[finite_mask]
+    if x.size == 0:
+        return np.array([]), np.array([]), 0.0, 0.0
+    absorbance = transmittance_to_absorbance(t)
+    finite_a = np.isfinite(absorbance)
+    if not np.any(finite_a):
+        return np.array([]), np.array([]), 0.0, 0.0
+    x = x[finite_a]
+    absorbance = absorbance[finite_a]
+    if x.size == 0:
+        return np.array([]), np.array([]), 0.0, 0.0
+    y_min = float(np.min(absorbance))
+    y_max = float(np.max(absorbance))
+    if y_max > y_min:
+        y = (absorbance - y_min) / (y_max - y_min)
+    else:
+        y = np.zeros_like(absorbance)
+    diffs = np.diff(x)
+    diffs = diffs[diffs > 0]
+    deltax = float(np.median(diffs)) if diffs.size else 0.0
+    firstx = float(x[0]) if x.size else 0.0
+    return x, y, firstx, deltax
+
+def _append_header(lines: List[str], key: str, value: Optional[str]) -> None:
+    if value is None:
+        return
+    value_str = str(value).strip()
+    if not value_str:
+        return
+    lines.append(f"##{key}={value_str}")
+
+def _build_jdx_headers(
+    entry_row: Dict[str, Any],
+    *,
+    npoints: int,
+    firstx: float,
+    deltax: float,
+    title_override: Optional[str] = None,
+) -> List[str]:
+    lines = [
+        "##JCAMP-DX=5.01",
+        "##DATA TYPE=FTIR",
+        "##XUNITS=1/CM",
+        "##YUNITS=ABSORBANCE",
+        f"##NPOINTS={npoints}",
+        f"##FIRSTX={firstx:.10g}",
+        f"##DELTAX={deltax:.10g}",
+    ]
+    title = title_override or entry_row.get("label_ocr") or entry_row.get("mineral_name") or entry_row.get("entry_id")
+    _append_header(lines, "TITLE", title)
+    _append_header(lines, "ORIGIN", entry_row.get("source_title"))
+    _append_header(lines, "OWNER", entry_row.get("source_author"))
+    _append_header(lines, "DATE", entry_row.get("date"))
+    names = entry_row.get("mineral_name") or entry_row.get("label_ocr")
+    _append_header(lines, "NAMES", names)
+    _append_header(lines, "CAS REGISTRY NO", entry_row.get("cas_registry_no") or entry_row.get("cas"))
+    _append_header(lines, "MOLFORM", entry_row.get("formula"))
+    return lines
+
+def write_single_spectrum_jdx(
+    out_jdx: Path,
+    entry_row: Dict[str, Any],
+    curve_rows: List[Dict[str, Any]],
+    logger: logging.Logger,
+    *,
+    points_per_line: int = 6,
+) -> bool:
+    x, y, firstx, deltax = _prepare_jdx_xydata(curve_rows)
+    if x.size == 0 or y.size == 0:
+        logger.warning(f"Skipping JDX for {entry_row.get('entry_id', '')}: no finite curve data.")
+        return False
+    headers = _build_jdx_headers(entry_row, npoints=int(x.size), firstx=firstx, deltax=deltax)
+    xydata_payload = build_xydata_payload(x, y, points_per_line=points_per_line)
+    if not xydata_payload:
+        logger.warning(f"Skipping JDX for {entry_row.get('entry_id', '')}: no XYDATA payload.")
+        return False
+    out_jdx.parent.mkdir(parents=True, exist_ok=True)
+    lines = headers + ["##XYDATA=(X++(Y..Y))", xydata_payload, "##END="]
+    out_jdx.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+def write_multi_spectrum_jdx(
+    out_jdx: Path,
+    entries: Dict[str, Dict[str, Any]],
+    curve_by: Dict[str, List[Dict[str, Any]]],
+    logger: logging.Logger,
+    *,
+    points_per_line: int = 6,
+) -> None:
+    spectra: List[Tuple[str, Dict[str, Any], np.ndarray, np.ndarray, float, float]] = []
+    for entry_id, entry_row in entries.items():
+        curve_rows = curve_by.get(entry_id, [])
+        x, y, firstx, deltax = _prepare_jdx_xydata(curve_rows)
+        if x.size == 0 or y.size == 0:
+            logger.warning(f"Skipping master JDX entry {entry_id}: no finite curve data.")
+            continue
+        spectra.append((entry_id, entry_row, x, y, firstx, deltax))
+
+    if not spectra:
+        logger.warning("Skipping master JDX: no spectra with usable curve data.")
+        return
+
+    base_x = spectra[0][2]
+    base_firstx = spectra[0][4]
+    base_deltax = spectra[0][5]
+    for entry_id, _, x, _, _, _ in spectra[1:]:
+        if x.size != base_x.size or not np.allclose(x, base_x, rtol=1e-6, atol=1e-6):
+            logger.warning(f"Skipping master JDX: X-axis mismatch for entry {entry_id}.")
+            return
+
+    blocks: List[str] = []
+    for entry_id, entry_row, x, y, firstx, deltax in spectra:
+        headers = _build_jdx_headers(
+            entry_row,
+            npoints=int(x.size),
+            firstx=firstx,
+            deltax=deltax,
+            title_override=f"{entry_id} {entry_row.get('label_ocr', '')}".strip(),
+        )
+        xydata_payload = build_xydata_payload(x, y, points_per_line=points_per_line)
+        if not xydata_payload:
+            logger.warning(f"Skipping master JDX entry {entry_id}: no XYDATA payload.")
+            continue
+        blocks.extend(headers)
+        blocks.append("##XYDATA=(X++(Y..Y))")
+        blocks.append(xydata_payload)
+        blocks.append("##END=")
+
+    if not blocks:
+        logger.warning("Skipping master JDX: no XYDATA payloads.")
+        return
+
+    out_jdx.parent.mkdir(parents=True, exist_ok=True)
+    out_jdx.write_text("\n".join(blocks) + "\n", encoding="utf-8")
+
 def write_excel_with_splitting(
     out_path: Path,
     sheets: Dict[str, pd.DataFrame],
@@ -1671,6 +1822,9 @@ def main() -> int:
     ap.add_argument("--max-images-per-page", type=int, default=50, help="Safety cap for images per page")
     ap.add_argument("--per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_true", default=True, help="Write one XLSX per spectrum entry_id (default: enabled).")
     ap.add_argument("--no-per-spectrum-xlsx", dest="per_spectrum_xlsx", action="store_false", help="Disable per-spectrum XLSX output.")
+    ap.add_argument("--per-spectrum-jdx", dest="per_spectrum_jdx", action="store_true", default=True, help="Write one JDX per spectrum entry_id (default: enabled).")
+    ap.add_argument("--no-per-spectrum-jdx", dest="per_spectrum_jdx", action="store_false", help="Disable per-spectrum JDX output.")
+    ap.add_argument("--out-jdx", type=str, default=None, help="Output path for a multi-spectrum JDX file (optional).")
     ap.add_argument("--spectrum-outdir", type=str, default=None, help="Directory for per-spectrum XLSX files (default: <out>_spectra_xlsx).")
     ap.add_argument("--no-master-xlsx", action="store_true", help="Do not write the combined master XLSX (only per-spectrum XLSX).")
     ap.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -1723,9 +1877,16 @@ def main() -> int:
         logger.info(f"Saving digitized plots to: {digitized_dir}")
 
     spectrum_outdir = Path(args.spectrum_outdir).expanduser().resolve() if args.spectrum_outdir else base_dir / (out_stem + "_spectra_xlsx")
-    if args.per_spectrum_xlsx:
+    if args.per_spectrum_xlsx or args.per_spectrum_jdx:
         spectrum_outdir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Per-spectrum XLSX output to: {spectrum_outdir}")
+        if args.per_spectrum_xlsx:
+            logger.info(f"Per-spectrum XLSX output to: {spectrum_outdir}")
+        if args.per_spectrum_jdx:
+            logger.info(f"Per-spectrum JDX output to: {spectrum_outdir}")
+
+    out_jdx_path = Path(args.out_jdx).expanduser().resolve() if args.out_jdx else None
+    if out_jdx_path:
+        logger.info(f"Master JDX output to: {out_jdx_path}")
 
     run_info = {
         "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
@@ -1783,7 +1944,7 @@ def main() -> int:
             qc_rows.extend(page_qc)
             curve_rows.extend(page_curve)
 
-            if args.per_spectrum_xlsx:
+            if args.per_spectrum_xlsx or args.per_spectrum_jdx:
                 by_entry: Dict[str, Dict[str, Any]] = {}
                 for er in page_entries:
                     eid = er.get("entry_id", "")
@@ -1805,8 +1966,12 @@ def main() -> int:
                     for eid, er in by_entry.items():
                         label = sanitize_filename(er.get("label_ocr", ""))
                         base = f"{eid}__{label}" if label else eid
-                        out_xlsx = spectrum_outdir / (base + ".xlsx")
-                        write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
+                        if args.per_spectrum_xlsx:
+                            out_xlsx = spectrum_outdir / (base + ".xlsx")
+                            write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
+                        if args.per_spectrum_jdx:
+                            out_jdx = spectrum_outdir / (base + ".jdx")
+                            write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger)
                         written_entry_ids.add(eid)
     else:
         logger.info(f"Running multiprocessing: workers={args.workers} chunksize={args.chunksize}")
@@ -1830,7 +1995,7 @@ def main() -> int:
                 qc_rows.extend(page_qc)
                 curve_rows.extend(page_curve)
 
-                if args.per_spectrum_xlsx:
+                if args.per_spectrum_xlsx or args.per_spectrum_jdx:
                     by_entry: Dict[str, Dict[str, Any]] = {}
                     for er in page_entries:
                         eid = er.get("entry_id", "")
@@ -1852,8 +2017,12 @@ def main() -> int:
                         for eid, er in by_entry.items():
                             label = sanitize_filename(er.get("label_ocr", ""))
                             base = f"{eid}__{label}" if label else eid
-                            out_xlsx = spectrum_outdir / (base + ".xlsx")
-                            write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
+                            if args.per_spectrum_xlsx:
+                                out_xlsx = spectrum_outdir / (base + ".xlsx")
+                                write_single_spectrum_xlsx(out_xlsx, run_df, er, curve_by.get(eid, []), peaks_by.get(eid, []), qc_by.get(eid, []), logger)
+                            if args.per_spectrum_jdx:
+                                out_jdx = spectrum_outdir / (base + ".jdx")
+                                write_single_spectrum_jdx(out_jdx, er, curve_by.get(eid, []), logger)
                             written_entry_ids.add(eid)
 
     entries_df = pd.DataFrame(entries_rows)
@@ -1883,6 +2052,17 @@ def main() -> int:
         write_excel_with_splitting(out_path, sheets, logger)
     else:
         logger.info("Skipping master XLSX (--no-master-xlsx).")
+
+    if out_jdx_path:
+        entries_by_id = {
+            er["entry_id"]: er
+            for er in entries_rows
+            if er.get("entry_id") and er.get("digitize_status") == "ok"
+        }
+        curve_by: Dict[str, List[Dict[str, Any]]] = {}
+        for cr in curve_rows:
+            curve_by.setdefault(cr.get("entry_id", ""), []).append(cr)
+        write_multi_spectrum_jdx(out_jdx_path, entries_by_id, curve_by, logger)
     logger.info("Done.")
     return 0
 
