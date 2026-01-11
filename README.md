@@ -645,20 +645,23 @@ Entries sheet records the number of pages ahead that supplied the labels in
 `label_page_offset` (0 means the label was on the same page as the spectra).
 
 To stabilize digitized traces that include repeated or jittered x positions,
-the digitizer post-processes the raw curve points by collapsing them into small
-wavenumber bins (using the larger of 0.2 cm⁻¹ or half the median spacing).
-Within each bin it picks a representative transmittance (median by default, or
-the top-most pixel when `--bin-representative top` is selected) and keeps the
-median wavenumber as the bin center before proceeding to gap imputation and
-output. Before binning, an optional axis/border filter can discard curve points
-within a few pixels of the plot axes or borders (`--axis-filter-px`,
-`--border-filter-px`) to avoid digitizing axis lines. When the trace shows
-large oscillations, a small-window rolling median filter (configured by
-`--rolling-median-window`) suppresses short spikes without flattening real
-bands. The per-spectrum entry metadata records whether points were collapsed
-(`collapsed_points`), the bin width (`bin_width_cm1`), and which filters ran
-(`axis_filter_applied`, `rolling_median_applied`) so reviewers can trace the
-post-processing step.
+the digitizer concatenates all curve components for a spectrum and then
+de-jitters the raw points by collapsing them into small wavenumber bins. The
+bin tolerance is tied to the data spacing by using the larger of 0.2 cm⁻¹ or
+half the median positive Δx. Within each bin it keeps one representative
+transmittance (median by default, or the top-most pixel when
+`--bin-representative top` is selected) and retains the median wavenumber as
+the bin center before proceeding to gap imputation and output. Before binning,
+an optional axis/border filter can discard curve points within a few pixels of
+the plot axes or borders (`--axis-filter-px`, `--border-filter-px`) to avoid
+digitizing axis lines. When the trace shows large oscillations, a small-window
+rolling median filter (configured by `--rolling-median-window`) suppresses
+short spikes without flattening real bands. The per-spectrum entry metadata
+records whether points were collapsed (`collapsed_points`), the bin width
+(`bin_width_cm1`), and which filters ran (`axis_filter_applied`,
+`rolling_median_applied`) so reviewers can trace the post-processing step, and
+the run logs capture per-spectrum QC stats for axis/border removals and bin
+collapses.
 
 When extracting axis calibration, the digitizer detects X-axis breaks by looking
 for discontinuities between OCR’d tick values and by scanning both the x-axis

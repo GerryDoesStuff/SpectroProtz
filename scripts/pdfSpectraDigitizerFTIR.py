@@ -754,21 +754,41 @@ def collapse_duplicate_wavenumbers(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Bin nearby x positions and take robust summaries to stabilize dense traces."""
     if df is None or df.empty:
-        return df, {"collapsed_points": False, "collapse_bins": 0, "collapse_bin_width": None}
+        return df, {
+            "collapsed_points": False,
+            "collapse_bins": 0,
+            "collapse_bin_width": None,
+            "collapse_removed": 0,
+        }
     if "wavenumber_cm1" not in df.columns or "transmittance" not in df.columns:
-        return df, {"collapsed_points": False, "collapse_bins": 0, "collapse_bin_width": None}
+        return df, {
+            "collapsed_points": False,
+            "collapse_bins": 0,
+            "collapse_bin_width": None,
+            "collapse_removed": 0,
+        }
 
     df_sorted = df.sort_values("wavenumber_cm1").reset_index(drop=True)
     x = df_sorted["wavenumber_cm1"].to_numpy(dtype=float)
     if len(x) < 2:
-        return df_sorted, {"collapsed_points": False, "collapse_bins": len(df_sorted), "collapse_bin_width": None}
+        return df_sorted, {
+            "collapsed_points": False,
+            "collapse_bins": len(df_sorted),
+            "collapse_bin_width": None,
+            "collapse_removed": 0,
+        }
 
     diffs = np.diff(x)
     pos = diffs[diffs > 0]
     med_dx = float(np.median(pos)) if pos.size else 0.0
     bin_width = max(float(min_bin_width), 0.5 * med_dx) if med_dx > 0 else float(min_bin_width)
     if bin_width <= 0:
-        return df_sorted, {"collapsed_points": False, "collapse_bins": len(df_sorted), "collapse_bin_width": None}
+        return df_sorted, {
+            "collapsed_points": False,
+            "collapse_bins": len(df_sorted),
+            "collapse_bin_width": None,
+            "collapse_removed": 0,
+        }
 
     x0 = float(x[0])
     bin_id = np.floor((x - x0) / bin_width).astype(int)
@@ -806,10 +826,12 @@ def collapse_duplicate_wavenumbers(
         collapsed = collapsed.drop(columns=["_top_T"])
     collapsed = collapsed.drop(columns=["_bin_id"]).sort_values("wavenumber_cm1").reset_index(drop=True)
 
+    collapse_removed = int(len(df_sorted) - len(collapsed))
     info = {
         "collapsed_points": len(collapsed) < len(df_sorted),
         "collapse_bins": int(len(collapsed)),
         "collapse_bin_width": float(bin_width),
+        "collapse_removed": collapse_removed,
     }
     return collapsed, info
 
@@ -2234,6 +2256,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 axis_filter_applied = False
                 rolling_median_applied = False
+                axis_removed = 0
+                original_points = len(df_curve)
 
                 if (axis_filter_px > 0) or (border_filter_px > 0):
                     df_curve, axis_info = filter_points_near_axes(
@@ -2244,11 +2268,23 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         axis_px=axis_filter_px,
                     )
                     axis_filter_applied = bool(axis_info.get("axis_filter_applied", False))
+                    axis_removed = int(axis_info.get("axis_filter_removed", 0))
 
                 df_curve, collapse_info = collapse_duplicate_wavenumbers(
                     df_curve,
                     representative=bin_representative,
                 )
+                if original_points > 0:
+                    log(
+                        "INFO",
+                        (
+                            f"Page {pno+1} img {img_idx} spec {s_idx}: de-jitter "
+                            f"axis_removed={axis_removed} "
+                            f"collapse_removed={collapse_info.get('collapse_removed', 0)} "
+                            f"bins={collapse_info.get('collapse_bins', len(df_curve))} "
+                            f"bin_width={collapse_info.get('collapse_bin_width')}"
+                        ),
+                    )
 
                 # Remove obvious vertical 'infill' artifacts (conservative)
                 df_curve = despike_vertical_artifacts(df_curve)
