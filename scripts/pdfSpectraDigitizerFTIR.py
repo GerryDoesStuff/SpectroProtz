@@ -1783,8 +1783,14 @@ def write_single_spectrum_jdx(
 ) -> bool:
     x, y, firstx, deltax = _prepare_jdx_xydata(curve_rows)
     if x.size == 0 or y.size == 0:
-        logger.warning(f"Skipping JDX for {entry_row.get('entry_id', '')}: no finite curve data.")
-        return False
+        headers = _build_jdx_headers(entry_row, npoints=0, firstx=0.0, deltax=0.0)
+        out_jdx.parent.mkdir(parents=True, exist_ok=True)
+        lines = headers + ["##END="]
+        out_jdx.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.warning(
+            f"Wrote empty JDX for {entry_row.get('entry_id', '')}: no finite curve data."
+        )
+        return True
     headers = _build_jdx_headers(entry_row, npoints=int(x.size), firstx=firstx, deltax=deltax)
     xydata_payload = _build_xydata_payload(x, y, points_per_line=points_per_line)
     if not xydata_payload:
@@ -2322,81 +2328,16 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 df_curve = pd.concat(dfs, ignore_index=True)
                 df_curve = df_curve.sort_values("wavenumber_cm1").reset_index(drop=True)
 
-                if y_mode != "calibrated":
-                    if "y_pix" not in df_curve.columns:
-                        qc_notes_parts.append("missing y_pix for global normalization")
-                    else:
-                        y_pix_all = df_curve["y_pix"].to_numpy(dtype=float)
-                        if y_pix_all.size:
-                            y_min = float(np.min(y_pix_all))
-                            y_max = float(np.max(y_pix_all))
-                            if y_max - y_min < 1e-6:
-                                T = np.full_like(y_pix_all, 0.5, dtype=float)
-                            else:
-                                T = 1.0 - (y_pix_all - y_min) / (y_max - y_min)
-                            T = np.clip(T, 1e-6, 1.0)
-                            df_curve["transmittance"] = T
-                            df_curve["absorbance"] = transmittance_to_absorbance(T)
-                        else:
-                            df_curve["transmittance"] = np.array([], dtype=float)
-                            df_curve["absorbance"] = np.array([], dtype=float)
-
                 axis_filter_applied = False
                 rolling_median_applied = False
                 axis_removed = 0
                 original_points = len(df_curve)
+                digitize_no_curve = df_curve.empty
+                collapse_info: Dict[str, Any] = {}
 
-                if (axis_filter_px > 0) or (border_filter_px > 0):
-                    df_curve, axis_info = filter_points_near_axes(
-                        df_curve,
-                        axes=axes,
-                        interior_shape=plot_interior.shape[:2],
-                        border_px=border_filter_px,
-                        axis_px=axis_filter_px,
-                    )
-                    axis_filter_applied = bool(axis_info.get("axis_filter_applied", False))
-                    axis_removed = int(axis_info.get("axis_filter_removed", 0))
-
-                df_curve, collapse_info = collapse_duplicate_wavenumbers(
-                    df_curve,
-                    representative=bin_representative,
-                )
-                if original_points > 0:
-                    log(
-                        "INFO",
-                        (
-                            f"Page {pno+1} img {img_idx} spec {s_idx}: de-jitter "
-                            f"axis_removed={axis_removed} "
-                            f"collapse_removed={collapse_info.get('collapse_removed', 0)} "
-                            f"bins={collapse_info.get('collapse_bins', len(df_curve))} "
-                            f"bin_width={collapse_info.get('collapse_bin_width')}"
-                        ),
-                    )
-
-                # Remove obvious vertical 'infill' artifacts (conservative)
-                df_curve = despike_vertical_artifacts(df_curve)
-
-                df_curve, roll_info = apply_rolling_median_if_oscillatory(
-                    df_curve,
-                    window=rolling_median_window,
-                )
-                rolling_median_applied = bool(roll_info.get("rolling_median_applied", False))
-
-                # Drop pixel coordinates now that post-processing is done.
-                for col in ("x_pix", "y_pix"):
-                    if col in df_curve.columns:
-                        df_curve = df_curve.drop(columns=[col])
-
-                # Reject near-flat traces (common failure: digitizing an axis line instead of a spectrum)
-                try:
-                    y_rng = float(df_curve["transmittance"].max() - df_curve["transmittance"].min())
-                except Exception:
-                    y_rng = 0.0
-                if y_rng < 0.03:
+                if digitize_no_curve:
                     qc_failed = True
-                    qc_notes_parts.append(
-                        f"near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted"
-                    )
+                    qc_notes_parts.append("digitize_failed_no_curve")
                     qc_rows.append({
                         "entry_id": entry_id,
                         "page_number_1based": pno+1,
@@ -2405,48 +2346,131 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "stage": "digitize",
                         "status": "failed",
                         "y_normalization": y_norm_mode,
-                        "notes": (
-                            f"flat_trace y_range={y_rng:.4f} "
-                            f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
-                        ),
+                        "notes": "digitize_failed_no_curve",
                     })
-
-                # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
-                if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
-                    df_curve = impute_gap(df_curve, break_info.gap_lo, break_info.gap_hi)
-
-                # Auto-detect additional large gaps (e.g., split spectra where components were disconnected)
-                xvals = df_curve["wavenumber_cm1"].to_numpy(dtype=float)
-                if len(xvals) > 5:
-                    diffs = np.diff(xvals)
-                    med = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.0
-                    if med > 0:
-                        thr_gap = max(60.0, 12.0 * med)
-                        if med < 5.0:
-                            thr_gap = max(30.0, 8.0 * med)
-                    else:
-                        thr_gap = 120.0
-                    if break_info.marker_present:
-                        if med > 0:
-                            thr_gap = min(thr_gap, max(30.0, 6.0 * med))
+                    page_rejected += 1
+                    page_reasons["digitize_failed_no_curve"] += 1
+                else:
+                    if y_mode != "calibrated":
+                        if "y_pix" not in df_curve.columns:
+                            qc_notes_parts.append("missing y_pix for global normalization")
                         else:
-                            thr_gap = min(thr_gap, 80.0)
+                            y_pix_all = df_curve["y_pix"].to_numpy(dtype=float)
+                            if y_pix_all.size:
+                                y_min = float(np.min(y_pix_all))
+                                y_max = float(np.max(y_pix_all))
+                                if y_max - y_min < 1e-6:
+                                    T = np.full_like(y_pix_all, 0.5, dtype=float)
+                                else:
+                                    T = 1.0 - (y_pix_all - y_min) / (y_max - y_min)
+                                T = np.clip(T, 1e-6, 1.0)
+                                df_curve["transmittance"] = T
+                                df_curve["absorbance"] = transmittance_to_absorbance(T)
+                            else:
+                                df_curve["transmittance"] = np.array([], dtype=float)
+                                df_curve["absorbance"] = np.array([], dtype=float)
 
-                    ranges = merged_component_ranges(df_curve)
-                    gap_count = 0
-                    for ri in range(len(ranges) - 1):
-                        g0 = float(ranges[ri][1])
-                        g1 = float(ranges[ri + 1][0])
-                        if g1 - g0 <= thr_gap:
-                            continue
-                        df_curve = impute_gap(df_curve, g0, g1)
-                        gap_count += 1
-                        if gap_count >= 2:
-                            break
+                    if (axis_filter_px > 0) or (border_filter_px > 0):
+                        df_curve, axis_info = filter_points_near_axes(
+                            df_curve,
+                            axes=axes,
+                            interior_shape=plot_interior.shape[:2],
+                            border_px=border_filter_px,
+                            axis_px=axis_filter_px,
+                        )
+                        axis_filter_applied = bool(axis_info.get("axis_filter_applied", False))
+                        axis_removed = int(axis_info.get("axis_filter_removed", 0))
 
-                # Keep transmittance only (drop absorbance) to match requirement
-                if "absorbance" in df_curve.columns:
-                    df_curve = df_curve.drop(columns=["absorbance"])
+                    df_curve, collapse_info = collapse_duplicate_wavenumbers(
+                        df_curve,
+                        representative=bin_representative,
+                    )
+                    if original_points > 0:
+                        log(
+                            "INFO",
+                            (
+                                f"Page {pno+1} img {img_idx} spec {s_idx}: de-jitter "
+                                f"axis_removed={axis_removed} "
+                                f"collapse_removed={collapse_info.get('collapse_removed', 0)} "
+                                f"bins={collapse_info.get('collapse_bins', len(df_curve))} "
+                                f"bin_width={collapse_info.get('collapse_bin_width')}"
+                            ),
+                        )
+
+                    # Remove obvious vertical 'infill' artifacts (conservative)
+                    df_curve = despike_vertical_artifacts(df_curve)
+
+                    df_curve, roll_info = apply_rolling_median_if_oscillatory(
+                        df_curve,
+                        window=rolling_median_window,
+                    )
+                    rolling_median_applied = bool(roll_info.get("rolling_median_applied", False))
+
+                    # Drop pixel coordinates now that post-processing is done.
+                    for col in ("x_pix", "y_pix"):
+                        if col in df_curve.columns:
+                            df_curve = df_curve.drop(columns=[col])
+
+                    # Reject near-flat traces (common failure: digitizing an axis line instead of a spectrum)
+                    try:
+                        y_rng = float(df_curve["transmittance"].max() - df_curve["transmittance"].min())
+                    except Exception:
+                        y_rng = 0.0
+                    if y_rng < 0.03:
+                        qc_failed = True
+                        qc_notes_parts.append(
+                            f"near-flat trace (y_range={y_rng:.4f}); likely axis/border extracted"
+                        )
+                        qc_rows.append({
+                            "entry_id": entry_id,
+                            "page_number_1based": pno+1,
+                            "image_index": img_idx,
+                            "spectrum_index": s_idx,
+                            "stage": "digitize",
+                            "status": "failed",
+                            "y_normalization": y_norm_mode,
+                            "notes": (
+                                f"flat_trace y_range={y_rng:.4f} "
+                                f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
+                            ),
+                        })
+
+                    # Gap imputation: (a) explicit axis-break gap, (b) any large gap between digitized segments
+                    if break_info.present and break_info.gap_lo is not None and break_info.gap_hi is not None:
+                        df_curve = impute_gap(df_curve, break_info.gap_lo, break_info.gap_hi)
+
+                    # Auto-detect additional large gaps (e.g., split spectra where components were disconnected)
+                    xvals = df_curve["wavenumber_cm1"].to_numpy(dtype=float)
+                    if len(xvals) > 5:
+                        diffs = np.diff(xvals)
+                        med = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.0
+                        if med > 0:
+                            thr_gap = max(60.0, 12.0 * med)
+                            if med < 5.0:
+                                thr_gap = max(30.0, 8.0 * med)
+                        else:
+                            thr_gap = 120.0
+                        if break_info.marker_present:
+                            if med > 0:
+                                thr_gap = min(thr_gap, max(30.0, 6.0 * med))
+                            else:
+                                thr_gap = min(thr_gap, 80.0)
+
+                        ranges = merged_component_ranges(df_curve)
+                        gap_count = 0
+                        for ri in range(len(ranges) - 1):
+                            g0 = float(ranges[ri][1])
+                            g1 = float(ranges[ri + 1][0])
+                            if g1 - g0 <= thr_gap:
+                                continue
+                            df_curve = impute_gap(df_curve, g0, g1)
+                            gap_count += 1
+                            if gap_count >= 2:
+                                break
+
+                    # Keep transmittance only (drop absorbance) to match requirement
+                    if "absorbance" in df_curve.columns:
+                        df_curve = df_curve.drop(columns=["absorbance"])
 
                 # Peaks list from entry text (if present)
                 w_raw, peaks = parse_peak_list(entry_text)
@@ -2525,7 +2549,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "x_orientation": x_orientation,
                     "y_axis_type": y_mode,
                     "y_normalization": y_norm_mode,
-                    "digitize_status": "ok",
+                    "digitize_status": "failed" if digitize_no_curve else "ok",
                     "axis_filter_applied": axis_filter_applied,
                     "rolling_median_applied": rolling_median_applied,
                     "bin_width_cm1": collapse_info.get("collapse_bin_width"),
@@ -2538,22 +2562,23 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "digitized_plot_path": digitized_plot_path,
                     **source_meta,
                 })
-                qc_rows.append({
-                    "entry_id": entry_id,
-                    "page_number_1based": pno+1,
-                    "image_index": img_idx,
-                    "spectrum_index": s_idx,
-                    "stage": "digitize",
-                    "status": "ok",
-                    "y_normalization": y_norm_mode,
-                    "notes": (
-                        f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode} "
-                        f"collapsed_points={collapse_info.get('collapsed_points', False)} "
-                        f"collapse_bins={collapse_info.get('collapse_bins', len(df_curve))} "
-                        f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
-                    ),
-                })
-                page_digitized += 1
+                if not digitize_no_curve:
+                    qc_rows.append({
+                        "entry_id": entry_id,
+                        "page_number_1based": pno+1,
+                        "image_index": img_idx,
+                        "spectrum_index": s_idx,
+                        "stage": "digitize",
+                        "status": "ok",
+                        "y_normalization": y_norm_mode,
+                        "notes": (
+                            f"points={len(df_curve)} components={len(comps_for_label)} y_mode={y_mode} "
+                            f"collapsed_points={collapse_info.get('collapsed_points', False)} "
+                            f"collapse_bins={collapse_info.get('collapse_bins', len(df_curve))} "
+                            f"axis_filter={axis_filter_applied} rolling_median={rolling_median_applied}"
+                        ),
+                    })
+                    page_digitized += 1
     except Exception as e:
         log("ERROR", f"Page {pno+1}: exception: {e}")
         log("ERROR", traceback.format_exc())
