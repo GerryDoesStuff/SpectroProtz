@@ -637,10 +637,17 @@ following metadata mapping:
 To stabilize digitized traces that include repeated or jittered x positions,
 the digitizer post-processes the raw curve points by collapsing them into small
 wavenumber bins (using the larger of 0.2 cm⁻¹ or half the median spacing).
-Within each bin it takes the median transmittance and the median x as the bin
-center before proceeding to gap imputation and output. The per-spectrum entry
-metadata records whether points were collapsed (`collapsed_points`) and how
-many bins were retained (`collapse_bins`) so reviewers can trace the
+Within each bin it picks a representative transmittance (median by default, or
+the top-most pixel when `--bin-representative top` is selected) and keeps the
+median wavenumber as the bin center before proceeding to gap imputation and
+output. Before binning, an optional axis/border filter can discard curve points
+within a few pixels of the plot axes or borders (`--axis-filter-px`,
+`--border-filter-px`) to avoid digitizing axis lines. When the trace shows
+large oscillations, a small-window rolling median filter (configured by
+`--rolling-median-window`) suppresses short spikes without flattening real
+bands. The per-spectrum entry metadata records whether points were collapsed
+(`collapsed_points`), the bin width (`bin_width_cm1`), and which filters ran
+(`axis_filter_applied`, `rolling_median_applied`) so reviewers can trace the
 post-processing step.
 
 When extracting axis calibration, the digitizer detects X-axis breaks by looking
