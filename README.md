@@ -640,6 +640,12 @@ for visual break markers such as “//”. When a break is found, the missing ra
 is interpolated automatically so downstream curve outputs remain continuous
 across the gap.
 
+If no Y-axis tick labels are detected, the digitizer uses the full spectrum’s
+pixel range across all curve components for that spectrum to compute a single
+0–1 normalization (rather than normalizing each component independently). The
+QC sheet records whether Y normalization was `global`, `component`, or
+`calibrated` so downstream review can distinguish the fallback path.
+
 - `TITLE`: spectrum name parsed from text above the graph (preferably the line
   above the molecular formula); falls back to OCR label or entry ID when
   missing.
