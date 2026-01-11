@@ -1012,6 +1012,63 @@ def parse_mineral_metadata(text: str, fallback_name: str = "") -> Dict[str, str]
     if fm:
         out["formula"] = fm.group(0).strip()
     return out
+
+def parse_spectrum_name_from_text(text: str, fallback_name: str = "") -> str:
+    """
+    Extract spectrum name from text above the graph, preferably the line above the formula.
+    """
+    if not text:
+        return (fallback_name or "").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return (fallback_name or "").strip()
+    formula_idx = None
+    for idx, line in enumerate(lines):
+        if FORMULA_RE.search(line.replace("\u2212", "-").replace("\u00b7", "·")):
+            formula_idx = idx
+            break
+    if formula_idx is not None:
+        for j in range(formula_idx - 1, -1, -1):
+            s = lines[j]
+            if not s:
+                continue
+            if s.lower().startswith("fig"):
+                continue
+            if FORMULA_RE.search(s):
+                continue
+            if re.search(r"[A-Za-z]", s):
+                return s
+    for line in lines:
+        if line.lower().startswith("fig"):
+            continue
+        if FORMULA_RE.search(line):
+            continue
+        if re.search(r"[A-Za-z]", line):
+            return line
+    return (fallback_name or "").strip()
+
+def parse_description_from_text(text: str) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*Description\s*:\s*(.*)", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        desc = (m.group(1) or "").strip()
+        if desc:
+            return desc
+        tail: List[str] = []
+        for nxt in lines[i+1:]:
+            if not nxt.strip():
+                break
+            if re.match(r"\s*\w[\w\s]{0,20}:\s*", nxt):
+                break
+            tail.append(nxt.strip())
+            if len(tail) >= 2:
+                break
+        return " ".join(tail).strip()
+    return ""
 def extract_entry_text_near_image(page: fitz.Page, img_rect: fitz.Rect) -> str:
     """
     Heuristic: collect text blocks whose vertical position is near the image.
@@ -1056,6 +1113,30 @@ def extract_entry_text_around_image(page: fitz.Page, img_rect: fitz.Rect, pad_to
     if t:
         return t
     return extract_entry_text_near_image(page, img_rect)
+
+def extract_entry_text_bands(
+    page: fitz.Page,
+    img_rect: fitz.Rect,
+    *,
+    pad_top: float = 320.0,
+    pad_bottom: float = 420.0,
+) -> Tuple[str, str]:
+    """
+    Extract text above and below an image using expanded clip rectangles.
+    Returns (above_text, below_text).
+    """
+    pr = page.rect
+    above = fitz.Rect(pr.x0, max(pr.y0, img_rect.y0 - pad_top), pr.x1, img_rect.y0)
+    below = fitz.Rect(pr.x0, img_rect.y1, pr.x1, min(pr.y1, img_rect.y1 + pad_bottom))
+    try:
+        above_text = (page.get_text("text", clip=above) or "").strip()
+    except Exception:
+        above_text = ""
+    try:
+        below_text = (page.get_text("text", clip=below) or "").strip()
+    except Exception:
+        below_text = ""
+    return above_text, below_text
 def detect_labels_for_components(img_bgr: np.ndarray, comps: List[CurveComponent], axes: PlotAxes) -> Dict[int, str]:
     """
     OCR mineral names written near each curve, assign by nearest line of text.
@@ -1280,12 +1361,14 @@ def _build_jdx_headers(
         f"##DELTAX={deltax:.10g}",
     ]
     title = _first_nonempty(
+        entry_row.get("entry_name"),
         title_override,
         entry_row.get("label_ocr"),
         entry_row.get("entry_label"),
         entry_row.get("entry_id"),
     )
     _append_header(lines, "TITLE", title)
+    _append_header(lines, "DESCRIPTION", entry_row.get("entry_description"))
     _append_header(lines, "ORIGIN", _first_nonempty(entry_row.get("source_title"), entry_row.get("origin")))
     _append_header(lines, "OWNER", _first_nonempty(entry_row.get("source_author"), entry_row.get("owner")))
     _append_header(lines, "DATE", _first_nonempty(entry_row.get("date"), entry_row.get("timestamp"), entry_row.get("run_timestamp")))
@@ -1476,6 +1559,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 continue
             rect = rects[0]
             entry_text = extract_entry_text_around_image(page, rect)
+            entry_text_above, entry_text_below = extract_entry_text_bands(page, rect)
+            entry_description = parse_description_from_text(entry_text_below)
 
             # Render crop with larger asymmetric padding so ticks/axes are included
             clip = _expand_clip_for_axes(page_rect, rect)
@@ -1580,6 +1665,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         continue
                     entry_id = f"p{pno+1:04d}_img{img_idx:02d}_spec{s_idx:02d}"
                     meta_md = parse_mineral_metadata(entry_text, fallback_name=label_text)
+                    entry_name = parse_spectrum_name_from_text(entry_text_above, fallback_name=label_text)
                     entries_rows.append({
                         "entry_id": entry_id,
                         "page_index": pno,
@@ -1587,6 +1673,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "entry_name": entry_name,
+                        "entry_description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1650,6 +1738,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
 
                 entry_id = f"p{pno+1:04d}_img{img_idx:02d}_spec{s_idx:02d}"
                 meta_md = parse_mineral_metadata(entry_text, fallback_name=label_text)
+                entry_name = parse_spectrum_name_from_text(entry_text_above, fallback_name=label_text)
 
                 # Digitize all components for this label (supports split spectra).
                 dfs: List[pd.DataFrame] = []
@@ -1679,6 +1768,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "entry_name": entry_name,
+                        "entry_description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1723,6 +1814,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "image_index": img_idx,
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
+                        "entry_name": entry_name,
+                        "entry_description": entry_description,
                         "mineral_name": meta_md.get("mineral_name", ""),
                         "formula": meta_md.get("formula", ""),
                         "entry_text_raw": entry_text,
@@ -1809,6 +1902,8 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "image_index": img_idx,
                     "spectrum_index": s_idx,
                     "label_ocr": label_text,
+                    "entry_name": entry_name,
+                    "entry_description": entry_description,
                     "mineral_name": meta_md.get("mineral_name", ""),
                     "formula": meta_md.get("formula", ""),
                     "entry_text_raw": entry_text,
