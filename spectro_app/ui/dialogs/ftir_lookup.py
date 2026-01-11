@@ -1090,7 +1090,7 @@ class FtirLookupWindow(QtWidgets.QDialog):
             preview_entry,
             0,
         )
-        x_range: Optional[tuple[float, float]] = None
+        x_range = self._selected_spectra_x_range()
         if self._preview_spectrum_overlay_enabled:
             reference_trace = self._load_meta_json_spectrum(preview_entry)
             if reference_trace is not None:
@@ -1103,9 +1103,10 @@ class FtirLookupWindow(QtWidgets.QDialog):
                     pen=pen,
                     name=preview_entry.spectrum_name,
                 )
-                finite_x = [value for value in x_vals if math.isfinite(value)]
-                if finite_x:
-                    x_range = (min(finite_x), max(finite_x))
+                if x_range is None:
+                    finite_x = [value for value in x_vals if math.isfinite(value)]
+                    if finite_x:
+                        x_range = (min(finite_x), max(finite_x))
         if x_range is None:
             peaks = self._get_cached_peaks(preview_entry.file_id or "")
             if peaks:
@@ -1117,6 +1118,24 @@ class FtirLookupWindow(QtWidgets.QDialog):
         if x_range is not None:
             self._preview_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
         self._update_metadata_panel(preview_entry, count=1)
+
+    def _selected_spectra_x_range(self) -> Optional[tuple[float, float]]:
+        longest_range: Optional[tuple[float, float]] = None
+        longest_span = -1.0
+        longest_points = 0
+        for spectrum in self._selected_spectra:
+            finite_x = [value for value in spectrum.x if math.isfinite(value)]
+            if not finite_x:
+                continue
+            min_x = min(finite_x)
+            max_x = max(finite_x)
+            span = max_x - min_x
+            points = len(finite_x)
+            if span > longest_span or (span == longest_span and points > longest_points):
+                longest_span = span
+                longest_points = points
+                longest_range = (min_x, max_x)
+        return longest_range
 
     def _populate_reference_peaks(self, file_ids: List[str]) -> int:
         missing_ids = [file_id for file_id in file_ids if file_id not in self._reference_peaks_cache]
