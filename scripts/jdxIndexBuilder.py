@@ -481,6 +481,44 @@ def sanitize_xy(x:np.ndarray,y:np.ndarray)->Tuple[np.ndarray,np.ndarray]:
 
     return x_arr,y_arr
 
+
+def build_xydata_payload(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    points_per_line: int = 1,
+) -> str:
+    """Return a JCAMP-style XYDATA payload using (X,Y) or X++(Y..Y) lines."""
+
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    n = min(len(x_arr), len(y_arr))
+    if n == 0:
+        return ""
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.any(mask):
+        return ""
+    x_arr = x_arr[mask]
+    y_arr = y_arr[mask]
+    if x_arr.size == 0:
+        return ""
+
+    step = max(1, int(points_per_line))
+
+    def _fmt(value: float) -> str:
+        return f"{value:.10g}"
+
+    lines: List[str] = []
+    for idx in range(0, len(x_arr), step):
+        start_x = x_arr[idx]
+        y_slice = y_arr[idx : idx + step]
+        parts = [_fmt(start_x)]
+        parts.extend(_fmt(val) for val in y_slice)
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
+
 def _nan_safe(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     if np.all(np.isfinite(values)):
@@ -3182,13 +3220,25 @@ def index_file(
             y_units=headers.get('YUNITS','')
             resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
             fit_errors: List[Dict[str, object]] = []
+            xydata_payload = ""
+            headers_for_meta = headers
+
+            if Y:
+                preview_x, preview_y = sanitize_xy(x, Y[0])
+                if preview_x.size and preview_y.size:
+                    preview_abs = convert_y_for_processing(preview_y, y_units)
+                    xydata_payload = build_xydata_payload(preview_x, preview_abs)
+            if xydata_payload:
+                headers_for_meta = dict(headers)
+                headers_for_meta["XYDATA"] = xydata_payload
+                headers_for_meta["YUNITS"] = "ABSORBANCE"
 
             con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
 
             con.execute('BEGIN TRANSACTION')
             try:
                 set_stage("persist_headers")
-                store_headers(con,file_id,headers)
+                store_headers(con,file_id,headers_for_meta)
                 con.execute('DELETE FROM peaks WHERE file_id=?',[file_id])
 
                 for sid,y in enumerate(Y):
@@ -4098,7 +4148,19 @@ def main():
 
         file_id = file_sha1(path)
         con.execute("DELETE FROM ingest_errors WHERE file_path=?", [path])
-        store_headers(con, file_id, headers)
+        y_units = headers.get("YUNITS", "") if isinstance(headers, dict) else ""
+        headers_for_meta = headers
+        xydata_payload = ""
+        if Y:
+            preview_x, preview_y = sanitize_xy(x, Y[0])
+            if preview_x.size and preview_y.size:
+                preview_abs = convert_y_for_processing(preview_y, y_units)
+                xydata_payload = build_xydata_payload(preview_x, preview_abs)
+        if xydata_payload and isinstance(headers, dict):
+            headers_for_meta = dict(headers)
+            headers_for_meta["XYDATA"] = xydata_payload
+            headers_for_meta["YUNITS"] = "ABSORBANCE"
+        store_headers(con, file_id, headers_for_meta)
         con.execute("DELETE FROM peaks WHERE file_id=?", [file_id])
 
         max_points = 0

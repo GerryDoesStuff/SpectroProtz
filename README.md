@@ -270,9 +270,12 @@ Right-clicking any reference in the left or right sidebar previews that
 reference’s normalized spectrum and peak sticks in the bottom plot immediately,
 showing a single reference trace with its normalized peak markers and metadata
 fields. The preview plot can also draw the full reference spectrum stored in the
-`meta_json` payload (parsed from JCAMP `XYDATA` in `(X++(Y..Y))` form) as a smooth
-overlay line, and the **Show reference spectrum overlay** checkbox lets you
-toggle that line on or off so you can focus on peak sticks when needed.
+`meta_json` payload as a smooth overlay line; the indexer stores a single
+`XYDATA` entry in that payload using absorbance-converted values (saved as
+simple `(X,Y)` lines) derived from the first spectrum in the JCAMP file so the
+preview overlay matches the same spectrum used for lookup previews. The
+**Show reference spectrum overlay** checkbox lets you toggle that line on or off
+so you can focus on peak sticks when needed.
 Selection changes in either sidebar update the same preview, and the
 metadata panel beside the chart summarizes the selected reference’s title,
 molform (formula), CAS, origin, owner, date, data type, state, class, and related
