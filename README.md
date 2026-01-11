@@ -238,7 +238,9 @@ peak bounds when no spectrum trace is plotted), and disables zooming/panning so
 the preview stays consistent as you browse entries.
 The comparison plot is likewise non-interactive (no zoom/pan and no ViewBox
 context menu) to keep the overlays fixed while still allowing the live cursor
-readout to report the current wavenumber/intensity.
+readout to report the current wavenumber/intensity, and it disables auto-range
+so axes remain locked to the selected spectra span (or the reference peak
+range) with intensity clamped to the 0–1 normalized scale.
 Both lookup plots now include a live cursor readout anchored to the ViewBox
 top-right corner; moving the mouse inside the plot’s ViewBox shows the current
 wavenumber and normalized intensity, and the readout hides as soon as the
