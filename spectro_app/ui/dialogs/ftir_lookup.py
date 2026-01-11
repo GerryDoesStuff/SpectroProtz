@@ -385,7 +385,9 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._comparison_plot_widget.setTitle("Selected reference peaks")
         # Keep the comparison plot fixed while still allowing hover readouts.
         self._comparison_plot_widget.setMouseEnabled(x=False, y=False)
+        self._comparison_plot_widget.getPlotItem().vb.setMouseEnabled(x=False, y=False)
         self._comparison_plot_widget.setMenuEnabled(False)
+        self._comparison_plot_widget.enableAutoRange(x=False, y=False)
         self._comparison_cursor_label = pg.TextItem(color="#222", anchor=(1, 0))
         self._comparison_cursor_label.setZValue(100)
         self._comparison_cursor_label.hide()
@@ -1031,14 +1033,29 @@ class FtirLookupWindow(QtWidgets.QDialog):
             if has_selected_spectra:
                 title = "Selected spectra"
             self._comparison_plot_widget.setTitle(title)
+            if has_selected_spectra:
+                x_range = self._selected_spectra_x_range()
+                if x_range is not None:
+                    self._comparison_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
+                self._comparison_plot_widget.setYRange(0, 1, padding=0)
             return
         if self._active_index_path is None:
             self._comparison_plot_widget.setTitle("Select an index database to plot peaks")
+            if has_selected_spectra:
+                x_range = self._selected_spectra_x_range()
+                if x_range is not None:
+                    self._comparison_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
+                self._comparison_plot_widget.setYRange(0, 1, padding=0)
             return
 
         file_ids = [entry.file_id for entry in plot_entries if entry.file_id]
         if not file_ids:
             self._comparison_plot_widget.setTitle("Selected reference peaks")
+            if has_selected_spectra:
+                x_range = self._selected_spectra_x_range()
+                if x_range is not None:
+                    self._comparison_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
+                self._comparison_plot_widget.setYRange(0, 1, padding=0)
             return
 
         malformed_rows = self._populate_reference_peaks(file_ids)
@@ -1058,6 +1075,21 @@ class FtirLookupWindow(QtWidgets.QDialog):
             self._comparison_plot_widget.setTitle("Selected spectra + reference traces")
         else:
             self._comparison_plot_widget.setTitle("Selected reference traces")
+        x_range = self._selected_spectra_x_range()
+        if x_range is None:
+            centers: List[float] = []
+            for entry in plot_entries:
+                if not entry.file_id:
+                    continue
+                peaks = self._get_cached_peaks(entry.file_id)
+                centers.extend(
+                    center for center, _amplitude in peaks if math.isfinite(center)
+                )
+            if centers:
+                x_range = (min(centers), max(centers))
+        if x_range is not None:
+            self._comparison_plot_widget.setXRange(x_range[0], x_range[1], padding=0)
+        self._comparison_plot_widget.setYRange(0, 1, padding=0)
 
     def _refresh_preview_plot(self) -> None:
         self._preview_plot_widget.clear()
