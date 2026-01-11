@@ -202,7 +202,9 @@ results sidebar. The sidebar now includes a compact **Auto-search from preview
 peaks** panel alongside the results list, keeping the preview-driven search
 controls and status together with the lookup matches. The metadata panel now
 sits in the former auto-search area above the plots so selected-reference
-details remain visible even before a match is chosen. The index selector is
+details remain visible even before a match is chosen, and the lookup window
+instantiates the metadata widget alongside the top controls so the same panel
+is shared for both layout placement and live metadata updates. The index selector is
 backed by app-level settings, so recent index paths and the last-used index are
 shared across sessions and other FTIR tools (such as the indexer) that update
 the same settings store. Selecting an index immediately validates the DuckDB

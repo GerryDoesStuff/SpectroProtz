@@ -377,6 +377,17 @@ class FtirLookupWindow(QtWidgets.QDialog):
         form.addRow("Index DB", self._index_selector)
         form.addRow("Manual search", search_row)
 
+        self._metadata_label = QtWidgets.QLabel("No reference selected.")
+        self._metadata_label.setWordWrap(True)
+        self._metadata_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._metadata_label.setStyleSheet("color: #444;")
+        metadata_box = QtWidgets.QGroupBox("Reference metadata")
+        metadata_box.setMinimumWidth(240)
+        metadata_layout = QtWidgets.QVBoxLayout(metadata_box)
+        metadata_layout.addWidget(self._metadata_label)
+
         top_controls = QtWidgets.QHBoxLayout()
         top_controls.addLayout(form, 3)
         top_controls.addWidget(metadata_box, 2)
@@ -414,17 +425,6 @@ class FtirLookupWindow(QtWidgets.QDialog):
         self._preview_plot_widget.scene().sigMouseMoved.connect(
             self._on_preview_plot_mouse_moved
         )
-        self._metadata_label = QtWidgets.QLabel("No reference selected.")
-        self._metadata_label.setWordWrap(True)
-        self._metadata_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._metadata_label.setStyleSheet("color: #444;")
-        metadata_box = QtWidgets.QGroupBox("Reference metadata")
-        metadata_box.setMinimumWidth(240)
-        metadata_layout = QtWidgets.QVBoxLayout(metadata_box)
-        metadata_layout.addWidget(self._metadata_label)
-
         comparison_container = QtWidgets.QWidget()
         comparison_layout = QtWidgets.QVBoxLayout(comparison_container)
         comparison_layout.setContentsMargins(0, 0, 0, 0)
