@@ -439,8 +439,8 @@ class FtirLookupWindow(QtWidgets.QDialog):
         plot_container = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_layout.setContentsMargins(0, 0, 0, 0)
-        plot_layout.addWidget(comparison_container, 2)
         plot_layout.addWidget(preview_container, 1)
+        plot_layout.addWidget(comparison_container, 2)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         content_splitter.addWidget(left_container)

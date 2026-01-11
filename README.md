@@ -220,15 +220,15 @@ from the selected spectrum with the widest wavenumber span (ties break by using
 the spectrum with more data points). When no selected spectra are available,
 the preview range falls back to the full span of the previewed reference
 spectrum, and only uses peak centers as a last resort if no trace is loaded.
-The list supports multi-selection, selection-driven previewing of the bottom
+The list supports multi-selection, selection-driven previewing of the top
 reference plot (with its metadata panel aligned beside the preview), and
 paginates through large result sets with a results cap so the sidebar remains
-responsive when a search returns many references. The top comparison plot
+responsive when a search returns many references. The bottom comparison plot
 stays focused on the selected spectra plus any references that you move into
 the right-hand plotting sidebar, so you can compare overlays without losing
-the single-reference preview context below. The layout is a three-column split
-with the left results sidebar, the dual-plot center column (comparison on top,
-single-reference preview + metadata below), and the right selected-references
+the single-reference preview context above. The layout is a three-column split
+with the left results sidebar, the dual-plot center column (single-reference
+preview + metadata on top, comparison below), and the right selected-references
 sidebar flanking the plots. Use the add/remove buttons anchored below each
 sidebar list, the left sidebar context menu, or a double-click on a match to
 move reference spectra into the right-hand plotting sidebar, which preserves
