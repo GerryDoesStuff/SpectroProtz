@@ -2016,9 +2016,10 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                 log("ERROR", f"Page {pno+1} img {img_idx}: empty plot interior crop.")
                 continue
 
-            # Label-driven demarcation: only extract spectra that have OCR-detectable labels.
+            # Label-driven demarcation: use OCR labels when available, otherwise extract unlabeled components.
             label_lines = detect_label_lines(bgr, axes)
             label_page_offset = 0
+            label_missing = False
             if not label_lines:
                 label_lines, label_page_offset = _find_lookahead_labels()
                 if label_lines:
@@ -2027,54 +2028,15 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         f"Page {pno+1} img {img_idx}: no labels detected; using labels from page {pno+1+label_page_offset}.",
                     )
             if not label_lines:
-                log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; skipping extraction per rule.")
-                continue
+                label_missing = True
+                log("WARN", f"Page {pno+1} img {img_idx}: no labels detected; extracting unlabeled components.")
 
             plot_bin = preprocess_for_curve(plot_interior)
             skel = skeletonize((plot_bin > 0)).astype(np.uint8) * 255
-            bands = label_bands_from_lines(label_lines, axes)
-
             # For each label band, collect 1..N curve components (to support split spectra).
             # Each item: (band_index, label_line, [components])
             band_components: List[Tuple[int, LabelLine, List[CurveComponent]]] = []
-            for bi, (L, (y0b, y1b)) in enumerate(bands):
-                band_skel = skel[y0b:y1b, :]
-                if band_skel.size == 0:
-                    continue
-                min_area = max(60, int(0.0009 * band_skel.shape[0] * max(1, band_skel.shape[1])))
-
-                comps_b = extract_curve_components(band_skel, min_area=min_area)
-                if not comps_b:
-                    band_bin = plot_bin[y0b:y1b, :]
-                    comps_b = extract_curve_components(band_bin, min_area=min_area)
-                if not comps_b:
-                    continue
-
-                # Filter out axis-like components and keep top few by (x_span, area)
-                h_band, w_band = band_skel.shape[:2]
-                filtered: List[Tuple[float, CurveComponent]] = []
-                for c in comps_b:
-                    if component_is_axis_like(c, (h_band, w_band)):
-                        continue
-                    ys = c.pixels[:, 0]; xs = c.pixels[:, 1]
-                    x_span = float(xs.max() - xs.min()) if xs.size else 0.0
-                    score = x_span * 10.0 + float(c.pixels.shape[0])
-                    filtered.append((score, c))
-                if not filtered:
-                    continue
-                filtered.sort(key=lambda t: t[0], reverse=True)
-                keep = [c for _, c in filtered[:3]]
-
-                shifted: List[CurveComponent] = []
-                for k, c0 in enumerate(keep):
-                    pix = c0.pixels.copy()
-                    pix[:, 0] += y0b
-                    bbox = (c0.bbox[0], c0.bbox[1] + y0b, c0.bbox[2], c0.bbox[3] + y0b)
-                    shifted.append(CurveComponent(comp_id=(bi + 1) * 10 + k, bbox=bbox, pixels=pix))
-                band_components.append((bi, L, shifted))
-
-            if not band_components:
-                log("WARN", f"Page {pno+1} img {img_idx}: label band empty \u2192 full scan fallback.")
+            if label_missing:
                 min_area_full = max(80, int(0.0009 * skel.shape[0] * max(1, skel.shape[1])))
                 comps_full = extract_curve_components(skel, min_area=min_area_full)
                 if not comps_full:
@@ -2084,35 +2046,97 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     if component_is_axis_like(c, skel.shape[:2]):
                         continue
                     filtered_full.append(c)
-                if filtered_full:
-                    comp_to_label: Dict[int, List[CurveComponent]] = {}
-                    for c in filtered_full:
-                        comp_cy = axes.y0 + (c.bbox[1] + c.bbox[3]) / 2
-                        best_idx = min(range(len(label_lines)), key=lambda idx: abs(label_lines[idx].cy - comp_cy))
-                        comp_to_label.setdefault(best_idx, []).append(c)
-                    for bi, L in enumerate(label_lines):
-                        comps_for_label = comp_to_label.get(bi, [])
-                        if not comps_for_label:
-                            continue
-                        scored = []
-                        for c in comps_for_label:
-                            ys = c.pixels[:, 0]
-                            xs = c.pixels[:, 1]
-                            x_span = float(xs.max() - xs.min()) if xs.size else 0.0
-                            score = x_span * 10.0 + float(c.pixels.shape[0])
-                            scored.append((score, c))
-                        scored.sort(key=lambda t: t[0], reverse=True)
-                        keep = [c for _, c in scored[:3]]
-                        band_components.append((bi, L, keep))
-                if not band_components:
-                    log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
+                if not filtered_full:
+                    log("WARN", f"Page {pno+1} img {img_idx}: no curve components found in unlabeled plot.")
                     continue
+                filtered_full.sort(key=lambda c: (c.bbox[1] + c.bbox[3]) / 2)
+                for bi, c in enumerate(filtered_full):
+                    comp_cy = axes.y0 + (c.bbox[1] + c.bbox[3]) / 2
+                    placeholder = f"Unknown_{bi+1:02d}"
+                    label_line = LabelLine(
+                        text=placeholder,
+                        bbox=(axes.x1, int(comp_cy), axes.x1, int(comp_cy)),
+                        cy=comp_cy,
+                    )
+                    band_components.append((bi, label_line, [c]))
+            else:
+                bands = label_bands_from_lines(label_lines, axes)
+                for bi, (L, (y0b, y1b)) in enumerate(bands):
+                    band_skel = skel[y0b:y1b, :]
+                    if band_skel.size == 0:
+                        continue
+                    min_area = max(60, int(0.0009 * band_skel.shape[0] * max(1, band_skel.shape[1])))
+
+                    comps_b = extract_curve_components(band_skel, min_area=min_area)
+                    if not comps_b:
+                        band_bin = plot_bin[y0b:y1b, :]
+                        comps_b = extract_curve_components(band_bin, min_area=min_area)
+                    if not comps_b:
+                        continue
+
+                    # Filter out axis-like components and keep top few by (x_span, area)
+                    h_band, w_band = band_skel.shape[:2]
+                    filtered: List[Tuple[float, CurveComponent]] = []
+                    for c in comps_b:
+                        if component_is_axis_like(c, (h_band, w_band)):
+                            continue
+                        ys = c.pixels[:, 0]; xs = c.pixels[:, 1]
+                        x_span = float(xs.max() - xs.min()) if xs.size else 0.0
+                        score = x_span * 10.0 + float(c.pixels.shape[0])
+                        filtered.append((score, c))
+                    if not filtered:
+                        continue
+                    filtered.sort(key=lambda t: t[0], reverse=True)
+                    keep = [c for _, c in filtered[:3]]
+
+                    shifted: List[CurveComponent] = []
+                    for k, c0 in enumerate(keep):
+                        pix = c0.pixels.copy()
+                        pix[:, 0] += y0b
+                        bbox = (c0.bbox[0], c0.bbox[1] + y0b, c0.bbox[2], c0.bbox[3] + y0b)
+                        shifted.append(CurveComponent(comp_id=(bi + 1) * 10 + k, bbox=bbox, pixels=pix))
+                    band_components.append((bi, L, shifted))
+
+                if not band_components:
+                    log("WARN", f"Page {pno+1} img {img_idx}: label band empty \u2192 full scan fallback.")
+                    min_area_full = max(80, int(0.0009 * skel.shape[0] * max(1, skel.shape[1])))
+                    comps_full = extract_curve_components(skel, min_area=min_area_full)
+                    if not comps_full:
+                        comps_full = extract_curve_components(plot_bin, min_area=min_area_full)
+                    filtered_full: List[CurveComponent] = []
+                    for c in comps_full:
+                        if component_is_axis_like(c, skel.shape[:2]):
+                            continue
+                        filtered_full.append(c)
+                    if filtered_full:
+                        comp_to_label: Dict[int, List[CurveComponent]] = {}
+                        for c in filtered_full:
+                            comp_cy = axes.y0 + (c.bbox[1] + c.bbox[3]) / 2
+                            best_idx = min(range(len(label_lines)), key=lambda idx: abs(label_lines[idx].cy - comp_cy))
+                            comp_to_label.setdefault(best_idx, []).append(c)
+                        for bi, L in enumerate(label_lines):
+                            comps_for_label = comp_to_label.get(bi, [])
+                            if not comps_for_label:
+                                continue
+                            scored = []
+                            for c in comps_for_label:
+                                ys = c.pixels[:, 0]
+                                xs = c.pixels[:, 1]
+                                x_span = float(xs.max() - xs.min()) if xs.size else 0.0
+                                score = x_span * 10.0 + float(c.pixels.shape[0])
+                                scored.append((score, c))
+                            scored.sort(key=lambda t: t[0], reverse=True)
+                            keep = [c for _, c in scored[:3]]
+                            band_components.append((bi, L, keep))
+                    if not band_components:
+                        log("WARN", f"Page {pno+1} img {img_idx}: labels detected but no curve components found after fallback.")
+                        continue
 
             # OCR ticks (v1 behavior)
             x_ticks, y_ticks, tick_meta = extract_ticks(bgr, axes, setup_logger(verbose))
             if len(x_ticks) < 2:
                 log("ERROR", f"Page {pno+1} img {img_idx}: insufficient x ticks ({len(x_ticks)}).")
-                # record failure rows for each labeled band (no-label => no extraction)
+                # record failure rows for each band (including unlabeled fallbacks)
                 for s_idx, (bi, L, _) in enumerate(band_components):
                     label_text = (L.text.strip() if L is not None else "").strip()
                     if not label_text:
@@ -2129,6 +2153,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
                         "label_page_offset": label_page_offset,
+                        "label_missing": label_missing,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2227,6 +2252,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
                         "label_page_offset": label_page_offset,
+                        "label_missing": label_missing,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2340,6 +2366,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                         "spectrum_index": s_idx,
                         "label_ocr": label_text,
                         "label_page_offset": label_page_offset,
+                        "label_missing": label_missing,
                         "entry_name": entry_name,
                         "entry_description": entry_description,
                         "description": entry_description,
@@ -2454,6 +2481,7 @@ def _process_page_worker(args: Tuple) -> Dict[str, Any]:
                     "spectrum_index": s_idx,
                     "label_ocr": label_text,
                     "label_page_offset": label_page_offset,
+                    "label_missing": label_missing,
                     "entry_name": entry_name,
                     "entry_description": entry_description,
                     "description": entry_description,

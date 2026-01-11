@@ -642,13 +642,16 @@ they are detected from OCR or source metadata. Optional JCAMP headers are
 emitted only when non-empty values are available, with the following metadata
 mapping:
 
-Spectra are extracted only when plot labels can be detected. When a plot page
-contains spectra without labels, the digitizer can OCR the next page (or more)
-to recover the label text; configure this behavior with
+Spectra are extracted even when plot labels are missing. The digitizer first
+tries OCR labels on the same page, then optionally OCRs the next page (or more)
+to recover label text; configure this behavior with
 `--label-lookahead-pages` (default: 1). When lookahead labels are applied, the
 Entries sheet records the number of pages ahead that supplied the labels in
 `label_page_offset` (0 means the label was on the same page as the spectra).
-If labels are found but the label bands yield no curve components, the
+If no labels are detected after lookahead, the digitizer scans the full plot
+interior, assigns placeholder labels like `Unknown_01`, and records
+`label_missing = true` in the Entries sheet so unlabeled spectra are easy to
+review later. If labels are found but the label bands yield no curve components, the
 digitizer falls back to scanning the full plot interior for curve components,
 then assigns the closest component(s) to each label based on vertical
 proximity between the label’s y position and the component bounding-box
