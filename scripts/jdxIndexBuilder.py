@@ -950,7 +950,7 @@ def preprocess_with_noise(
     baseline_ranges: str | None = None,
     step_registry: Optional[List[Dict[str, object]]] = None,
     step_metadata: Optional[Dict[str, object]] = None,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, float]:
     y2 = np.asarray(y, dtype=float).copy()
     n = len(y2)
     noise_sigma = estimate_noise_sigma(x, y2, sg_win, sg_poly, sg_window_cm)
@@ -986,6 +986,7 @@ def preprocess_with_noise(
     _append_processing_step(step_registry, "baseline_estimate", x, baseline, step_metadata)
     _append_processing_step(step_registry, "baseline_corrected", x, y2, step_metadata)
     m = np.max(np.abs(y2))
+    normalization_factor = float(m) if np.isfinite(m) and m > 0 else 1.0
     if m > 0:
         y2 /= m
         if np.isfinite(noise_sigma):
@@ -996,9 +997,9 @@ def preprocess_with_noise(
         x,
         y2,
         step_metadata,
-        extra_metadata={"normalization_factor": float(m) if np.isfinite(m) else float("nan")},
+        extra_metadata={"normalization_factor": normalization_factor},
     )
-    return y2, noise_sigma
+    return y2, noise_sigma, normalization_factor
 
 
 def preprocess(
@@ -1015,7 +1016,7 @@ def preprocess(
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
 ) -> np.ndarray:
-    y2, _ = preprocess_with_noise(
+    y2, _, _ = preprocess_with_noise(
         x,
         y,
         sg_win,
@@ -2740,6 +2741,7 @@ def refine_peak_candidates(
                         result["index"] = int(candidate["index"])
                         result["polarity"] = int(polarity)
                         result["sources"] = candidate_sources
+                        result["normalized"] = True
                         if polarity < 0:
                             result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
                             result["area"] = float(result.get("area", 0.0)) * -1
@@ -2767,6 +2769,7 @@ def refine_peak_candidates(
                     center_bounds = (min(left_x, right_x), max(left_x, right_x))
                     x0_guess = (center_bounds[0] + center_bounds[1]) / 2.0
                 fit_source = fit_y_abs if use_absorbance else fit_y
+                fit_used_normalized = not use_absorbance
                 fit = None
                 fit_timed_out = False
                 try:
@@ -2850,6 +2853,7 @@ def refine_peak_candidates(
                 result["index"] = int(candidate["index"])
                 result["polarity"] = int(polarity)
                 result["sources"] = list(candidate.get("sources", []))
+                result["normalized"] = fit_used_normalized
                 if polarity < 0:
                     result["amplitude"] = float(result.get("amplitude", 0.0)) * -1
                     result["area"] = float(result.get("area", 0.0)) * -1
@@ -3002,6 +3006,22 @@ def detect_and_refine_with_retries(
         if len(refined) >= min_peaks:
             break
     return peak_candidates, refined, skipped_due_to_timeout, attempt_used
+
+
+def _scale_fit_for_storage(
+    fit: Dict[str, object],
+    normalization_factor: float,
+) -> Tuple[float, float]:
+    normalized = bool(fit.get("normalized", True))
+    factor = float(normalization_factor) if normalization_factor is not None else 1.0
+    if not np.isfinite(factor) or factor <= 0:
+        factor = 1.0
+    amplitude = float(fit.get("amplitude", 0.0))
+    area = float(fit.get("area", 0.0))
+    if normalized:
+        amplitude *= factor
+        area *= factor
+    return amplitude, area
 
 def init_db(outdir: str, db_path: Optional[str] = None):
     os.makedirs(outdir, exist_ok=True)
@@ -3292,7 +3312,7 @@ def index_file(
                         y_for_processing,
                         step_metadata,
                     )
-                    y_proc, noise_sigma = preprocess_with_noise(
+                    y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
                         x_clean,
                         y_for_processing,
                         args.sg_win,
@@ -3388,6 +3408,7 @@ def index_file(
                     set_stage(f"insert_peaks_spectrum_{sid}")
                     pid = 0
                     for fit in refined:
+                        amplitude, area = _scale_fit_for_storage(fit, normalization_factor)
                         con.execute(
                             'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
                             [
@@ -3397,8 +3418,8 @@ def index_file(
                                 int(fit.get("polarity", 1)),
                                 fit["center"],
                                 fit["fwhm"],
-                                fit["amplitude"],
-                                fit["area"],
+                                amplitude,
+                                area,
                                 fit["r2"],
                             ],
                         )
@@ -3646,7 +3667,7 @@ def process_spectrum_task(
             y_for_processing,
             step_metadata,
         )
-    y_proc, noise_sigma = preprocess_with_noise(
+    y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
         x,
         y_for_processing,
         args.sg_win,
@@ -3724,6 +3745,7 @@ def process_spectrum_task(
         )
     peaks_rows: List[Tuple[object, ...]] = []
     for pid, fit in enumerate(refined):
+        amplitude, area = _scale_fit_for_storage(fit, normalization_factor)
         peaks_rows.append(
             (
                 file_id,
@@ -3732,8 +3754,8 @@ def process_spectrum_task(
                 int(fit.get("polarity", 1)),
                 fit["center"],
                 fit["fwhm"],
-                fit["amplitude"],
-                fit["area"],
+                amplitude,
+                area,
                 fit["r2"],
             )
         )

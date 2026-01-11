@@ -20,6 +20,17 @@ When closing the application, SpectroProtz warns if a processing job is still
 running, cancels the job on request, and waits for background thread-pool work
 to finish before the UI is destroyed to avoid leaving silent work in flight.
 
+## FTIR indexer pipeline
+The FTIR indexer script (`scripts/jdxIndexBuilder.py`) ingests JCAMP-DX files,
+normalises spectra for peak detection, and writes peak fits plus header metadata
+into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
+includes Savitzky-Golay smoothing, optional baseline correction, and a
+normalisation pass that scales the working spectrum by its maximum absolute
+value to stabilise fitting. The indexer records the scaling factor and rescales
+all fitted peak amplitudes and areas back into the original absorbance units
+when persisting `peaks` rows, keeping stored intensities consistent across
+multi-peak fits, single-peak fits, and plateau fallbacks.
+
 ## Prerequisites
 Ensure your environment matches the expectations declared in
 [`pyproject.toml`](pyproject.toml):
