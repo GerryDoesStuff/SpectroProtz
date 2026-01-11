@@ -19,6 +19,7 @@ _PEAK_RE = re.compile(
 
 _FILTER_RE = re.compile(r"^(?P<key>[A-Za-z][\w_-]*)\s*[:=]\s*(?P<value>.+)$")
 _FORMULA_RE = re.compile(r"^(?:[A-Z][a-z]?\d*)+$")
+_CAS_RE = re.compile(r"^\d{2,7}-\d{2}-\d$")
 
 _ALIASES: Dict[str, str] = {
     "id": "file_id",
@@ -114,6 +115,10 @@ def parse_lookup_text(
 
         if _FORMULA_RE.match(token):
             filters.setdefault("molform", []).append(token)
+            continue
+
+        if _CAS_RE.match(token):
+            filters.setdefault("cas", []).append(token)
             continue
 
         filters.setdefault("title", []).append(token)

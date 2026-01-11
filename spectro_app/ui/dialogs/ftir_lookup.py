@@ -191,10 +191,11 @@ class FtirLookupWindow(QtWidgets.QDialog):
 
         self._search_edit = QtWidgets.QLineEdit()
         self._search_edit.setPlaceholderText(
-            "e.g. 1720±5 1600±8 title:acetone C6H6"
+            "e.g. 1720±5 1600±8 title:acetone C6H6 64-17-5"
         )
         self._search_edit.setToolTip(
-            "Enter peak positions and metadata filters (formula tokens like C6H6 map to molform)."
+            "Enter peak positions and metadata filters (formula tokens like C6H6 map to molform, "
+            "CAS tokens like 64-17-5 map to cas)."
         )
         self._search_edit.textChanged.connect(self._on_search_text_changed)
         self._search_button = QtWidgets.QPushButton("Search")

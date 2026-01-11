@@ -167,13 +167,15 @@ metadata filters plus any requested peak ranges. Empty or whitespace-only
 searches are handled defensively by returning queries that produce no rows,
 ensuring the lookup flow never issues an unbounded query by default.
 Tokens that are not peaks or explicit filters are routed either to the
-`molform` or `title` metadata filters. Unkeyed formula tokens that match
+`molform`, `cas`, or `title` metadata filters. Unkeyed formula tokens that match
 standard chemical formulas (element symbols with optional counts, such as
 `C6H6`, `NaCl`, or `CH3COOH`) are treated as `molform` filters so a query like
 `C6H6 1720±5` is interpreted as `molform:C6H6` plus the peak constraint. Any
-remaining unkeyed tokens are treated as free-text `title` filters, so a query
-like `acetone 1720±5` is interpreted as `title:acetone` plus the peak
-constraint.
+unkeyed CAS Registry Number tokens (for example `64-17-5`) are treated as
+`cas` filters so a query like `64-17-5 1720±5` is interpreted as `cas:64-17-5`
+plus the peak constraint. Any remaining unkeyed tokens are treated as free-text
+`title` filters, so a query like `acetone 1720±5` is interpreted as
+`title:acetone` plus the peak constraint.
 
 ## FTIR reference lookup window
 SpectroProtz now includes a dedicated **FTIR Reference Lookup** window
@@ -358,8 +360,11 @@ combine multiple peaks and filters to narrow results.
   `1720 +/- 5`). Optional unit suffixes include `cm-1`, `cm^-1`, or `cm⁻¹`.
 - **Metadata filters:** `key:value` or `key=value`, e.g.
   `name:acetone origin:"NIST" 1720±5`. Use quotes for values with spaces.
-- **Free-text tokens:** bare words (no `:` or `=`) are applied as
-  `title` filters, so `acetone 1720` is equivalent to `title:acetone 1720`.
+- **CAS tokens:** bare CAS Registry Numbers like `64-17-5` map to the `cas`
+  filter, so `64-17-5 1720` is equivalent to `cas:64-17-5 1720`.
+- **Free-text tokens:** bare words (no `:` or `=`) that are not formulas or
+  CAS numbers are applied as `title` filters, so `acetone 1720` is equivalent
+  to `title:acetone 1720`.
 
 Lookup results are re-ranked by the weighted match score (sum of
 `abs(amplitude) + abs(area)` across matched peaks), and each sidebar row shows
