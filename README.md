@@ -19,6 +19,11 @@ cancellation signals during file ingestion and pipeline processing, then reports
 When closing the application, SpectroProtz warns if a processing job is still
 running, cancels the job on request, and waits for background thread-pool work
 to finish before the UI is destroyed to avoid leaving silent work in flight.
+The batch export flow writes Excel workbooks that include processed spectra
+tables, metadata, and QC summaries; QC rows are normalized into plain
+serializable dictionaries (including ISO-formatted timestamps and primitive
+lists) before the workbook writer flattens them, ensuring the export pipeline
+never emits raw dataclass instances into Excel output.
 
 ## FTIR indexer pipeline
 The FTIR indexer script (`scripts/jdxIndexBuilder.py`) ingests JCAMP-DX files,
