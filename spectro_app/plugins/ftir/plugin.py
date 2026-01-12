@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from spectro_app.engine import pipeline as core_pipeline
+from spectro_app.engine.excel_writer import write_workbook
 from spectro_app.engine.plugin_api import SpectroscopyPlugin, BatchResult
 from spectro_app.io.opus import is_opus_path, load_opus_spectra
 
@@ -32,10 +35,32 @@ class FtirPlugin(SpectroscopyPlugin):
         return core_pipeline.run_pipeline(specs, recipe)
 
     def export(self, specs, qc, recipe):
+        specs = list(specs or [])
+        qc = list(qc or [])
+        export_cfg = dict(recipe.get("export", {})) if recipe else {}
+        workbook_value = export_cfg.get("path") or export_cfg.get("workbook")
+        workbook_target = None
+        if workbook_value not in (None, "", False):
+            workbook_target = Path(str(workbook_value)).expanduser()
+        audit_entries = []
+        if workbook_target:
+            resolved_path = str(workbook_target)
+            audit_entries.append(f"Workbook written to {resolved_path}")
+            write_workbook(
+                resolved_path,
+                specs,
+                qc,
+                audit_entries,
+                figures={},
+                calibration=None,
+            )
+        else:
+            audit_entries.append("No workbook path provided; workbook not written.")
+        report_text = "\n".join(audit_entries) if audit_entries else None
         return BatchResult(
             processed=specs,
             qc_table=qc,
             figures={},
-            audit=["FTIR export stub"],
-            report_text=None,
+            audit=audit_entries,
+            report_text=report_text,
         )
