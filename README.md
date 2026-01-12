@@ -601,6 +601,10 @@ that processed traces remain representative of their raw counterparts:
 - **Workbook exports for auditing.** Exported workbooks bundle processed
   spectra, metadata, QC flags, and an audit log so you can review the exact
   sequence of operations and verify whether any QC thresholds were exceeded.
+  FTIR exports follow the same path: when a recipe provides an export
+  `path`/`workbook`, the batch run writes a workbook and logs the resolved
+  target; when no export path is provided, the run still completes and records
+  that the workbook was skipped.
 - **Replicate-level scoring.** When averaging replicates, the pipeline can apply
   MAD or Cook’s-distance screening to discard obvious outliers before
   aggregation, keeping the representative trace faithful to the cluster of raw
