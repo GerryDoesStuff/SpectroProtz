@@ -1,9 +1,15 @@
+from __future__ import annotations
+
+from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Iterable
 
 from spectro_app.engine import pipeline as core_pipeline
 from spectro_app.engine.excel_writer import write_workbook
 from spectro_app.engine.plugin_api import SpectroscopyPlugin, BatchResult
 from spectro_app.io.opus import is_opus_path, load_opus_spectra
+
 
 class FtirPlugin(SpectroscopyPlugin):
     id = "ftir"
@@ -36,7 +42,7 @@ class FtirPlugin(SpectroscopyPlugin):
 
     def export(self, specs, qc, recipe):
         specs = list(specs or [])
-        qc = list(qc or [])
+        qc = _normalize_qc_rows(qc or [])
         export_cfg = dict(recipe.get("export", {})) if recipe else {}
         workbook_value = export_cfg.get("path") or export_cfg.get("workbook")
         workbook_target = None
@@ -64,3 +70,47 @@ class FtirPlugin(SpectroscopyPlugin):
             audit=audit_entries,
             report_text=report_text,
         )
+
+
+def _normalize_qc_rows(qc_rows: Iterable[Any]) -> list[dict[str, Any]]:
+    normalized = [_normalize_qc_row(row) for row in qc_rows]
+    if normalized:
+        _validate_qc_row(normalized[0])
+    return normalized
+
+
+def _normalize_qc_row(row: Any) -> dict[str, Any]:
+    if is_dataclass(row):
+        row = asdict(row)
+    elif isinstance(row, dict):
+        row = dict(row)
+    else:
+        row = dict(row)
+    return {str(key): _normalize_qc_value(value) for key, value in row.items()}
+
+
+def _normalize_qc_value(value: Any) -> Any:
+    if is_dataclass(value):
+        return {str(key): _normalize_qc_value(val) for key, val in asdict(value).items()}
+    if isinstance(value, dict):
+        return {str(key): _normalize_qc_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_qc_value(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _validate_qc_row(row: dict[str, Any]) -> None:
+    if _contains_dataclass(row):
+        raise TypeError("QC rows must not contain dataclass instances after normalization.")
+
+
+def _contains_dataclass(value: Any) -> bool:
+    if is_dataclass(value):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_dataclass(val) for val in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_dataclass(item) for item in value)
+    return False
