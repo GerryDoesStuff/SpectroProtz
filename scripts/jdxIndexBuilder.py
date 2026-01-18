@@ -22,10 +22,10 @@ Notes
 """
 
 from __future__ import annotations
-import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit, threading
+import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit, threading, functools
 from pathlib import Path
 from datetime import datetime
-from typing import Callable, List, Tuple, Dict, Optional
+from typing import Callable, List, Tuple, Dict, Optional, TypeVar
 import numpy as np, pandas as pd, duckdb
 try:
     from scipy.signal import PeakPropertyWarning
@@ -86,6 +86,76 @@ class FitTimeoutError(TimeoutError):
     def __init__(self, seconds: float):
         self.seconds = seconds
         super().__init__(f"Fit timed out after {seconds:.1f}s")
+
+
+T = TypeVar("T")
+
+
+def _run_with_multiprocessing_timeout(
+    seconds: float,
+    operation: Callable[[], T],
+    timeout_error_factory: Callable[[], Exception],
+) -> T:
+    if not seconds or seconds <= 0:
+        return operation()
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+
+    def _worker(queue):  # type: ignore[no-untyped-def]
+        try:
+            result = operation()
+            queue.put(("result", result))
+        except Exception as exc:  # pragma: no cover - depends on runtime
+            queue.put(("error", exc))
+
+    proc = ctx.Process(target=_worker, args=(result_queue,), daemon=True)
+    proc.start()
+    proc.join(seconds)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise timeout_error_factory()
+    if result_queue.empty():
+        raise RuntimeError("Timed operation exited without returning a result.")
+    status, payload = result_queue.get()
+    if status == "error":
+        raise payload
+    return payload
+
+
+def _run_with_fit_timeout(seconds: float, operation: Callable[[], T]) -> T:
+    if not seconds or seconds <= 0:
+        return operation()
+    if hasattr(signal, "SIGALRM"):
+        with _FitTimeoutGuard(seconds):
+            return operation()
+    return _run_with_multiprocessing_timeout(
+        seconds,
+        operation,
+        lambda: FitTimeoutError(seconds),
+    )
+
+
+def _run_with_file_timeout(
+    seconds: float,
+    path: str,
+    stage_getter: Optional[Callable[[], Optional[str]]],
+    operation: Callable[[], T],
+) -> T:
+    if not seconds or seconds <= 0:
+        return operation()
+    if hasattr(signal, "SIGALRM"):
+        with _FileTimeoutGuard(seconds, path, stage_getter):
+            return operation()
+    logger.warning(
+        "File timeout requested but SIGALRM unavailable; falling back to multiprocessing timeout guard "
+        "(runs the operation in a child process and adds startup overhead)."
+    )
+    return _run_with_multiprocessing_timeout(
+        seconds,
+        operation,
+        lambda: FileTimeoutError(path, seconds, stage=stage_getter() if stage_getter else None),
+    )
 
 
 _FTIR_HEADER_KEYS = {
@@ -1309,15 +1379,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 lorentzian,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, gamma, C = popt
         yfit = lorentzian(xs_sorted, *popt)
         fwhm = 2.0 * abs(gamma)
@@ -1327,15 +1399,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 voigt_profile,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, sigma, gamma, C = popt
         yfit = voigt_profile(xs_sorted, *popt)
         fwhm = 0.5346 * (2.0 * abs(gamma)) + math.sqrt(
@@ -1347,15 +1421,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 gaussian,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, sigma, C = popt
         yfit = gaussian(xs_sorted, *popt)
         fwhm = 2.3548 * abs(sigma)
@@ -1437,15 +1513,17 @@ def _fit_multi_peak(
         return total
 
     fit_fn = _sum_gaussian if model == "gaussian" else _sum_lorentzian if model == "lorentzian" else _sum_voigt
-    with _FitTimeoutGuard(fit_timeout_sec):
-        popt, _ = curve_fit(
+    popt, _ = _run_with_fit_timeout(
+        fit_timeout_sec,
+        lambda: curve_fit(
             fit_fn,
             xs_sorted,
             ys_sorted,
             p0=params,
             bounds=(lower, upper),
             maxfev=maxfev,
-        )
+        ),
+    )
     yfit = fit_fn(xs_sorted, *popt)
     r2 = 1 - np.sum((ys_sorted - yfit) ** 2) / (np.sum((ys_sorted - np.mean(ys_sorted)) ** 2) + 1e-12)
     results: List[Dict[str, float]] = []
@@ -3174,6 +3252,13 @@ def store_headers(con,file_id:str,headers:Dict[str,str]):
     )
 
 
+def _parse_jdx_for_enqueue(path: str) -> Tuple[np.ndarray, List[np.ndarray], Dict[str, str]]:
+    headers = parse_jdx_headers(path)
+    is_ftir_spectrum(headers)
+    x, Y, headers = parse_jcamp_multispec(path)
+    return x, Y, headers
+
+
 class _FileTimeoutGuard:
     def __init__(self, seconds: float, path: str, stage_getter):
         self.seconds = seconds
@@ -3186,7 +3271,6 @@ class _FileTimeoutGuard:
         if not self._enabled:
             return self
         if not hasattr(signal, "SIGALRM"):
-            logger.warning("File timeout requested but SIGALRM unavailable; skipping timeout guard.")
             self._enabled = False
             return self
         self._previous_handler = signal.getsignal(signal.SIGALRM)
@@ -3318,227 +3402,233 @@ def index_file(
         emit_progress(stage)
 
     timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
-    try:
-        with _FileTimeoutGuard(timeout_seconds, path, lambda: current_stage):
-            set_stage("parse_headers")
-            headers=parse_jdx_headers(path)
-            try:
-                is_ftir_spectrum(headers)
-            except UnsupportedSpectrumError as exc:
-                message=f"Unsupported spectrum type: {exc.descriptor}"
-                logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
-                record_failure(message)
-                persist_ingest_error(message)
-                if getattr(args,'strict',False) or getattr(args,'_collect_skips',False):
-                    raise
-                return 0,0
-            try:
-                set_stage("parse_spectra")
-                x,Y,headers=parse_jcamp_multispec(path)
-            except Exception as exc:
-                logger.error("Failed to parse JCAMP file %s: %s", path, exc)
-                record_failure(str(exc))
-                persist_ingest_error(str(exc))
-                if getattr(args,'strict',False):
-                    raise
-                return 0,0
-            file_id=file_sha1(path)
-            total_peaks=0
-            processed_spectra=0
-            max_points=0
-            y_units=headers.get('YUNITS','')
-            resolution_cm=_parse_numeric(headers.get('RESOLUTION')) if headers else None
-            fit_errors: List[Dict[str, object]] = []
-            xydata_payload = ""
-            headers_for_meta = headers
 
-            if Y:
-                preview_x, preview_y = sanitize_xy(x, Y[0])
-                if preview_x.size and preview_y.size:
-                    preview_abs = convert_y_for_processing(preview_y, y_units)
-                    xydata_payload = build_xydata_payload(preview_x, preview_abs)
-            if xydata_payload:
-                headers_for_meta = dict(headers)
-                headers_for_meta["XYDATA"] = xydata_payload
-                headers_for_meta["YUNITS"] = "ABSORBANCE"
-
-            con.execute('DELETE FROM ingest_errors WHERE file_path=?',[path])
-
-            con.execute('BEGIN TRANSACTION')
-            try:
-                set_stage("persist_headers")
-                store_headers(con,file_id,headers_for_meta)
-                con.execute('DELETE FROM peaks WHERE file_id=?',[file_id])
-
-                for sid,y in enumerate(Y):
-                    x_clean,y_clean=sanitize_xy(x,y)
-                    if x_clean.size==0 or y_clean.size==0:
-                        continue
-
-                    processed_spectra+=1
-                    max_points=max(max_points,len(x_clean))
-                    current_spectrum_id = sid
-                    emit_progress("start_spectrum", spectrum_id=sid, force=True)
-                    log_line(
-                        f"Indexing spectrum {sid + 1}/{len(Y)} "
-                        f"path={path} points={len(x_clean)}"
-                    )
-
-                    set_stage(f"preprocess_spectrum_{sid}")
-                    y_for_processing=convert_y_for_processing(y_clean,y_units)
-                    step_metadata = {
-                        "file_id": file_id,
-                        "spectrum_id": sid,
-                        "y_units": y_units,
-                        "processing": {
-                            "sg_win": int(args.sg_win),
-                            "sg_poly": int(args.sg_poly),
-                            "sg_window_cm": float(args.sg_window_cm or 0.0),
-                            "als_lam": float(args.als_lam),
-                            "als_p": float(args.als_p),
-                            "baseline_method": str(args.baseline_method),
-                            "baseline_niter": int(args.baseline_niter),
-                            "baseline_piecewise": bool(args.baseline_piecewise),
-                            "baseline_ranges": args.baseline_ranges,
-                        },
-                    }
-                    step_registry: List[Dict[str, object]] = []
-                    _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
-                    _append_processing_step(
-                        step_registry,
-                        "absorbance_converted",
-                        x_clean,
-                        y_for_processing,
-                        step_metadata,
-                    )
-                    y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
-                        x_clean,
-                        y_for_processing,
-                        args.sg_win,
-                        args.sg_poly,
-                        args.als_lam,
-                        args.als_p,
-                        sg_window_cm=args.sg_window_cm,
-                        baseline_method=args.baseline_method,
-                        baseline_niter=args.baseline_niter,
-                        baseline_piecewise=args.baseline_piecewise,
-                        baseline_ranges=args.baseline_ranges,
-                        step_registry=step_registry,
-                        step_metadata=step_metadata,
-                    )
-                    set_stage(f"detect_peaks_spectrum_{sid}")
-                    peak_candidates, refined, skipped_due_to_timeout, attempts_used = (
-                        detect_and_refine_with_retries(
-                            x_clean,
-                            y_proc,
-                            noise_sigma,
-                            args,
-                            y_abs=y_for_processing,
-                            resolution_cm=resolution_cm,
-                            file_path=path,
-                            spectrum_id=sid,
-                            fit_errors=fit_errors,
-                            progress_callback=progress_callback,
-                        )
-                    )
-                    peak_overlay = [
-                        {
-                            "index": int(candidate["index"]),
-                            "x": float(x_clean[int(candidate["index"])]),
-                            "wavenumber": float(x_clean[int(candidate["index"])]),
-                            "y": float(y_proc[int(candidate["index"])]),
-                            "polarity": int(candidate.get("polarity", 1)),
-                            "score": float(candidate.get("score", 0.0)),
-                            "sources": sorted(candidate.get("sources", [])),
-                        }
-                        for candidate in peak_candidates
-                        if 0 <= int(candidate["index"]) < len(x_clean)
-                    ]
-                    _append_processing_step(
-                        step_registry,
-                        "candidate_peaks_overlay",
-                        x_clean,
-                        y_proc,
-                        step_metadata,
-                        extra_metadata={"candidates": peak_overlay},
-                    )
-                    set_stage(f"fit_peaks_spectrum_{sid}")
-                    log_line(
-                        "Spectrum fit summary "
-                        f"path={path} spectrum_id={sid} "
-                        f"candidates={len(peak_candidates)} refined={len(refined)} "
-                        f"attempts={attempts_used} "
-                        f"skipped_due_to_timeout={skipped_due_to_timeout}"
-                    )
-                    if len(refined) < 2:
-                        min_peaks_message = (
-                            "Minimum peak count not met "
-                            f"path={path} spectrum_id={sid} "
-                            f"peaks={len(refined)} attempts={attempts_used}"
-                        )
-                        log_line(min_peaks_message, stream=sys.stderr)
-                        persist_ingest_error(min_peaks_message)
-                    emit_progress(
-                        "spectrum_complete",
-                        spectrum_id=sid,
-                        candidates=len(peak_candidates),
-                        refined=len(refined),
-                        skipped_due_to_timeout=skipped_due_to_timeout,
-                        force=True,
-                    )
-                    refined_overlay = [
-                        {
-                            "index": int(fit.get("index", -1)),
-                            "wavenumber": float(fit.get("center", float("nan"))),
-                            "center": float(fit.get("center", float("nan"))),
-                            "polarity": int(fit.get("polarity", 1)),
-                            "r2": float(fit.get("r2", float("nan"))),
-                        }
-                        for fit in refined
-                    ]
-                    _append_processing_step(
-                        step_registry,
-                        "refined_peaks_overlay",
-                        x_clean,
-                        y_proc,
-                        step_metadata,
-                        extra_metadata={"peaks": refined_overlay},
-                    )
-                    set_stage(f"insert_peaks_spectrum_{sid}")
-                    pid = 0
-                    for fit in refined:
-                        amplitude, area = _scale_fit_for_storage(fit, normalization_factor)
-                        con.execute(
-                            'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
-                            [
-                                file_id,
-                                sid,
-                                int(fit.get("candidate_id", pid)),
-                                int(fit.get("polarity", 1)),
-                                fit["center"],
-                                fit["fwhm"],
-                                amplitude,
-                                area,
-                                fit["r2"],
-                            ],
-                        )
-                        pid += 1
-                    total_peaks += pid
-                    if step_registry_collector is not None:
-                        step_registry_collector.append(
-                            {
-                                "file_id": file_id,
-                                "spectrum_id": sid,
-                                "steps": step_registry,
-                            }
-                        )
-                set_stage("update_spectra_summary")
-                con.execute('UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',[path,max_points,processed_spectra,file_id])
-                con.execute('COMMIT')
-            except Exception:
-                con.execute('ROLLBACK')
+    def _index_file_body() -> Tuple[int, int, List[Dict[str, object]]]:
+        set_stage("parse_headers")
+        headers = parse_jdx_headers(path)
+        try:
+            is_ftir_spectrum(headers)
+        except UnsupportedSpectrumError as exc:
+            message = f"Unsupported spectrum type: {exc.descriptor}"
+            logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+            record_failure(message)
+            persist_ingest_error(message)
+            if getattr(args, 'strict', False) or getattr(args, '_collect_skips', False):
                 raise
-            return processed_spectra, total_peaks, progress_events
+            return 0, 0, progress_events
+        try:
+            set_stage("parse_spectra")
+            x, Y, headers = parse_jcamp_multispec(path)
+        except Exception as exc:
+            logger.error("Failed to parse JCAMP file %s: %s", path, exc)
+            record_failure(str(exc))
+            persist_ingest_error(str(exc))
+            if getattr(args, 'strict', False):
+                raise
+            return 0, 0, progress_events
+        file_id = file_sha1(path)
+        total_peaks = 0
+        processed_spectra = 0
+        max_points = 0
+        y_units = headers.get('YUNITS', '')
+        resolution_cm = _parse_numeric(headers.get('RESOLUTION')) if headers else None
+        fit_errors: List[Dict[str, object]] = []
+        xydata_payload = ""
+        headers_for_meta = headers
+
+        if Y:
+            preview_x, preview_y = sanitize_xy(x, Y[0])
+            if preview_x.size and preview_y.size:
+                preview_abs = convert_y_for_processing(preview_y, y_units)
+                xydata_payload = build_xydata_payload(preview_x, preview_abs)
+        if xydata_payload:
+            headers_for_meta = dict(headers)
+            headers_for_meta["XYDATA"] = xydata_payload
+            headers_for_meta["YUNITS"] = "ABSORBANCE"
+
+        con.execute('DELETE FROM ingest_errors WHERE file_path=?', [path])
+
+        con.execute('BEGIN TRANSACTION')
+        try:
+            set_stage("persist_headers")
+            store_headers(con, file_id, headers_for_meta)
+            con.execute('DELETE FROM peaks WHERE file_id=?', [file_id])
+
+            for sid, y in enumerate(Y):
+                x_clean, y_clean = sanitize_xy(x, y)
+                if x_clean.size == 0 or y_clean.size == 0:
+                    continue
+
+                processed_spectra += 1
+                max_points = max(max_points, len(x_clean))
+                current_spectrum_id = sid
+                emit_progress("start_spectrum", spectrum_id=sid, force=True)
+                log_line(
+                    f"Indexing spectrum {sid + 1}/{len(Y)} "
+                    f"path={path} points={len(x_clean)}"
+                )
+
+                set_stage(f"preprocess_spectrum_{sid}")
+                y_for_processing = convert_y_for_processing(y_clean, y_units)
+                step_metadata = {
+                    "file_id": file_id,
+                    "spectrum_id": sid,
+                    "y_units": y_units,
+                    "processing": {
+                        "sg_win": int(args.sg_win),
+                        "sg_poly": int(args.sg_poly),
+                        "sg_window_cm": float(args.sg_window_cm or 0.0),
+                        "als_lam": float(args.als_lam),
+                        "als_p": float(args.als_p),
+                        "baseline_method": str(args.baseline_method),
+                        "baseline_niter": int(args.baseline_niter),
+                        "baseline_piecewise": bool(args.baseline_piecewise),
+                        "baseline_ranges": args.baseline_ranges,
+                    },
+                }
+                step_registry: List[Dict[str, object]] = []
+                _append_processing_step(step_registry, "raw", x_clean, y_clean, step_metadata)
+                _append_processing_step(
+                    step_registry,
+                    "absorbance_converted",
+                    x_clean,
+                    y_for_processing,
+                    step_metadata,
+                )
+                y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
+                    x_clean,
+                    y_for_processing,
+                    args.sg_win,
+                    args.sg_poly,
+                    args.als_lam,
+                    args.als_p,
+                    sg_window_cm=args.sg_window_cm,
+                    baseline_method=args.baseline_method,
+                    baseline_niter=args.baseline_niter,
+                    baseline_piecewise=args.baseline_piecewise,
+                    baseline_ranges=args.baseline_ranges,
+                    step_registry=step_registry,
+                    step_metadata=step_metadata,
+                )
+                set_stage(f"detect_peaks_spectrum_{sid}")
+                peak_candidates, refined, skipped_due_to_timeout, attempts_used = (
+                    detect_and_refine_with_retries(
+                        x_clean,
+                        y_proc,
+                        noise_sigma,
+                        args,
+                        y_abs=y_for_processing,
+                        resolution_cm=resolution_cm,
+                        file_path=path,
+                        spectrum_id=sid,
+                        fit_errors=fit_errors,
+                        progress_callback=progress_callback,
+                    )
+                )
+                peak_overlay = [
+                    {
+                        "index": int(candidate["index"]),
+                        "x": float(x_clean[int(candidate["index"])]),
+                        "wavenumber": float(x_clean[int(candidate["index"])]),
+                        "y": float(y_proc[int(candidate["index"])]),
+                        "polarity": int(candidate.get("polarity", 1)),
+                        "score": float(candidate.get("score", 0.0)),
+                        "sources": sorted(candidate.get("sources", [])),
+                    }
+                    for candidate in peak_candidates
+                    if 0 <= int(candidate["index"]) < len(x_clean)
+                ]
+                _append_processing_step(
+                    step_registry,
+                    "candidate_peaks_overlay",
+                    x_clean,
+                    y_proc,
+                    step_metadata,
+                    extra_metadata={"candidates": peak_overlay},
+                )
+                set_stage(f"fit_peaks_spectrum_{sid}")
+                log_line(
+                    "Spectrum fit summary "
+                    f"path={path} spectrum_id={sid} "
+                    f"candidates={len(peak_candidates)} refined={len(refined)} "
+                    f"attempts={attempts_used} "
+                    f"skipped_due_to_timeout={skipped_due_to_timeout}"
+                )
+                if len(refined) < 2:
+                    min_peaks_message = (
+                        "Minimum peak count not met "
+                        f"path={path} spectrum_id={sid} "
+                        f"peaks={len(refined)} attempts={attempts_used}"
+                    )
+                    log_line(min_peaks_message, stream=sys.stderr)
+                    persist_ingest_error(min_peaks_message)
+                emit_progress(
+                    "spectrum_complete",
+                    spectrum_id=sid,
+                    candidates=len(peak_candidates),
+                    refined=len(refined),
+                    skipped_due_to_timeout=skipped_due_to_timeout,
+                    force=True,
+                )
+                refined_overlay = [
+                    {
+                        "index": int(fit.get("index", -1)),
+                        "wavenumber": float(fit.get("center", float("nan"))),
+                        "center": float(fit.get("center", float("nan"))),
+                        "polarity": int(fit.get("polarity", 1)),
+                        "r2": float(fit.get("r2", float("nan"))),
+                    }
+                    for fit in refined
+                ]
+                _append_processing_step(
+                    step_registry,
+                    "refined_peaks_overlay",
+                    x_clean,
+                    y_proc,
+                    step_metadata,
+                    extra_metadata={"peaks": refined_overlay},
+                )
+                set_stage(f"insert_peaks_spectrum_{sid}")
+                pid = 0
+                for fit in refined:
+                    amplitude, area = _scale_fit_for_storage(fit, normalization_factor)
+                    con.execute(
+                        'INSERT OR REPLACE INTO peaks VALUES (?,?,?,?,?,?,?,?,?)',
+                        [
+                            file_id,
+                            sid,
+                            int(fit.get("candidate_id", pid)),
+                            int(fit.get("polarity", 1)),
+                            fit["center"],
+                            fit["fwhm"],
+                            amplitude,
+                            area,
+                            fit["r2"],
+                        ],
+                    )
+                    pid += 1
+                total_peaks += pid
+                if step_registry_collector is not None:
+                    step_registry_collector.append(
+                        {
+                            "file_id": file_id,
+                            "spectrum_id": sid,
+                            "steps": step_registry,
+                        }
+                    )
+            set_stage("update_spectra_summary")
+            con.execute(
+                'UPDATE spectra SET path=?,n_points=?,n_spectra=? WHERE file_id=?',
+                [path, max_points, processed_spectra, file_id],
+            )
+            con.execute('COMMIT')
+        except Exception:
+            con.execute('ROLLBACK')
+            raise
+        return processed_spectra, total_peaks, progress_events
+
+    try:
+        return _run_with_file_timeout(timeout_seconds, path, lambda: current_stage, _index_file_body)
     except Exception as exc:
         if isinstance(exc, FileTimeoutError):
             message = f"Timeout: after {exc.seconds:.0f}s at stage {exc.stage}"
@@ -4245,26 +4335,37 @@ def main():
         current_stage = "parse_headers"
         timeout_seconds = float(getattr(args, "file_timeout_seconds", 0) or 0)
         try:
-            with _FileTimeoutGuard(timeout_seconds, path, lambda: current_stage):
-                headers = parse_jdx_headers(path)
-                try:
+            if hasattr(signal, "SIGALRM"):
+                def _parse_with_stage() -> Tuple[np.ndarray, List[np.ndarray], Dict[str, str]]:
+                    nonlocal current_stage
+                    current_stage = "parse_headers"
+                    headers = parse_jdx_headers(path)
                     is_ftir_spectrum(headers)
-                except UnsupportedSpectrumError as exc:
-                    message = f"Unsupported spectrum type: {exc.descriptor}"
-                    logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
-                    persist_ingest_error(path, message)
-                    if getattr(args, "strict", False) or getattr(args, "_collect_skips", False):
-                        raise
-                    continue
-                try:
                     current_stage = "parse_spectra"
                     x, Y, headers = parse_jcamp_multispec(path)
-                except Exception as exc:
-                    logger.error("Failed to parse JCAMP file %s: %s", path, exc)
-                    persist_ingest_error(path, str(exc))
-                    if getattr(args, "strict", False):
-                        raise
-                    continue
+                    return x, Y, headers
+
+                parsed = _run_with_file_timeout(
+                    timeout_seconds,
+                    path,
+                    lambda: current_stage,
+                    _parse_with_stage,
+                )
+            else:
+                parsed = _run_with_file_timeout(
+                    timeout_seconds,
+                    path,
+                    lambda: current_stage,
+                    functools.partial(_parse_jdx_for_enqueue, path),
+                )
+            x, Y, headers = parsed
+        except UnsupportedSpectrumError as exc:
+            message = f"Unsupported spectrum type: {exc.descriptor}"
+            logger.info("Skipping non-FTIR spectrum %s: %s", path, exc)
+            persist_ingest_error(path, message)
+            if getattr(args, "strict", False) or getattr(args, "_collect_skips", False):
+                raise
+            continue
         except Exception as exc:
             if isinstance(exc, FileTimeoutError):
                 message = f"Timeout: after {exc.seconds:.0f}s at stage {exc.stage}"
