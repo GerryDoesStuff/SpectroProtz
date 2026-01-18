@@ -71,6 +71,7 @@ _STAGE_CHANNEL_ORDER: Tuple[str, ...] = (
     "joined",
     "despiked",
     "smoothed",
+    "interpolated",
 )
 
 _SAMPLE_LABEL_FALLBACK_ORDER: Tuple[str, ...] = (

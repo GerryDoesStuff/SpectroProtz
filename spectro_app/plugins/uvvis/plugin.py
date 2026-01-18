@@ -38,6 +38,7 @@ from spectro_app.engine.io_common import sniff_locale
 from spectro_app.engine.plugin_api import BatchResult, SpectroscopyPlugin, Spectrum
 from spectro_app.engine.run_controller import PREVIEW_EXPORT_DISABLED_FLAG
 from spectro_app.engine import pipeline as core_pipeline
+from spectro_app.engine.interpolation import interpolate_spectrum
 from spectro_app.engine.peak_detection import detect_peaks_for_features, resolve_peak_config
 from spectro_app.engine.excel_writer import (
     write_single_spectrum_csv,
@@ -1834,8 +1835,15 @@ class UvVisPlugin(SpectroscopyPlugin):
         stitch_cfg = dict(recipe.get("stitch", {}))
         despike_cfg = recipe.get("despike", {})
         smoothing_cfg = recipe.get("smoothing", {})
+        interpolation_cfg_raw = recipe.get("interpolation", {})
         replicate_cfg = recipe.get("replicates", {})
         qc_cfg = dict(recipe.get("qc", {})) if recipe else {}
+        if interpolation_cfg_raw is None:
+            interpolation_cfg: dict[str, object] = {}
+        elif isinstance(interpolation_cfg_raw, Mapping):
+            interpolation_cfg = dict(interpolation_cfg_raw)
+        else:
+            raise TypeError("Interpolation configuration must be a mapping")
 
         if domain_cfg:
             pre_ctx["domain"] = {
@@ -1906,6 +1914,11 @@ class UvVisPlugin(SpectroscopyPlugin):
             "window": int(smoothing_cfg.get("window", 5)) if smoothing_cfg.get("window") is not None else None,
             "polyorder": int(smoothing_cfg.get("polyorder", 2)) if smoothing_cfg.get("polyorder") is not None else None,
         }
+        pre_ctx["interpolation"] = {
+            "enabled": bool(interpolation_cfg.get("enabled", False)),
+            "method": interpolation_cfg.get("method", "akima"),
+            "factor": interpolation_cfg.get("factor", 8),
+        }
         pre_ctx["replicates"] = {
             "average": bool(replicate_cfg.get("average", True)),
             "outlier": replicate_cfg.get("outlier"),
@@ -1944,6 +1957,13 @@ class UvVisPlugin(SpectroscopyPlugin):
                 raise ValueError("Savitzky-Golay window must be odd")
             if window <= poly:
                 raise ValueError("Savitzky-Golay window must exceed polynomial order")
+        if interpolation_cfg.get("enabled"):
+            method = str(interpolation_cfg.get("method", "akima")).strip().lower()
+            if method != "akima":
+                raise ValueError("Interpolation method must be 'akima'")
+            factor = int(interpolation_cfg.get("factor", 8))
+            if factor < 2:
+                raise ValueError("Interpolation factor must be at least 2")
 
         average_replicates = bool(replicate_cfg.get("average", True))
         outlier_cfg = replicate_cfg.get("outlier")
@@ -2217,6 +2237,10 @@ class UvVisPlugin(SpectroscopyPlugin):
                     polyorder=int(smoothing_cfg.get("polyorder", 2)),
                     join_indices=join_indices,
                 )
+            if interpolation_cfg.get("enabled"):
+                method = str(interpolation_cfg.get("method", "akima")).strip()
+                factor = int(interpolation_cfg.get("factor", 8))
+                working = interpolate_spectrum(working, method=method, factor=factor)
 
             processed_samples.append(working)
 
@@ -4234,6 +4258,7 @@ class UvVisPlugin(SpectroscopyPlugin):
             "blanked",
             "baseline_corrected",
             "smoothed",
+            "interpolated",
         ]
         ordered_names = [name for name in stage_order if name in channels]
         ordered_names.extend(name for name in channels.keys() if name not in ordered_names)
