@@ -28,10 +28,11 @@ Wide-layout exports derive per-spectrum column labels from available metadata
 in a consistent fallback order (for example, explicit display labels, sample
 IDs, channel names, or source filenames) and sanitize the chosen identifier to
 remove Excel-invalid characters while preserving the human-readable name.
-Processing pipelines can optionally upsample spectra with Akima interpolation
-using a configurable factor; when enabled, the interpolated trace is stored as
-its own stage channel so preview plots and Excel step exports can surface the
-denser grid alongside other preprocessing stages.
+The processing core supports optional interpolation configured in recipes; when
+enabled, the pipeline upsamples spectra with Akima interpolation using a
+configurable factor. The interpolated trace is stored as its own stage channel
+so preview plots and Excel step exports can surface the denser grid alongside
+other preprocessing stages.
 
 ## FTIR indexer pipeline
 The FTIR indexer script (`scripts/jdxIndexBuilder.py`) is a standalone CLI that
@@ -45,11 +46,11 @@ source metadata.
 
 Preprocessing includes Savitzky-Golay smoothing, optional baseline correction,
 and a normalisation pass that scales the working spectrum by its maximum
-absolute value to stabilise fitting. Peak model fits always run on the
-normalised data, which is then upsampled with Akima interpolation (8×) so peak
-detection and fitting operate on a denser, smoothly interpolated grid while
-retaining the original points in order (via the shared interpolation helpers
-in the processing core). The indexer separately computes raw
+absolute value to stabilise fitting. After normalisation, every spectrum is
+upsampled with Akima interpolation (8×) so peak detection and fitting operate
+on a denser, smoothly interpolated grid while retaining the original points in
+order (via the shared interpolation helpers in the processing core). The
+indexer separately computes raw
 absorbance metrics for storage after converting the original JCAMP Y-units into
 absorbance (for %T or fractional transmittance, `A = -log10(T)`). The persisted
 `peaks.amplitude` is sampled directly from that raw absorbance series at the
@@ -209,9 +210,9 @@ original axis metadata so downstream stages still report the original units.
 
 ## Interpolation configuration
 Recipe preprocessing can optionally add an interpolation stage that densifies
-the spectral grid before downstream features like peak detection. The
-**Interpolation** panel in the recipe editor includes an enable toggle, a
-method selector (currently Akima), and a factor control that defaults to 8×.
+the spectral grid before downstream features like peak detection. The GUI
+recipe builder’s **Interpolation** panel includes an enable toggle, a method
+selector (currently Akima), and a factor control that defaults to 8×.
 When enabled, the pipeline inserts an interpolated series into the stage
 registry so preview plots and Excel step exports can visualize the denser
 trace alongside other preprocessing stages such as smoothing or baseline
