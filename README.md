@@ -213,6 +213,9 @@ Recipe preprocessing can optionally add an interpolation stage that densifies
 the spectral grid before downstream features like peak detection. The GUI
 recipe builder’s **Interpolation** panel includes an enable toggle, a method
 selector (currently Akima), and a factor control that defaults to 8×.
+Akima interpolation is supplied by `scipy.interpolate.Akima1DInterpolator`, so
+SciPy must be installed in the runtime environment (it is listed in both
+`pyproject.toml` and `spectro_app/requirements.txt`).
 When enabled, the pipeline inserts an interpolated series into the stage
 registry so preview plots and Excel step exports can visualize the denser
 trace alongside other preprocessing stages such as smoothing or baseline
