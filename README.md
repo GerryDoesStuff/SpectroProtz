@@ -24,6 +24,10 @@ tables, metadata, and QC summaries; QC rows are normalized into plain
 serializable dictionaries (including ISO-formatted timestamps and primitive
 lists) before the workbook writer flattens them, ensuring the export pipeline
 never emits raw dataclass instances into Excel output.
+Wide-layout exports derive per-spectrum column labels from available metadata
+in a consistent fallback order (for example, explicit display labels, sample
+IDs, channel names, or source filenames) and sanitize the chosen identifier to
+remove Excel-invalid characters while preserving the human-readable name.
 
 ## FTIR indexer pipeline
 The FTIR indexer script (`scripts/jdxIndexBuilder.py`) ingests JCAMP-DX files,

@@ -929,15 +929,7 @@ def test_uvvis_export_supports_wide_processed_layout(tmp_path):
     sample_labels = []
     for idx, spec in enumerate(processed):
         sample_meta = spec.meta or {}
-        sample_label_value = excel_writer._clean_value(
-            sample_meta.get("sample_id")
-            or sample_meta.get("channel")
-            or sample_meta.get("blank_id")
-            or f"spec_{idx}"
-        )
-        if sample_label_value in (None, ""):
-            sample_label_value = f"spec_{idx}"
-        sample_labels.append(str(sample_label_value))
+        sample_labels.append(excel_writer._sample_label_for_spec(sample_meta, idx))
 
     columns = header[1:]
     stage_to_columns: dict[str, list[str]] = {}
