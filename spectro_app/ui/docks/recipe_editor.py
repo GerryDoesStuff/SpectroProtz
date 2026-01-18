@@ -986,6 +986,38 @@ class RecipeEditorDock(QDockWidget):
         smoothing_form.addRow("Poly order", self.smooth_poly)
         layout.addWidget(smoothing_section)
 
+        # --- Interpolation ---
+        interpolation_section = CollapsibleSection("Interpolation")
+        interpolation_form = QFormLayout()
+        interpolation_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        interpolation_section.setContentLayout(interpolation_form)
+
+        self.interpolation_enable = QCheckBox("Enable interpolation")
+        self.interpolation_enable.setToolTip(
+            "Upsample spectra onto a denser grid using Akima interpolation."
+        )
+        self.interpolation_method = QComboBox()
+        self.interpolation_method.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.interpolation_method.addItem("Akima", "akima")
+        self.interpolation_method.setToolTip(
+            "Interpolation method used to densify the spectrum."
+        )
+        self.interpolation_factor = QSpinBox()
+        self.interpolation_factor.setRange(2, 128)
+        self.interpolation_factor.setValue(8)
+        self.interpolation_factor.setToolTip(
+            "Interpolation factor applied to the sampling grid (>= 2)."
+        )
+
+        interpolation_form.addRow(self.interpolation_enable)
+        interpolation_form.addRow("Method", self.interpolation_method)
+        interpolation_form.addRow("Factor", self.interpolation_factor)
+        layout.addWidget(interpolation_section)
+
         # --- Peak detection ---
         peaks_section = CollapsibleSection("Peak detection")
         peaks_form = QFormLayout()
@@ -1358,6 +1390,7 @@ class RecipeEditorDock(QDockWidget):
             self._update_solvent_controls_enabled
         )
         self.smooth_enable.toggled.connect(self._update_feature_controls_enabled)
+        self.interpolation_enable.toggled.connect(self._update_feature_controls_enabled)
         self.stitch_enable.toggled.connect(self._update_feature_controls_enabled)
         self.peaks_enable.toggled.connect(self._update_feature_controls_enabled)
         self.despike_enable.toggled.connect(self._update_feature_controls_enabled)
@@ -1369,6 +1402,9 @@ class RecipeEditorDock(QDockWidget):
             self.smooth_enable.toggled,
             self.smooth_window.valueChanged,
             self.smooth_poly.valueChanged,
+            self.interpolation_enable.toggled,
+            self.interpolation_method.currentIndexChanged,
+            self.interpolation_factor.valueChanged,
             self.stitch_enable.toggled,
             self.stitch_shoulder_points.valueChanged,
             self.stitch_method.currentIndexChanged,
@@ -1584,6 +1620,30 @@ class RecipeEditorDock(QDockWidget):
             )
             self.smooth_poly.setValue(
                 self._safe_int(smoothing.get("polyorder"), self.smooth_poly.value())
+            )
+
+            interpolation_cfg = (
+                params.get("interpolation", {})
+                if isinstance(params.get("interpolation"), dict)
+                else {}
+            )
+            self.interpolation_enable.setChecked(
+                bool(interpolation_cfg.get("enabled", False))
+            )
+            interpolation_method = str(
+                interpolation_cfg.get("method", "akima")
+            ).strip().lower()
+            interpolation_method_index = self.interpolation_method.findData(
+                interpolation_method, QtCore.Qt.ItemDataRole.UserRole
+            )
+            if interpolation_method_index < 0:
+                interpolation_method_index = 0
+            self.interpolation_method.setCurrentIndex(interpolation_method_index)
+            self.interpolation_factor.setValue(
+                self._safe_int(
+                    interpolation_cfg.get("factor"),
+                    self.interpolation_factor.value(),
+                )
             )
 
             features_cfg = (
@@ -2368,6 +2428,10 @@ class RecipeEditorDock(QDockWidget):
         smoothing_enabled = self.smooth_enable.isChecked()
         self.smooth_window.setEnabled(smoothing_enabled)
         self.smooth_poly.setEnabled(smoothing_enabled)
+
+        interpolation_enabled = self.interpolation_enable.isChecked()
+        self.interpolation_method.setEnabled(interpolation_enabled)
+        self.interpolation_factor.setEnabled(interpolation_enabled)
 
         peaks_enabled = self.peaks_enable.isChecked()
         self.peaks_prominence.setEnabled(peaks_enabled)
@@ -3259,6 +3323,25 @@ class RecipeEditorDock(QDockWidget):
                 "enabled": self.smooth_enable.isChecked(),
                 "window": int(self.smooth_window.value()),
                 "polyorder": int(self.smooth_poly.value()),
+            }
+        )
+
+        interpolation_cfg = self._ensure_dict(params, "interpolation")
+        interpolation_method_data = self.interpolation_method.currentData(
+            QtCore.Qt.ItemDataRole.UserRole
+        )
+        interpolation_method = (
+            str(interpolation_method_data).strip().lower()
+            if isinstance(interpolation_method_data, str)
+            else "akima"
+        )
+        if not interpolation_method:
+            interpolation_method = "akima"
+        interpolation_cfg.update(
+            {
+                "enabled": self.interpolation_enable.isChecked(),
+                "method": interpolation_method,
+                "factor": int(self.interpolation_factor.value()),
             }
         )
 

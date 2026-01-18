@@ -207,6 +207,16 @@ peak rendering; when the pipeline sees a non-nm axis it remaps window keys (for
 example `min_cm`/`max_cm`) into the nm-based config fields while preserving the
 original axis metadata so downstream stages still report the original units.
 
+## Interpolation configuration
+Recipe preprocessing can optionally add an interpolation stage that densifies
+the spectral grid before downstream features like peak detection. The
+**Interpolation** panel in the recipe editor includes an enable toggle, a
+method selector (currently Akima), and a factor control that defaults to 8×.
+When enabled, the pipeline inserts an interpolated series into the stage
+registry so preview plots and Excel step exports can visualize the denser
+trace alongside other preprocessing stages such as smoothing or baseline
+correction.
+
 ## FTIR reference lookup parsing
 The FTIR indexer’s DuckDB outputs can be queried with search-bar style input
 using the helper in `spectro_app/engine/ftir_lookup.py`. The parser accepts

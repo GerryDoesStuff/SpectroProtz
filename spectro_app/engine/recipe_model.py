@@ -23,6 +23,20 @@ class Recipe:
             if window < 3:
                 errs.append("Savitzky–Golay window must be at least 3 points")
 
+        interpolation = self.params.get("interpolation", {})
+        if interpolation.get("enabled"):
+            method = str(interpolation.get("method", "akima")).strip().lower()
+            if method != "akima":
+                errs.append("Interpolation method must be akima")
+            factor = interpolation.get("factor", 8)
+            try:
+                factor_value = int(factor)
+            except (TypeError, ValueError):
+                errs.append("Interpolation factor must be an integer")
+            else:
+                if factor_value < 2:
+                    errs.append("Interpolation factor must be at least 2")
+
         baseline_cfg = self.params.get("baseline")
         if isinstance(baseline_cfg, dict):
             method = baseline_cfg.get("method")
