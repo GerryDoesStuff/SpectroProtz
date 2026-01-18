@@ -46,9 +46,12 @@ alongside each fit (under `fit_amplitude` and `fit_area`) for QA without mixing
 normalised units into the stored peak columns.
 Peak fit and file-level timeout controls are enforced with `SIGALRM` when the
 platform supports it, keeping the guard inside the current process for the
-lowest overhead. On platforms without `SIGALRM` (notably Windows), the indexer
-and shared peak-detection helpers fall back to running the guarded operation in
-a child process and enforcing a wall-clock timeout via `join(timeout)` plus
+lowest overhead. The shared helper in
+[`spectro_app/engine/timeout_guard.py`](spectro_app/engine/timeout_guard.py) is
+used by both the indexer and the reusable peak-detection module so they emit
+the same timeout exception types and logging. On platforms without `SIGALRM`
+(notably Windows), the helper falls back to running the guarded operation in a
+child process and enforcing a wall-clock timeout via `join(timeout)` plus
 termination. This fallback maintains the same timeout errors but incurs process
 startup overhead and may reduce throughput when many short fits are executed.
 

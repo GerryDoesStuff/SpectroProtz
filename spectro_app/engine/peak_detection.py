@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import logging
 import math
-import multiprocessing
-import signal
 import sys
 import time
 import warnings
-from typing import Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -28,6 +26,8 @@ from scipy.signal import (
 )
 from scipy.sparse.linalg import spsolve
 from scipy.special import wofz
+
+from spectro_app.engine.timeout_guard import FitTimeoutError, run_with_fit_timeout
 
 try:
     from scipy.signal import PeakPropertyWarning
@@ -90,89 +90,7 @@ DEFAULT_PEAK_CONFIG: Dict[str, object] = {
 }
 
 
-class FitTimeoutError(TimeoutError):
-    """Raised when a peak fit exceeds the configured timeout."""
-
-    def __init__(self, seconds: float):
-        self.seconds = seconds
-        super().__init__(f"Fit timed out after {seconds:.1f}s")
-
-
-T = TypeVar("T")
-
-
-def _run_with_multiprocessing_timeout(
-    seconds: float,
-    operation: Callable[[], T],
-    timeout_error_factory: Callable[[], Exception],
-) -> T:
-    if not seconds or seconds <= 0:
-        return operation()
-    ctx = multiprocessing.get_context("spawn")
-    result_queue = ctx.Queue(maxsize=1)
-
-    def _worker(queue):  # type: ignore[no-untyped-def]
-        try:
-            result = operation()
-            queue.put(("result", result))
-        except Exception as exc:  # pragma: no cover - depends on runtime
-            queue.put(("error", exc))
-
-    proc = ctx.Process(target=_worker, args=(result_queue,), daemon=True)
-    proc.start()
-    proc.join(seconds)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join()
-        raise timeout_error_factory()
-    if result_queue.empty():
-        raise RuntimeError("Timed operation exited without returning a result.")
-    status, payload = result_queue.get()
-    if status == "error":
-        raise payload
-    return payload
-
-
-def _run_with_fit_timeout(seconds: float, operation: Callable[[], T]) -> T:
-    if not seconds or seconds <= 0:
-        return operation()
-    if hasattr(signal, "SIGALRM"):
-        with _FitTimeoutGuard(seconds):
-            return operation()
-    return _run_with_multiprocessing_timeout(
-        seconds,
-        operation,
-        lambda: FitTimeoutError(seconds),
-    )
-
-
-class _FitTimeoutGuard:
-    def __init__(self, seconds: float):
-        self.seconds = float(seconds or 0.0)
-        self._enabled = bool(self.seconds and self.seconds > 0 and hasattr(signal, "SIGALRM"))
-        self._previous_handler = None
-        self._previous_timer = None
-
-    def __enter__(self):
-        if not self._enabled:
-            return self
-        self._previous_handler = signal.getsignal(signal.SIGALRM)
-        self._previous_timer = signal.getitimer(signal.ITIMER_REAL)
-
-        def _handle_alarm(_signum, _frame):
-            raise FitTimeoutError(self.seconds)
-
-        signal.signal(signal.SIGALRM, _handle_alarm)
-        signal.setitimer(signal.ITIMER_REAL, self.seconds)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._enabled and hasattr(signal, "SIGALRM"):
-            if self._previous_timer is not None:
-                signal.setitimer(signal.ITIMER_REAL, *self._previous_timer)
-            if self._previous_handler is not None:
-                signal.signal(signal.SIGALRM, self._previous_handler)
-        return False
+_run_with_fit_timeout = run_with_fit_timeout
 
 
 def log_line(msg: str, stream=sys.stdout, flush: bool = False) -> None:
