@@ -36,6 +36,9 @@ into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
 includes Savitzky-Golay smoothing, optional baseline correction, and a
 normalisation pass that scales the working spectrum by its maximum absolute
 value to stabilise fitting. Peak model fits always run on the normalised data,
+which is then upsampled with Akima interpolation (8×) so peak detection and
+fitting operate on a denser, smoothly interpolated grid while retaining the
+original points in order.
 but the indexer separately computes raw absorbance metrics for storage after
 converting the original JCAMP Y-units into absorbance (for %T or fractional
 transmittance, `A = -log10(T)`). The persisted `peaks.amplitude` is sampled

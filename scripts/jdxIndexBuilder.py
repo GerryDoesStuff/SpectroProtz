@@ -43,7 +43,7 @@ from scipy.signal import (
     savgol_filter,
 )
 from scipy.optimize import curve_fit, OptimizeWarning
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import Akima1DInterpolator, UnivariateSpline
 from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
@@ -1005,6 +1005,46 @@ def _append_processing_step(
     )
 
 
+def _build_upsampled_grid(x: np.ndarray, factor: int = 8) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=float)
+    if x_arr.size < 2 or factor <= 1:
+        return x_arr.copy()
+    segments = [
+        np.linspace(x_arr[idx], x_arr[idx + 1], num=factor, endpoint=False, dtype=float)
+        for idx in range(x_arr.size - 1)
+    ]
+    return np.concatenate([*segments, x_arr[-1:]])
+
+
+def _akima_resample(
+    x: np.ndarray,
+    y: np.ndarray,
+    x_new: np.ndarray,
+) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    x_new_arr = np.asarray(x_new, dtype=float)
+    if x_new_arr.size == 0:
+        return np.array([], dtype=float)
+    if x_arr.size < 2 or y_arr.size < 2:
+        return np.full_like(x_new_arr, y_arr[0] if y_arr.size else 0.0, dtype=float)
+    diffs = np.diff(x_arr)
+    ascending = np.all(diffs > 0)
+    descending = np.all(diffs < 0)
+    if descending:
+        x_work = x_arr[::-1]
+        y_work = y_arr[::-1]
+        x_new_work = x_new_arr[::-1]
+        interpolator = Akima1DInterpolator(x_work, y_work)
+        return interpolator(x_new_work)[::-1]
+    if ascending:
+        interpolator = Akima1DInterpolator(x_arr, y_arr)
+        return interpolator(x_new_arr)
+    order = np.argsort(x_arr)
+    interpolator = Akima1DInterpolator(x_arr[order], y_arr[order])
+    return interpolator(x_new_arr)
+
+
 def preprocess_with_noise(
     x: np.ndarray,
     y: np.ndarray,
@@ -1020,7 +1060,7 @@ def preprocess_with_noise(
     baseline_ranges: str | None = None,
     step_registry: Optional[List[Dict[str, object]]] = None,
     step_metadata: Optional[Dict[str, object]] = None,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, np.ndarray, float, float]:
     y2 = np.asarray(y, dtype=float).copy()
     n = len(y2)
     noise_sigma = estimate_noise_sigma(x, y2, sg_win, sg_poly, sg_window_cm)
@@ -1069,7 +1109,10 @@ def preprocess_with_noise(
         step_metadata,
         extra_metadata={"normalization_factor": normalization_factor},
     )
-    return y2, noise_sigma, normalization_factor
+    x_interp = _build_upsampled_grid(x, factor=8)
+    y_interp = _akima_resample(x, y2, x_interp)
+    _append_processing_step(step_registry, "interpolated", x_interp, y_interp, step_metadata)
+    return x_interp, y_interp, noise_sigma, normalization_factor
 
 
 def preprocess(
@@ -1086,7 +1129,7 @@ def preprocess(
     baseline_piecewise: bool = False,
     baseline_ranges: str | None = None,
 ) -> np.ndarray:
-    y2, _, _ = preprocess_with_noise(
+    _, y2, _, _ = preprocess_with_noise(
         x,
         y,
         sg_win,
@@ -3495,7 +3538,7 @@ def index_file(
                     y_for_processing,
                     step_metadata,
                 )
-                y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
+                x_proc, y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
                     x_clean,
                     y_for_processing,
                     args.sg_win,
@@ -3510,14 +3553,15 @@ def index_file(
                     step_registry=step_registry,
                     step_metadata=step_metadata,
                 )
+                y_abs_interp = _akima_resample(x_clean, y_for_processing, x_proc)
                 set_stage(f"detect_peaks_spectrum_{sid}")
                 peak_candidates, refined, skipped_due_to_timeout, attempts_used = (
                     detect_and_refine_with_retries(
-                        x_clean,
+                        x_proc,
                         y_proc,
                         noise_sigma,
                         args,
-                        y_abs=y_for_processing,
+                        y_abs=y_abs_interp,
                         resolution_cm=resolution_cm,
                         file_path=path,
                         spectrum_id=sid,
@@ -3528,20 +3572,20 @@ def index_file(
                 peak_overlay = [
                     {
                         "index": int(candidate["index"]),
-                        "x": float(x_clean[int(candidate["index"])]),
-                        "wavenumber": float(x_clean[int(candidate["index"])]),
+                        "x": float(x_proc[int(candidate["index"])]),
+                        "wavenumber": float(x_proc[int(candidate["index"])]),
                         "y": float(y_proc[int(candidate["index"])]),
                         "polarity": int(candidate.get("polarity", 1)),
                         "score": float(candidate.get("score", 0.0)),
                         "sources": sorted(candidate.get("sources", [])),
                     }
                     for candidate in peak_candidates
-                    if 0 <= int(candidate["index"]) < len(x_clean)
+                    if 0 <= int(candidate["index"]) < len(x_proc)
                 ]
                 _append_processing_step(
                     step_registry,
                     "candidate_peaks_overlay",
-                    x_clean,
+                    x_proc,
                     y_proc,
                     step_metadata,
                     extra_metadata={"candidates": peak_overlay},
@@ -3583,7 +3627,7 @@ def index_file(
                 _append_processing_step(
                     step_registry,
                     "refined_peaks_overlay",
-                    x_clean,
+                    x_proc,
                     y_proc,
                     step_metadata,
                     extra_metadata={"peaks": refined_overlay},
@@ -3856,7 +3900,7 @@ def process_spectrum_task(
             y_for_processing,
             step_metadata,
         )
-    y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
+    x_proc, y_proc, noise_sigma, normalization_factor = preprocess_with_noise(
         x,
         y_for_processing,
         args.sg_win,
@@ -3871,12 +3915,13 @@ def process_spectrum_task(
         step_registry=step_registry if args.export_step_plots else None,
         step_metadata=step_metadata,
     )
+    y_abs_interp = _akima_resample(x, y_for_processing, x_proc)
     peak_candidates, refined, skipped_due_to_timeout, attempts_used = detect_and_refine_with_retries(
-        x,
+        x_proc,
         y_proc,
         noise_sigma,
         args,
-        y_abs=y_for_processing,
+        y_abs=y_abs_interp,
         resolution_cm=resolution_cm,
         file_path=path,
         spectrum_id=spectrum_id,
@@ -3887,20 +3932,20 @@ def process_spectrum_task(
         peak_overlay = [
             {
                 "index": int(candidate["index"]),
-                "x": float(x[int(candidate["index"])]),
-                "wavenumber": float(x[int(candidate["index"])]),
+                "x": float(x_proc[int(candidate["index"])]),
+                "wavenumber": float(x_proc[int(candidate["index"])]),
                 "y": float(y_proc[int(candidate["index"])]),
                 "polarity": int(candidate.get("polarity", 1)),
                 "score": float(candidate.get("score", 0.0)),
                 "sources": sorted(candidate.get("sources", [])),
             }
             for candidate in peak_candidates
-            if 0 <= int(candidate["index"]) < len(x)
+            if 0 <= int(candidate["index"]) < len(x_proc)
         ]
         _append_processing_step(
             step_registry,
             "candidate_peaks_overlay",
-            x,
+            x_proc,
             y_proc,
             step_metadata,
             extra_metadata={"candidates": peak_overlay},
@@ -3927,7 +3972,7 @@ def process_spectrum_task(
         _append_processing_step(
             step_registry,
             "refined_peaks_overlay",
-            x,
+            x_proc,
             y_proc,
             step_metadata,
             extra_metadata={"peaks": refined_overlay},
