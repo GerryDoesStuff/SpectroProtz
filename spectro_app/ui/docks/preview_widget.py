@@ -60,9 +60,11 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "baseline_corrected": "Baseline",
         "solvent_subtracted": "Solvent Subtracted",
         "smoothed": "Smoothed",
+        "interpolated": "Interpolated",
     }
 
     DEFAULT_STAGE_PRIORITY: Sequence[str] = (
+        "interpolated",
         "smoothed",
         "solvent_subtracted",
         "baseline_corrected",
@@ -82,6 +84,7 @@ class SpectraPlotWidget(QtWidgets.QWidget):
         "despiked": QtCore.Qt.PenStyle.SolidLine,
         "solvent_subtracted": QtCore.Qt.PenStyle.DashDotDotLine,
         "smoothed": QtCore.Qt.PenStyle.SolidLine,
+        "interpolated": QtCore.Qt.PenStyle.SolidLine,
     }
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:

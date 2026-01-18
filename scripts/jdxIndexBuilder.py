@@ -42,10 +42,11 @@ from scipy.signal import (
     savgol_filter,
 )
 from scipy.optimize import curve_fit, OptimizeWarning
-from scipy.interpolate import Akima1DInterpolator, UnivariateSpline
+from scipy.interpolate import UnivariateSpline
 from scipy.special import wofz
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
+from spectro_app.engine.interpolation import interpolate_series
 logger=logging.getLogger(__name__)
 
 def _normalize_molform(value: object | None) -> Optional[str]:
@@ -1007,46 +1008,6 @@ def _append_processing_step(
     )
 
 
-def _build_upsampled_grid(x: np.ndarray, factor: int = 8) -> np.ndarray:
-    x_arr = np.asarray(x, dtype=float)
-    if x_arr.size < 2 or factor <= 1:
-        return x_arr.copy()
-    segments = [
-        np.linspace(x_arr[idx], x_arr[idx + 1], num=factor, endpoint=False, dtype=float)
-        for idx in range(x_arr.size - 1)
-    ]
-    return np.concatenate([*segments, x_arr[-1:]])
-
-
-def _akima_resample(
-    x: np.ndarray,
-    y: np.ndarray,
-    x_new: np.ndarray,
-) -> np.ndarray:
-    x_arr = np.asarray(x, dtype=float)
-    y_arr = np.asarray(y, dtype=float)
-    x_new_arr = np.asarray(x_new, dtype=float)
-    if x_new_arr.size == 0:
-        return np.array([], dtype=float)
-    if x_arr.size < 2 or y_arr.size < 2:
-        return np.full_like(x_new_arr, y_arr[0] if y_arr.size else 0.0, dtype=float)
-    diffs = np.diff(x_arr)
-    ascending = np.all(diffs > 0)
-    descending = np.all(diffs < 0)
-    if descending:
-        x_work = x_arr[::-1]
-        y_work = y_arr[::-1]
-        x_new_work = x_new_arr[::-1]
-        interpolator = Akima1DInterpolator(x_work, y_work)
-        return interpolator(x_new_work)[::-1]
-    if ascending:
-        interpolator = Akima1DInterpolator(x_arr, y_arr)
-        return interpolator(x_new_arr)
-    order = np.argsort(x_arr)
-    interpolator = Akima1DInterpolator(x_arr[order], y_arr[order])
-    return interpolator(x_new_arr)
-
-
 def preprocess_with_noise(
     x: np.ndarray,
     y: np.ndarray,
@@ -1111,8 +1072,7 @@ def preprocess_with_noise(
         step_metadata,
         extra_metadata={"normalization_factor": normalization_factor},
     )
-    x_interp = _build_upsampled_grid(x, factor=8)
-    y_interp = _akima_resample(x, y2, x_interp)
+    x_interp, y_interp = interpolate_series(x, y2, method="akima", factor=8)
     _append_processing_step(step_registry, "interpolated", x_interp, y_interp, step_metadata)
     return x_interp, y_interp, noise_sigma, normalization_factor
 

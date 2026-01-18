@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 import numpy as np
 
 from spectro_app.engine import qc as qc_engine
+from spectro_app.engine.interpolation import interpolate_spectrum
 from spectro_app.engine.peak_detection import detect_peaks_for_features, resolve_peak_config
 from spectro_app.engine.plugin_api import Spectrum
 from spectro_app.plugins.uvvis import pipeline as uvvis_pipeline
@@ -1189,6 +1190,7 @@ def _process_spectrum_task(task: Mapping[str, Any]) -> Dict[str, Any]:
         baseline_cfg = dict(recipe.get("baseline", {})) if recipe else {}
         solvent_cfg = dict(recipe.get("solvent_subtraction", {})) if recipe else {}
         smoothing_cfg = dict(recipe.get("smoothing", {})) if recipe else {}
+        interpolation_cfg = dict(recipe.get("interpolation", {})) if recipe else {}
 
         working = coerce_domain(spec, domain_cfg, axis=axis)
 
@@ -1298,6 +1300,14 @@ def _process_spectrum_task(task: Mapping[str, Any]) -> Dict[str, Any]:
                 polyorder=int(smoothing_cfg.get("polyorder", 2)),
                 join_indices=join_indices,
             )
+        if interpolation_cfg.get("enabled"):
+            method = str(interpolation_cfg.get("method", "akima")).strip()
+            if method.lower() != "akima":
+                raise ValueError("Interpolation method must be 'akima'")
+            factor = int(interpolation_cfg.get("factor", 8))
+            if factor < 2:
+                raise ValueError("Interpolation factor must be at least 2")
+            working = interpolate_spectrum(working, method=method, factor=factor)
 
         working = _detect_peaks(working, recipe, axis)
 
