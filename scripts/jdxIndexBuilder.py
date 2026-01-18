@@ -23,7 +23,6 @@ Notes
 
 from __future__ import annotations
 import os, re, json, math, argparse, hashlib, glob, logging, sys, signal, time, warnings, multiprocessing, atexit, threading, functools
-from pathlib import Path
 from datetime import datetime
 from typing import Callable, List, Tuple, Dict, Optional, TypeVar
 import numpy as np, pandas as pd, duckdb
@@ -49,11 +48,14 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 logger=logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from spectro_app.engine.ftir_metadata import _normalize_molform
+def _normalize_molform(value: object | None) -> Optional[str]:
+    """Return a compact molform string with whitespace removed."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", "", text)
 
 class UnsupportedSpectrumError(RuntimeError):
     """Raised when the JCAMP headers do not describe an FTIR spectrum."""
