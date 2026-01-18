@@ -73,6 +73,58 @@ _STAGE_CHANNEL_ORDER: Tuple[str, ...] = (
     "smoothed",
 )
 
+_SAMPLE_LABEL_FALLBACK_ORDER: Tuple[str, ...] = (
+    "display_name",
+    "display_label",
+    "label",
+    "sample_id",
+    "name",
+    "channel",
+    "blank_id",
+    "source_file",
+    "source_path",
+    "path",
+    "file",
+)
+
+_INVALID_EXCEL_HEADER_CHARS = {":", "/", "\\", "?", "*", "[", "]"}
+
+
+def _sanitize_excel_header_identifier(value: str) -> str:
+    cleaned = "".join(
+        ch
+        for ch in value
+        if ch not in _INVALID_EXCEL_HEADER_CHARS and ch not in {"\r", "\n", "\t"} and ord(ch) >= 32
+    )
+    return cleaned.strip()
+
+
+def _coerce_sample_label_candidate(value: Any, *, from_path: bool) -> str | None:
+    cleaned = _clean_value(value)
+    if cleaned is None:
+        return None
+    if from_path:
+        try:
+            cleaned = Path(os.fspath(cleaned)).name
+        except (TypeError, ValueError):
+            cleaned = str(cleaned)
+    text = str(cleaned).strip()
+    return text or None
+
+
+def _sample_label_for_spec(meta: Dict[str, Any], index: int) -> str:
+    for key in _SAMPLE_LABEL_FALLBACK_ORDER:
+        if key not in meta:
+            continue
+        candidate = _coerce_sample_label_candidate(meta.get(key), from_path=key in {"source_file", "source_path", "path", "file"})
+        if not candidate:
+            continue
+        sanitized = _sanitize_excel_header_identifier(candidate)
+        if sanitized:
+            return sanitized
+    fallback = f"spec_{index}"
+    return _sanitize_excel_header_identifier(fallback) or fallback
+
 
 def _normalize_channel_label(value: Any) -> str:
     cleaned = _clean_value(value)
@@ -136,15 +188,7 @@ def _processed_table_wide(processed: Sequence[Spectrum]) -> Tuple[List[str], Lis
                 wavelength_grid = unique[order]
 
         meta = spec.meta or {}
-        sample_id_value = _clean_value(
-            meta.get("sample_id")
-            or meta.get("channel")
-            or meta.get("blank_id")
-            or f"spec_{idx}"
-        )
-        if sample_id_value in (None, ""):
-            sample_id_value = f"spec_{idx}"
-        sample_label = str(sample_id_value)
+        sample_label = _sample_label_for_spec(meta, idx)
 
         for channel_label, data in _iter_channels(spec, wavelengths):
             channel_name = channel_label or "processed"
