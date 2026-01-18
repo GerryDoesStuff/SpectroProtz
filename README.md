@@ -30,23 +30,36 @@ IDs, channel names, or source filenames) and sanitize the chosen identifier to
 remove Excel-invalid characters while preserving the human-readable name.
 
 ## FTIR indexer pipeline
-The FTIR indexer script (`scripts/jdxIndexBuilder.py`) ingests JCAMP-DX files,
-normalises spectra for peak detection, and writes peak fits plus header metadata
-into DuckDB/Parquet outputs that back the reference lookup tools. Preprocessing
-includes Savitzky-Golay smoothing, optional baseline correction, and a
-normalisation pass that scales the working spectrum by its maximum absolute
-value to stabilise fitting. Peak model fits always run on the normalised data,
-which is then upsampled with Akima interpolation (8×) so peak detection and
-fitting operate on a denser, smoothly interpolated grid while retaining the
-original points in order.
-but the indexer separately computes raw absorbance metrics for storage after
-converting the original JCAMP Y-units into absorbance (for %T or fractional
-transmittance, `A = -log10(T)`). The persisted `peaks.amplitude` is sampled
-directly from that raw absorbance series at the fitted center, and
-`peaks.area` is integrated from the raw absorbance window without applying
-normalisation or baseline correction. Fit-space amplitude/area values are kept
-alongside each fit (under `fit_amplitude` and `fit_area`) for QA without mixing
-normalised units into the stored peak columns.
+The FTIR indexer script (`scripts/jdxIndexBuilder.py`) is a standalone CLI that
+ingests JCAMP-DX files, normalises spectra for peak detection, and writes peak
+fits plus header metadata into DuckDB/Parquet outputs that back the reference
+lookup tools. It does not depend on the main GUI package; it runs from the repo
+root as long as the scientific Python stack and DuckDB are installed. The
+pipeline handles single-spectrum and multi-spectrum JCAMPs (multiple Y columns
+in `XYDATA`) and emits per-spectrum rows keyed by file, spectrum index, and
+source metadata.
+
+Preprocessing includes Savitzky-Golay smoothing, optional baseline correction,
+and a normalisation pass that scales the working spectrum by its maximum
+absolute value to stabilise fitting. Peak model fits always run on the
+normalised data, which is then upsampled with Akima interpolation (8×) so peak
+detection and fitting operate on a denser, smoothly interpolated grid while
+retaining the original points in order. The indexer separately computes raw
+absorbance metrics for storage after converting the original JCAMP Y-units into
+absorbance (for %T or fractional transmittance, `A = -log10(T)`). The persisted
+`peaks.amplitude` is sampled directly from that raw absorbance series at the
+fitted center, and `peaks.area` is integrated from the raw absorbance window
+without applying normalisation or baseline correction. Fit-space
+amplitude/area values are kept alongside each fit (under `fit_amplitude` and
+`fit_area`) for QA without mixing normalised units into the stored peak
+columns.
+
+Index outputs include:
+- Per-spectrum peak fit tables (center, width, model parameters, fit metrics).
+- Header metadata promoted to typed columns plus a key/value header store.
+- Consensus peak tables (per-file and global) for quick lookup prioritisation.
+These outputs can be queried directly with DuckDB or loaded into downstream
+tools (including the GUI) without requiring the main application runtime.
 ### Timeout enforcement
 Peak fit and file-level timeout controls take different paths depending on
 platform support. On POSIX platforms with `SIGALRM`, the indexer arms an alarm
