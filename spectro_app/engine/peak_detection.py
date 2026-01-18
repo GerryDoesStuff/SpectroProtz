@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing
 import signal
 import sys
 import time
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 import numpy as np
 from scipy import sparse
@@ -95,6 +96,54 @@ class FitTimeoutError(TimeoutError):
     def __init__(self, seconds: float):
         self.seconds = seconds
         super().__init__(f"Fit timed out after {seconds:.1f}s")
+
+
+T = TypeVar("T")
+
+
+def _run_with_multiprocessing_timeout(
+    seconds: float,
+    operation: Callable[[], T],
+    timeout_error_factory: Callable[[], Exception],
+) -> T:
+    if not seconds or seconds <= 0:
+        return operation()
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+
+    def _worker(queue):  # type: ignore[no-untyped-def]
+        try:
+            result = operation()
+            queue.put(("result", result))
+        except Exception as exc:  # pragma: no cover - depends on runtime
+            queue.put(("error", exc))
+
+    proc = ctx.Process(target=_worker, args=(result_queue,), daemon=True)
+    proc.start()
+    proc.join(seconds)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise timeout_error_factory()
+    if result_queue.empty():
+        raise RuntimeError("Timed operation exited without returning a result.")
+    status, payload = result_queue.get()
+    if status == "error":
+        raise payload
+    return payload
+
+
+def _run_with_fit_timeout(seconds: float, operation: Callable[[], T]) -> T:
+    if not seconds or seconds <= 0:
+        return operation()
+    if hasattr(signal, "SIGALRM"):
+        with _FitTimeoutGuard(seconds):
+            return operation()
+    return _run_with_multiprocessing_timeout(
+        seconds,
+        operation,
+        lambda: FitTimeoutError(seconds),
+    )
 
 
 class _FitTimeoutGuard:
@@ -739,15 +788,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 lorentzian,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, gamma, C = popt
         yfit = lorentzian(xs_sorted, *popt)
         fwhm = 2.0 * abs(gamma)
@@ -757,15 +808,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 voigt_profile,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, sigma, gamma, C = popt
         yfit = voigt_profile(xs_sorted, *popt)
         fwhm = 0.5346 * (2.0 * abs(gamma)) + math.sqrt(
@@ -777,15 +830,17 @@ def _fit_peak_single(
             [0.0, x0_min, step * 0.25, -np.inf],
             [np.inf, x0_max, np.inf, np.inf],
         )
-        with _FitTimeoutGuard(fit_timeout_sec):
-            popt, _ = curve_fit(
+        popt, _ = _run_with_fit_timeout(
+            fit_timeout_sec,
+            lambda: curve_fit(
                 gaussian,
                 xs_sorted,
                 ys_sorted,
                 p0=[A, x0, width_guess, C],
                 maxfev=maxfev,
                 bounds=bounds,
-            )
+            ),
+        )
         A, x0, sigma, C = popt
         yfit = gaussian(xs_sorted, *popt)
         fwhm = 2.3548 * abs(sigma)
@@ -867,15 +922,17 @@ def _fit_multi_peak(
         return total
 
     fit_fn = _sum_gaussian if model == "gaussian" else _sum_lorentzian if model == "lorentzian" else _sum_voigt
-    with _FitTimeoutGuard(fit_timeout_sec):
-        popt, _ = curve_fit(
+    popt, _ = _run_with_fit_timeout(
+        fit_timeout_sec,
+        lambda: curve_fit(
             fit_fn,
             xs_sorted,
             ys_sorted,
             p0=params,
             bounds=(lower, upper),
             maxfev=maxfev,
-        )
+        ),
+    )
     yfit = fit_fn(xs_sorted, *popt)
     r2 = 1 - np.sum((ys_sorted - yfit) ** 2) / (np.sum((ys_sorted - np.mean(ys_sorted)) ** 2) + 1e-12)
     results: List[Dict[str, float]] = []
