@@ -198,6 +198,32 @@ def test_peak_detection_roundtrip(qt_app):
         qt_app.processEvents()
 
 
+def test_interpolation_roundtrip(qt_app):
+    dock = RecipeEditorDock()
+    try:
+        dock.interpolation_enable.setChecked(True)
+        dock.interpolation_method.setCurrentIndex(0)
+        dock.interpolation_factor.setValue(10)
+        qt_app.processEvents()
+
+        dock._update_model_from_ui(force=True)
+        interpolation = dock.recipe.params.get("interpolation")
+        assert isinstance(interpolation, dict)
+        assert interpolation.get("enabled") is True
+        assert interpolation.get("method") == "akima"
+        assert interpolation.get("factor") == 10
+
+        recipe_dict = dock.recipe_dict()
+        dock.set_recipe(recipe_dict)
+        qt_app.processEvents()
+        assert dock.interpolation_enable.isChecked() is True
+        assert dock.interpolation_method.currentData() == "akima"
+        assert dock.interpolation_factor.value() == 10
+    finally:
+        dock.deleteLater()
+        qt_app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("checkbox_attr", "widget_attrs", "expect_enabled_when_checked"),
     [
