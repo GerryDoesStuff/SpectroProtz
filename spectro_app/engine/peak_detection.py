@@ -101,6 +101,16 @@ class FitTimeoutError(TimeoutError):
 T = TypeVar("T")
 
 
+def _multiprocessing_timeout_worker(  # type: ignore[no-untyped-def]
+    queue, operation: Callable[[], T]
+) -> None:
+    try:
+        result = operation()
+        queue.put(("result", result))
+    except Exception as exc:  # pragma: no cover - depends on runtime
+        queue.put(("error", exc))
+
+
 def _run_with_multiprocessing_timeout(
     seconds: float,
     operation: Callable[[], T],
@@ -110,16 +120,19 @@ def _run_with_multiprocessing_timeout(
         return operation()
     ctx = multiprocessing.get_context("spawn")
     result_queue = ctx.Queue(maxsize=1)
-
-    def _worker(queue):  # type: ignore[no-untyped-def]
-        try:
-            result = operation()
-            queue.put(("result", result))
-        except Exception as exc:  # pragma: no cover - depends on runtime
-            queue.put(("error", exc))
-
-    proc = ctx.Process(target=_worker, args=(result_queue,), daemon=True)
-    proc.start()
+    try:
+        proc = ctx.Process(
+            target=_multiprocessing_timeout_worker,
+            args=(result_queue, operation),
+            daemon=True,
+        )
+        proc.start()
+    except Exception as exc:
+        logger.warning(
+            "Multiprocessing timeout guard unavailable (%s); running operation without timeout.",
+            exc,
+        )
+        return operation()
     proc.join(seconds)
     if proc.is_alive():
         proc.terminate()

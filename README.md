@@ -73,10 +73,13 @@ platform support. On POSIX platforms with `SIGALRM`, the indexer arms an alarm
 inside the current process so the guard remains low-overhead while still
 raising the same timeout error types that callers expect. When `SIGALRM` is not
 available (notably Windows), the indexer and shared peak-detection helpers
-start the guarded operation in a separate process, enforce the wall-clock limit
-via `join(timeout)`, and terminate the child if it exceeds the budget. This
-multiprocessing fallback preserves the same timeout semantics but adds process
-startup overhead, so throughput can dip when many short fits are executed.
+attempt to start the guarded operation in a separate process, enforce the
+wall-clock limit via `join(timeout)`, and terminate the child if it exceeds the
+budget. If the operation cannot be pickled for multiprocessing (for example, a
+lambda or nested function), the guard logs a warning and runs the operation in
+process without a timeout. The multiprocessing fallback preserves timeout
+semantics when it can be used but adds process startup overhead, so throughput
+can dip when many short fits are executed.
 
 ## Prerequisites
 Ensure your environment matches the expectations declared in
