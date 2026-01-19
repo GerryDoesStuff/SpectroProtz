@@ -49,7 +49,8 @@ and a normalisation pass that scales the working spectrum by its maximum
 absolute value to stabilise fitting. After normalisation, every spectrum is
 upsampled with Akima interpolation (8×) so peak detection and fitting operate
 on a denser, smoothly interpolated grid while retaining the original points in
-order (via the shared interpolation helpers in the processing core). The
+order (using the indexer’s embedded interpolation helper so the script stays
+standalone). The
 indexer separately computes raw
 absorbance metrics for storage after converting the original JCAMP Y-units into
 absorbance (for %T or fractional transmittance, `A = -log10(T)`). The persisted
